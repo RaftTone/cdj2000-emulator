@@ -466,6 +466,79 @@ class StatusPrefix:
         return bytes(out)
 
 
+@dataclass
+class DropSpec:
+    """Drop the ``nth`` (1-based) 896-byte MAIN->GUI part whose command halfword
+    equals ``cmd``, once -- to exercise WP4 row 6 (recovery after a lost part)."""
+    cmd: int
+    nth: int
+    seen: int = 0
+    dropped: bool = False
+
+
+class DropFilter:
+    """Reassemble CDJL frames on the MAIN->GUI stream and drop matching parts.
+
+    Test-harness fault injection only: it discards a stream part so the GUI's
+    typed re-poll and MAIN's stock resend path can be observed.  Nothing else on
+    the link is altered; 64-byte status records always pass through.
+    """
+
+    PART_BYTES = 896
+
+    def __init__(self, specs: list[DropSpec]):
+        self.specs = specs
+        self.pending = b""
+
+    @classmethod
+    def parse(cls, raw: list[str]) -> "DropFilter":
+        specs = []
+        for spec in raw:
+            cmd_s, _, nth_s = spec.partition(":")
+            if not nth_s:
+                raise ValueError(f"--drop-part wants CMD:N, got {spec!r}")
+            specs.append(DropSpec(cmd=int(cmd_s, 0), nth=int(nth_s, 0)))
+        return cls(specs)
+
+    def feed(self, data: bytes) -> bytes:
+        buffer = self.pending + data
+        out = bytearray()
+        while buffer:
+            if not buffer.startswith(RECORD_MAGIC):
+                # a partial magic at the tail: wait for the rest, don't resync
+                if len(buffer) < len(RECORD_MAGIC) and RECORD_MAGIC.startswith(buffer):
+                    break
+                out.append(buffer[0])
+                buffer = buffer[1:]
+                continue
+            if len(buffer) < 8:
+                break
+            length = struct.unpack_from("<I", buffer, 4)[0]
+            if len(buffer) < 8 + length:
+                break
+            body = buffer[8:8 + length]
+            frame = buffer[:8 + length]
+            buffer = buffer[8 + length:]
+            drop = False
+            if length == self.PART_BYTES and len(body) >= 2:
+                cmd = struct.unpack_from("<H", body, 0)[0]
+                for s in self.specs:
+                    if s.cmd == cmd:
+                        s.seen += 1
+                        hit = (s.seen == s.nth and not s.dropped)
+                        print("proxy: part cmd=0x%02x len=%d n=%d%s"
+                              % (cmd, length, s.seen, " -> DROP" if hit else ""),
+                              flush=True)
+                        if hit:
+                            s.dropped = True
+                            drop = True
+                        break
+            if not drop:
+                out += frame
+        self.pending = buffer
+        return bytes(out)
+
+
 def build_request(request_type: int, cursor: int, words: tuple[int, ...] = ()) -> bytes:
     """A 48-byte GUI request: word 1 = 0x8000 | type, word 2 = cursor, words 3.. as given."""
 
@@ -534,7 +607,8 @@ def accept_until(stream: socket.socket, deadline: float) -> socket.socket:
 def run_proxy(listen_host: str, listen_port: int, main_host: str, main_port: int,
               injections: list[Injection], timeout: float,
               request_dump: Path | None = None,
-              prefix: StatusPrefix | None = None) -> int:
+              prefix: StatusPrefix | None = None,
+              drop: "DropFilter | None" = None) -> int:
     request_listener = listener(listen_host, listen_port)
     record_listener = listener(listen_host, listen_port + 2)
     streams: list[socket.socket] = [request_listener, record_listener]
@@ -599,6 +673,10 @@ def run_proxy(listen_host: str, listen_port: int, main_host: str, main_port: int
                 if prefix is not None and name == "main-record":
                     prefix.advance(elapsed)
                     data = prefix.feed(data)
+                    if not data:
+                        continue
+                if drop is not None and name == "main-record":
+                    data = drop.feed(data)
                     if not data:
                         continue
                 if prefix is not None and prefix.markers is not None and name == "gui-request":
@@ -674,6 +752,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="write the NXS beat bitfields into status record words 1 and 2 "
                              "(see the module docstring); repeatable with @SECONDS for a "
                              "sequence of variants")
+    parser.add_argument("--drop-part", action="append", default=[], metavar="CMD:N",
+                        help="drop the N-th (1-based) 896-byte MAIN->GUI part whose command "
+                             "halfword is CMD (e.g. 0x20:2), once -- WP4 row 6 fault injection; "
+                             "repeatable")
     args = parser.parse_args(argv)
     try:
         injections = [parse_injection(spec) for spec in args.inject]
@@ -694,8 +776,9 @@ def main(argv: list[str] | None = None) -> int:
                 if len(spec) > 1:
                     prefix.markers.waveform_fields = (int(spec[1], 0),
                                                       int(spec[2], 0) if len(spec) > 2 else 0)
+        drop = DropFilter.parse(args.drop_part) if args.drop_part else None
         return run_proxy(args.listen_host, args.listen_port, args.main_host, args.main_port,
-                         injections, args.timeout, args.request_dump, prefix)
+                         injections, args.timeout, args.request_dump, prefix, drop)
     except (OSError, TimeoutError, ValueError) as exc:
         print(f"link_inject: {exc}", file=sys.stderr)
         return 2
