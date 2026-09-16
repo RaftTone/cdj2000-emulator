@@ -21,9 +21,66 @@ static bool valid_operating_point(const CdjC6747Pll *s)
     unsigned n = ratio(s->config[3]), m = s->config[2] + 1;
     /* Board square-wave input; datasheet PLLREF 12..50 MHz, M=4..32,
      * PLLOUT 300..600 MHz. The custom chip's core speed grade is separate. */
-    return 16934400u >= 12000000u * n && 16934400u <= 50000000u * n &&
-           m >= 4 && m <= 32 && 16934400ull * m >= 300000000ull * n &&
-           16934400ull * m <= 600000000ull * n;
+    return CDJ_C6747_OSCIN_HZ >= 12000000u * n &&
+           CDJ_C6747_OSCIN_HZ <= 50000000u * n &&
+           m >= 4 && m <= 32 &&
+           (uint64_t)CDJ_C6747_OSCIN_HZ * m >= 300000000ull * n &&
+           (uint64_t)CDJ_C6747_OSCIN_HZ * m <= 600000000ull * n;
+}
+/* AUXCLK is the PLL bypass clock, i.e. OSCIN itself, with no PREDIV, PLLM,
+ * POSTDIV or PLLDIVn in its path. SPRUH91D Table 7-1 printed page 118 (PDF
+ * page 118) gives AUXCLK's ratio as "PLL Bypass Clock" and names its
+ * consumers - McASP serial clock, Timers, I2C0, RTC, USB2.0; Table 6-2
+ * printed page 104 (PDF page 104) repeats it; section 6.2 printed page 105
+ * (PDF page 105) defines the bypass clock as "the reference clock supplied
+ * on OSCIN"; Figure 7-1 printed page 117 (PDF page 117) shows AUXCLK
+ * branching off ahead of the PLLEN bypass mux and the PLLDIV blocks.
+ * NOT modelled: gating by CKEN.AUXEN (SPRUH91D 7.4.20 printed page 135,
+ * status in CKSTAT 7.4.21 printed page 136). CKEN is outside this model's
+ * register window, so a write to 0x01c11148 already fails closed and the
+ * only state this can report is CKEN's reset value, AUXEN = 1. */
+uint32_t cdj_c6747_pll_auxclk_hz(void)
+{
+    return CDJ_C6747_OSCIN_HZ;
+}
+static bool enabled_ratio(uint32_t reg, uint32_t *value)
+{
+    /* Divider Value = RATIO + 1 (SPRUH91D Tables 7-8 and 7-9, printed pages
+     * 125 and 126; POSTDIV Table 7-17, printed page 131). A clear enable bit
+     * is "Disable", and SPRUH91D Table 7-24 printed page 137 ties SYSTAT's
+     * SYSnON status to the DnEN default - so disabled means the clock is off.
+     * No page gives a frequency for a disabled divider, so refuse rather
+     * than assume divide-by-one. */
+    if (!(reg & 0x8000u)) return false;
+    *value = (reg & 31u) + 1u;
+    return true;
+}
+bool cdj_c6747_pll_sysclk_hz(const CdjC6747Pll *s, unsigned n,
+                            uint64_t *numerator, uint32_t *denominator)
+{
+    uint32_t sysdiv, prediv, postdiv;
+    if (!s || !numerator || !denominator || n < 1 || n > 7) return false;
+    if (!enabled_ratio(s->active_dividers[n - 1], &sysdiv)) return false;
+    if (!(s->config[0] & 1)) {
+        /* Bypass: "the reference clock supplied on OSCIN passes directly to
+         * the system of PLLDIV blocks" (SPRUH91D 6.2, printed page 105), so
+         * neither PREDIV nor POSTDIV is in the path. */
+        *numerator = CDJ_C6747_OSCIN_HZ;
+        *denominator = sysdiv;
+        return true;
+    }
+    /* PLL mode, SPRUH91D Figure 7-1 printed page 117:
+     *   SYSCLKn = OSCIN / PREDIV x (PLLM + 1) / POSTDIV / PLLDIVn.
+     * The multiplier is PLLM + 1: section 7.2 printed page 116 reads the 13h
+     * reset value as a 20x multiplier. PLLEN alone distinguishes PLL from
+     * bypass here because the write path accepts PLLEN only with
+     * PLLENSRC = 0, PLLPWRDN = 0 and PLLRST released (Table 7-5, printed
+     * page 123). */
+    if (!enabled_ratio(s->config[3], &prediv) ||
+        !enabled_ratio(s->config[8], &postdiv)) return false;
+    *numerator = (uint64_t)CDJ_C6747_OSCIN_HZ * (s->config[2] + 1u);
+    *denominator = prediv * postdiv * sysdiv;
+    return true;
 }
 static int index_of(uint32_t address)
 {

@@ -2,6 +2,7 @@
 #ifndef CDJ_C6747_EMIFB_H
 #define CDJ_C6747_EMIFB_H
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #define CDJ_C6747_EMIFB_BASE 0xb0000000u
@@ -29,4 +30,10 @@ bool cdj_c6747_emifb_read(const CdjC6747Emifb *s, uint32_t address,
 bool cdj_c6747_emifb_write(CdjC6747Emifb *s, uint32_t address,
                            uint64_t value, unsigned size, bool commit);
 bool cdj_c6747_emifb_sdram_enabled(const CdjC6747Emifb *s);
+/* Translate one contiguous transfer through the EMIFB aperture to populated
+ * power-of-two SDRAM. Alignment is the requesting master's responsibility.
+ * Transfers crossing the physical wrap boundary require splitting by caller. */
+bool cdj_c6747_emifb_sdram_offset(const CdjC6747Emifb *s, uint32_t address,
+                                 size_t size, size_t populated_size,
+                                 uint32_t *offset);
 #endif

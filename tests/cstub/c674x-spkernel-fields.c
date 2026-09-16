@@ -72,6 +72,35 @@ static bool decode_schedule(CdjC674x *cpu, unsigned ii, unsigned field,
     return ok;
 }
 
+/* The field decode is checked against an independently constructed full-width
+ * SPKERNEL, which is a real oracle. The schedule arithmetic below is derived
+ * from the manual rather than from this core's output:
+ *
+ *   expected (program memory fetch re-enable) - 7.9.4, printed page 686:
+ *     "delay = (fstg * ii) + fcyc", and fetch waits until "The draining
+ *     counter has reached the delay value specified by fstg and fcyc".
+ *     7.7.3.5 (printed page 679) starts the draining counter at 0 "on the
+ *     cycle after the loop termination condition is true", which for an
+ *     unconditional SPLOOP of ILC iterations is after the last iteration is
+ *     launched, at cycle iterations * ii. Hence
+ *     iterations * ii + stage * ii + cycle.
+ *   loading_end clamp - 7.9.5, printed page 686: when SPKERNEL is not on a
+ *     stage boundary "the loop buffer executes until the last loading stage
+ *     boundary ... and program memory fetch remains disabled", so fetch
+ *     cannot resume before ceil(dynlen / ii) * ii.
+ *   drain clamp - 7.9.4's last paragraph, printed page 686: "If the loop
+ *     buffer goes to idle (for example, if the epilog is smaller than the
+ *     specified delay ...), program memory fetch is enabled and the fetch
+ *     enable delay is ignored".
+ *   drain (loop idle) - 7.7.3 and 7.7.3.4 (printed pages 678-679) put the
+ *     operation at loading offset n on cycles congruent to n modulo ii, so
+ *     the last iteration's last offset issues at (iterations - 1) * ii +
+ *     dynlen - 1, and by 7.7.3.2 (printed page 678) the buffer is idle once
+ *     it "is finished draining", one cycle later.
+ *
+ * Residual limitation, stated rather than hidden: the same misreading of page
+ * 686 in both the test and cdj_c674x_loop_load would still pass. No cycle
+ * oracle exists for this core (DSP_ARCHITECTURE_COVERAGE.md section 7). */
 static void compare_field(unsigned ii, unsigned field)
 {
     CdjC674x full, compact;

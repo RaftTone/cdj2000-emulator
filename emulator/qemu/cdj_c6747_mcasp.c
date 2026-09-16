@@ -12,6 +12,12 @@ static bool locate(uint32_t address, unsigned *bank, unsigned *offset)
     *offset = (address - 0x01d00000u) % 0x4000;
     return true;
 }
+bool cdj_c6747_mcasp_control_write_mapped(uint32_t address, unsigned size)
+{
+    unsigned bank, offset;
+    return size == 4 && locate(address, &bank, &offset);
+}
+
 void cdj_c6747_mcasp_reset(CdjC6747Mcasp *s)
 {
     *s = (CdjC6747Mcasp){0};
@@ -247,6 +253,53 @@ static void write_gblctl(CdjC6747McaspControl *s, unsigned b,
     /* Releasing the state machine before every ready XBUF has been preloaded
      * has the documented underrun. */
     if ((rising & 0x800u) && s->xrdy[b]) s->xstat[b] |= 1u;
+}
+
+bool cdj_c6747_mcasp_tx_clock_hz(const CdjC6747McaspControl *s,
+                                unsigned instance, uint32_t auxclk_hz,
+                                unsigned tap, uint64_t *numerator,
+                                uint32_t *denominator)
+{
+    if (!s || instance >= 3 || !auxclk_hz || !numerator || !denominator ||
+        tap > CDJ_C6747_MCASP_AFSX)
+        return false;
+    unsigned b = instance;
+    /* HCLKXM = 0 sources AHCLKX from the AHCLKX pin (AHCLKXCTL bit 15,
+     * SPRUH91D Table 24-38 printed page 1078); a pin frequency is a board
+     * fact outside these manuals. */
+    if (!(s->ahclkxctl[b] & 0x8000u)) return false;
+    uint32_t den = (s->ahclkxctl[b] & 0xfffu) + 1u; /* HCLKXDIV + 1. */
+    if (tap == CDJ_C6747_MCASP_AHCLKX) {
+        *numerator = auxclk_hz;
+        *denominator = den;
+        return true;
+    }
+    /* CLKXM = 0 sources ACLKX from the ACLKX pin (ACLKXCTL bit 5, Table
+     * 24-37 printed page 1077). */
+    if (!(s->aclkxctl[b] & 0x20u)) return false;
+    den *= (s->aclkxctl[b] & 0x1fu) + 1u; /* CLKXDIV + 1. */
+    if (tap == CDJ_C6747_MCASP_ACLKX) {
+        *numerator = auxclk_hz;
+        *denominator = den;
+        return true;
+    }
+    /* AFSX is pinned only for an internally generated TDM frame sync. DITEN
+     * selects the 384-subframe DIT frame instead (DITCTL bit 0), FSXM = 0
+     * takes AFSX from the pin and XMOD = 0 is burst mode, whose frame comes
+     * from a separately timed source (AFSXCTL, Table 24-36 printed page
+     * 1076). */
+    if (s->ditctl[b] & 1u) return false;
+    if (!(s->afsxctl[b] & 2u)) return false;
+    uint32_t slots = s->afsxctl[b] >> 7;
+    if (slots < 2 || slots > 0x20u) return false;
+    /* XSSZ's legal encodings 3h, 5h, ... Fh are slot sizes 8, 12, ... 32
+     * bits, that is 2 x (XSSZ + 1) (XFMT, Table 24-35 printed page 1075). */
+    unsigned slot_size = (s->xfmt[b] >> 4) & 15u;
+    if (slot_size < 3 || !(slot_size & 1u)) return false;
+    den *= slots * 2u * (slot_size + 1u);
+    *numerator = auxclk_hz;
+    *denominator = den;
+    return true;
 }
 
 bool cdj_c6747_mcasp_tx_slot(CdjC6747McaspControl *s, unsigned instance,

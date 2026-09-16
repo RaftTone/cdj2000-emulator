@@ -802,6 +802,24 @@ static void cdj_usbh_detach(USBPort *port)
 
 static void cdj_usbh_wakeup(USBPort *port)
 {
+    CdjUsbhState *s = port->opaque;
+
+    /*
+     * In host mode RWUPE controls whether a downstream device's resume
+     * signal is observed.  The SH7764 reports an accepted bus-state change
+     * through BCHG; the firmware then finishes the resume sequence by
+     * clearing/rewriting DVSTCTR.  QEMU calls this hook only after the USB
+     * device has requested remote wakeup, so no synthetic packet is needed.
+     */
+    if (!s->attached || !(rd(s, R_DVSTCTR) & DVSTCTR_RWUPE)) {
+        cdj_usbh_trace(s, "remote wakeup ignored (attached=%d RWUPE=%d)",
+                       s->attached, !!(rd(s, R_DVSTCTR) & DVSTCTR_RWUPE));
+        return;
+    }
+
+    cdj_usbh_trace(s, "remote wakeup accepted");
+    cdj_usbh_raise1(s, INTSTS1_BCHG);
+    cdj_usbh_kick(s, KICK_NS);
 }
 
 static void cdj_usbh_async_complete(USBPort *port, USBPacket *packet)

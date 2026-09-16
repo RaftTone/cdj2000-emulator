@@ -1,0 +1,4876 @@
+{
+  "caveats": [
+    "A row is an instruction name, not an encoding or a semantic variant.",
+    "Table A-1's compact-form footnote sits in the C64x+ column; compact C674x encodings must be confirmed against the Appendix C-H 16-bit maps.",
+    "Instructions with no Table B-1 unit execute on no .L/.M/.S/.D unit (for example NOP and IDLE); see Appendix H.",
+    "Pseudo-operations and assembler aliases documented outside Table A-1 are not included."
+  ],
+  "counts": {
+    "c674x_instruction_rows": 240,
+    "distinct_base_mnemonics": 227,
+    "rows_with_compact_footnote": 41,
+    "rows_without_description_page": 0,
+    "rows_without_unit": 13,
+    "table_a1_rows": 240,
+    "unparsed_checkmark_lines": 0
+  },
+  "instructions": {
+    "ABS": {
+      "base_mnemonic": "ABS",
+      "compact_form_footnote": false,
+      "description_pages": [
+        101,
+        102
+      ],
+      "description_title": "Absolute Value With Saturation",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".L"
+      ]
+    },
+    "ABS2": {
+      "base_mnemonic": "ABS2",
+      "compact_form_footnote": false,
+      "description_pages": [
+        103,
+        104
+      ],
+      "description_title": "Absolute Value With Saturation, Signed, Packed 16-Bit",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".L"
+      ]
+    },
+    "ABSDP": {
+      "base_mnemonic": "ABSDP",
+      "compact_form_footnote": false,
+      "description_pages": [
+        105,
+        106
+      ],
+      "description_title": "Absolute Value, Double-Precision Floating-Point",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": false,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "ABSSP": {
+      "base_mnemonic": "ABSSP",
+      "compact_form_footnote": false,
+      "description_pages": [
+        107,
+        108
+      ],
+      "description_title": "Absolute Value, Single-Precision Floating-Point",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": false,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "ADD": {
+      "base_mnemonic": "ADD",
+      "compact_form_footnote": true,
+      "description_pages": [
+        109,
+        113
+      ],
+      "description_title": "Add Two Signed Integers Without Saturation",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".L",
+        ".S",
+        ".D"
+      ]
+    },
+    "ADD2": {
+      "base_mnemonic": "ADD2",
+      "compact_form_footnote": false,
+      "description_pages": [
+        137,
+        139
+      ],
+      "description_title": "Add Two 16-Bit Integers on Upper and Lower Register Halves",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".L",
+        ".S",
+        ".D"
+      ]
+    },
+    "ADD4": {
+      "base_mnemonic": "ADD4",
+      "compact_form_footnote": false,
+      "description_pages": [
+        140,
+        141
+      ],
+      "description_title": "Add Without Saturation, Four 8-Bit Pairs for Four 8-Bit Results",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".L"
+      ]
+    },
+    "ADDAB": {
+      "base_mnemonic": "ADDAB",
+      "compact_form_footnote": false,
+      "description_pages": [
+        114,
+        116
+      ],
+      "description_title": "Add Using Byte Addressing Mode",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".D"
+      ]
+    },
+    "ADDAD": {
+      "base_mnemonic": "ADDAD",
+      "compact_form_footnote": false,
+      "description_pages": [
+        117,
+        118
+      ],
+      "description_title": "Add Using Doubleword Addressing Mode",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".D"
+      ]
+    },
+    "ADDAH": {
+      "base_mnemonic": "ADDAH",
+      "compact_form_footnote": false,
+      "description_pages": [
+        119,
+        121
+      ],
+      "description_title": "Add Using Halfword Addressing Mode",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".D"
+      ]
+    },
+    "ADDAW": {
+      "base_mnemonic": "ADDAW",
+      "compact_form_footnote": true,
+      "description_pages": [
+        122,
+        124
+      ],
+      "description_title": "Add Using Word Addressing Mode",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".D"
+      ]
+    },
+    "ADDDP": {
+      "base_mnemonic": "ADDDP",
+      "compact_form_footnote": false,
+      "description_pages": [
+        125,
+        126
+      ],
+      "description_title": "Add Two Double-Precision Floating-Point Values",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": false,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".L",
+        ".S"
+      ]
+    },
+    "ADDK": {
+      "base_mnemonic": "ADDK",
+      "compact_form_footnote": false,
+      "description_pages": [
+        127,
+        127
+      ],
+      "description_title": "Add Signed 16-Bit Constant to Register",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "ADDKPC": {
+      "base_mnemonic": "ADDKPC",
+      "compact_form_footnote": false,
+      "description_pages": [
+        128,
+        129
+      ],
+      "description_title": "Add Signed 7-Bit Constant to Program Counter",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "ADDSP": {
+      "base_mnemonic": "ADDSP",
+      "compact_form_footnote": false,
+      "description_pages": [
+        130,
+        131
+      ],
+      "description_title": "Add Two Single-Precision Floating-Point Values",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": false,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".L",
+        ".S"
+      ]
+    },
+    "ADDSUB": {
+      "base_mnemonic": "ADDSUB",
+      "compact_form_footnote": false,
+      "description_pages": [
+        132,
+        132
+      ],
+      "description_title": "Parallel ADD and SUB Operations On Common Inputs",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".L"
+      ]
+    },
+    "ADDSUB2": {
+      "base_mnemonic": "ADDSUB2",
+      "compact_form_footnote": false,
+      "description_pages": [
+        133,
+        134
+      ],
+      "description_title": "Parallel ADD2 and SUB2 Operations On Common Inputs",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".L"
+      ]
+    },
+    "ADDU": {
+      "base_mnemonic": "ADDU",
+      "compact_form_footnote": false,
+      "description_pages": [
+        135,
+        136
+      ],
+      "description_title": "Add Two Unsigned Integers Without Saturation",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".L"
+      ]
+    },
+    "AND": {
+      "base_mnemonic": "AND",
+      "compact_form_footnote": true,
+      "description_pages": [
+        142,
+        144
+      ],
+      "description_title": "Bitwise AND",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".L",
+        ".S",
+        ".D"
+      ]
+    },
+    "ANDN": {
+      "base_mnemonic": "ANDN",
+      "compact_form_footnote": false,
+      "description_pages": [
+        145,
+        146
+      ],
+      "description_title": "Bitwise AND Invert",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".L",
+        ".S",
+        ".D"
+      ]
+    },
+    "AVG2": {
+      "base_mnemonic": "AVG2",
+      "compact_form_footnote": false,
+      "description_pages": [
+        147,
+        148
+      ],
+      "description_title": "Average, Signed, Packed 16-Bit",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "AVGU4": {
+      "base_mnemonic": "AVGU4",
+      "compact_form_footnote": false,
+      "description_pages": [
+        149,
+        150
+      ],
+      "description_title": "Average, Unsigned, Packed 8-Bit",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "B IRP": {
+      "base_mnemonic": "B",
+      "compact_form_footnote": false,
+      "description_pages": [
+        155,
+        156
+      ],
+      "description_title": "Branch Using an Interrupt Return Pointer",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "B NRP": {
+      "base_mnemonic": "B",
+      "compact_form_footnote": false,
+      "description_pages": [
+        157,
+        158
+      ],
+      "description_title": "Branch Using NMI Return Pointer",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "B displacement": {
+      "base_mnemonic": "B",
+      "compact_form_footnote": false,
+      "description_pages": [
+        151,
+        152
+      ],
+      "description_title": "Branch Using a Displacement",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "B register": {
+      "base_mnemonic": "B",
+      "compact_form_footnote": false,
+      "description_pages": [
+        153,
+        154
+      ],
+      "description_title": "Branch Using a Register",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "BDEC": {
+      "base_mnemonic": "BDEC",
+      "compact_form_footnote": false,
+      "description_pages": [
+        159,
+        160
+      ],
+      "description_title": "Branch and Decrement",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "BITC4": {
+      "base_mnemonic": "BITC4",
+      "compact_form_footnote": false,
+      "description_pages": [
+        161,
+        162
+      ],
+      "description_title": "Bit Count, Packed 8-Bit",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "BITR": {
+      "base_mnemonic": "BITR",
+      "compact_form_footnote": false,
+      "description_pages": [
+        163,
+        164
+      ],
+      "description_title": "Bit Reverse",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "BNOP displacement": {
+      "base_mnemonic": "BNOP",
+      "compact_form_footnote": true,
+      "description_pages": [
+        165,
+        167
+      ],
+      "description_title": "Branch Using a Displacement With NOP",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "BNOP register": {
+      "base_mnemonic": "BNOP",
+      "compact_form_footnote": false,
+      "description_pages": [
+        168,
+        169
+      ],
+      "description_title": "Branch Using a Register With NOP",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "BPOS": {
+      "base_mnemonic": "BPOS",
+      "compact_form_footnote": false,
+      "description_pages": [
+        170,
+        171
+      ],
+      "description_title": "Branch Positive",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "CALLP": {
+      "base_mnemonic": "CALLP",
+      "compact_form_footnote": true,
+      "description_pages": [
+        172,
+        173
+      ],
+      "description_title": "Call Using a Displacement",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "CLR": {
+      "base_mnemonic": "CLR",
+      "compact_form_footnote": false,
+      "description_pages": [
+        174,
+        176
+      ],
+      "description_title": "Clear a Bit Field",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "CMPEQ": {
+      "base_mnemonic": "CMPEQ",
+      "compact_form_footnote": true,
+      "description_pages": [
+        177,
+        178
+      ],
+      "description_title": "Compare for Equality, Signed Integer",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".L"
+      ]
+    },
+    "CMPEQ2": {
+      "base_mnemonic": "CMPEQ2",
+      "compact_form_footnote": false,
+      "description_pages": [
+        179,
+        180
+      ],
+      "description_title": "Compare for Equality, Packed 16-Bit",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "CMPEQ4": {
+      "base_mnemonic": "CMPEQ4",
+      "compact_form_footnote": false,
+      "description_pages": [
+        181,
+        183
+      ],
+      "description_title": "Compare for Equality, Packed 8-Bit",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "CMPEQDP": {
+      "base_mnemonic": "CMPEQDP",
+      "compact_form_footnote": false,
+      "description_pages": [
+        184,
+        185
+      ],
+      "description_title": "Compare for Equality, Double-Precision Floating-Point Values",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": false,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "CMPEQSP": {
+      "base_mnemonic": "CMPEQSP",
+      "compact_form_footnote": false,
+      "description_pages": [
+        186,
+        187
+      ],
+      "description_title": "Compare for Equality, Single-Precision Floating-Point Values",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": false,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "CMPGT": {
+      "base_mnemonic": "CMPGT",
+      "compact_form_footnote": true,
+      "description_pages": [
+        188,
+        190
+      ],
+      "description_title": "Compare for Greater Than, Signed Integers",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".L"
+      ]
+    },
+    "CMPGT2": {
+      "base_mnemonic": "CMPGT2",
+      "compact_form_footnote": false,
+      "description_pages": [
+        191,
+        192
+      ],
+      "description_title": "Compare for Greater Than, Packed 16-Bit",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "CMPGTDP": {
+      "base_mnemonic": "CMPGTDP",
+      "compact_form_footnote": false,
+      "description_pages": [
+        193,
+        194
+      ],
+      "description_title": "Compare for Greater Than, Double-Precision Floating-Point Values",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": false,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "CMPGTSP": {
+      "base_mnemonic": "CMPGTSP",
+      "compact_form_footnote": false,
+      "description_pages": [
+        195,
+        196
+      ],
+      "description_title": "Compare for Greater Than, Single-Precision Floating-Point Values",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": false,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "CMPGTU": {
+      "base_mnemonic": "CMPGTU",
+      "compact_form_footnote": true,
+      "description_pages": [
+        197,
+        198
+      ],
+      "description_title": "Compare for Greater Than, Unsigned Integers",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".L"
+      ]
+    },
+    "CMPGTU4": {
+      "base_mnemonic": "CMPGTU4",
+      "compact_form_footnote": false,
+      "description_pages": [
+        199,
+        201
+      ],
+      "description_title": "Compare for Greater Than, Unsigned, Packed 8-Bit",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "CMPLT": {
+      "base_mnemonic": "CMPLT",
+      "compact_form_footnote": false,
+      "description_pages": [
+        202,
+        204
+      ],
+      "description_title": "Compare for Less Than, Signed Integers",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".L"
+      ]
+    },
+    "CMPLT2": {
+      "base_mnemonic": "CMPLT2",
+      "compact_form_footnote": false,
+      "description_pages": [
+        205,
+        206
+      ],
+      "description_title": "Compare for Less Than, Packed 16-Bit",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "CMPLTDP": {
+      "base_mnemonic": "CMPLTDP",
+      "compact_form_footnote": false,
+      "description_pages": [
+        207,
+        208
+      ],
+      "description_title": "Compare for Less Than, Double-Precision Floating-Point Values",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": false,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "CMPLTSP": {
+      "base_mnemonic": "CMPLTSP",
+      "compact_form_footnote": false,
+      "description_pages": [
+        209,
+        210
+      ],
+      "description_title": "Compare for Less Than, Single-Precision Floating-Point Values",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": false,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "CMPLTU": {
+      "base_mnemonic": "CMPLTU",
+      "compact_form_footnote": true,
+      "description_pages": [
+        211,
+        212
+      ],
+      "description_title": "Compare for Less Than, Unsigned Integers",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".L"
+      ]
+    },
+    "CMPLTU4": {
+      "base_mnemonic": "CMPLTU4",
+      "compact_form_footnote": false,
+      "description_pages": [
+        213,
+        214
+      ],
+      "description_title": "Compare for Less Than, Unsigned, Packed 8-Bit",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "CMPY": {
+      "base_mnemonic": "CMPY",
+      "compact_form_footnote": false,
+      "description_pages": [
+        215,
+        216
+      ],
+      "description_title": "Complex Multiply Two Pairs, Signed, Packed 16-Bit",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "CMPYR": {
+      "base_mnemonic": "CMPYR",
+      "compact_form_footnote": false,
+      "description_pages": [
+        217,
+        218
+      ],
+      "description_title": "Complex Multiply Two Pairs, Signed, Packed 16-Bit With Rounding",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "CMPYR1": {
+      "base_mnemonic": "CMPYR1",
+      "compact_form_footnote": false,
+      "description_pages": [
+        219,
+        220
+      ],
+      "description_title": "Complex Multiply Two Pairs, Signed, Packed 16-Bit With Rounding",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "DDOTP4": {
+      "base_mnemonic": "DDOTP4",
+      "compact_form_footnote": false,
+      "description_pages": [
+        221,
+        222
+      ],
+      "description_title": "Double Dot Product, Signed, Packed 16-Bit and Signed, Packed 8-Bit",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "DDOTPH2": {
+      "base_mnemonic": "DDOTPH2",
+      "compact_form_footnote": false,
+      "description_pages": [
+        223,
+        224
+      ],
+      "description_title": "Double Dot Product, Two Pairs, Signed, Packed 16-Bit",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "DDOTPH2R": {
+      "base_mnemonic": "DDOTPH2R",
+      "compact_form_footnote": false,
+      "description_pages": [
+        225,
+        226
+      ],
+      "description_title": "Double Dot Product With Rounding, Two Pairs, Signed, Packed 16-Bit",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "DDOTPL2": {
+      "base_mnemonic": "DDOTPL2",
+      "compact_form_footnote": false,
+      "description_pages": [
+        227,
+        228
+      ],
+      "description_title": "Double Dot Product, Two Pairs, Signed, Packed 16-Bit",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "DDOTPL2R": {
+      "base_mnemonic": "DDOTPL2R",
+      "compact_form_footnote": false,
+      "description_pages": [
+        229,
+        230
+      ],
+      "description_title": "Double Dot Product With Rounding, Two Pairs, Signed Packed 16-Bit",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "DEAL": {
+      "base_mnemonic": "DEAL",
+      "compact_form_footnote": false,
+      "description_pages": [
+        231,
+        232
+      ],
+      "description_title": "Deinterleave and Pack",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "DINT": {
+      "base_mnemonic": "DINT",
+      "compact_form_footnote": false,
+      "description_pages": [
+        233,
+        233
+      ],
+      "description_title": "Disable Interrupts and Save Previous Enable State",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": []
+    },
+    "DMV": {
+      "base_mnemonic": "DMV",
+      "compact_form_footnote": false,
+      "description_pages": [
+        234,
+        234
+      ],
+      "description_title": "Move Two Independent Registers to Register Pair",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "DOTP2": {
+      "base_mnemonic": "DOTP2",
+      "compact_form_footnote": false,
+      "description_pages": [
+        235,
+        237
+      ],
+      "description_title": "Dot Product, Signed, Packed 16-Bit",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "DOTPN2": {
+      "base_mnemonic": "DOTPN2",
+      "compact_form_footnote": false,
+      "description_pages": [
+        238,
+        239
+      ],
+      "description_title": "Dot Product With Negate, Signed, Packed 16-Bit",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "DOTPNRSU2": {
+      "base_mnemonic": "DOTPNRSU2",
+      "compact_form_footnote": false,
+      "description_pages": [
+        240,
+        241
+      ],
+      "description_title": "Dot Product With Negate, Shift and Round, Signed by Unsigned, Packed 16-Bit",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "DOTPNRUS2": {
+      "base_mnemonic": "DOTPNRUS2",
+      "compact_form_footnote": false,
+      "description_pages": [
+        242,
+        243
+      ],
+      "description_title": "Dot Product With Negate, Shift and Round, Unsigned by Signed, Packed 16-Bit",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "DOTPRSU2": {
+      "base_mnemonic": "DOTPRSU2",
+      "compact_form_footnote": false,
+      "description_pages": [
+        244,
+        246
+      ],
+      "description_title": "Dot Product With Shift and Round, Signed by Unsigned, Packed 16-Bit",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "DOTPRUS2": {
+      "base_mnemonic": "DOTPRUS2",
+      "compact_form_footnote": false,
+      "description_pages": [
+        247,
+        248
+      ],
+      "description_title": "Dot Product With Shift and Round, Unsigned by Signed, Packed 16-Bit",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "DOTPSU4": {
+      "base_mnemonic": "DOTPSU4",
+      "compact_form_footnote": false,
+      "description_pages": [
+        249,
+        250
+      ],
+      "description_title": "Dot Product, Signed by Unsigned, Packed 8-Bit",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "DOTPU4": {
+      "base_mnemonic": "DOTPU4",
+      "compact_form_footnote": false,
+      "description_pages": [
+        252,
+        253
+      ],
+      "description_title": "Dot Product, Unsigned, Packed 8-Bit",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "DOTPUS4": {
+      "base_mnemonic": "DOTPUS4",
+      "compact_form_footnote": false,
+      "description_pages": [
+        251,
+        251
+      ],
+      "description_title": "Dot Product, Unsigned by Signed, Packed 8-Bit",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "DPACK2": {
+      "base_mnemonic": "DPACK2",
+      "compact_form_footnote": false,
+      "description_pages": [
+        254,
+        255
+      ],
+      "description_title": "Parallel PACK2 and PACKH2 Operations",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".L"
+      ]
+    },
+    "DPACKX2": {
+      "base_mnemonic": "DPACKX2",
+      "compact_form_footnote": false,
+      "description_pages": [
+        256,
+        257
+      ],
+      "description_title": "Parallel PACKLH2 Operations",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".L"
+      ]
+    },
+    "DPINT": {
+      "base_mnemonic": "DPINT",
+      "compact_form_footnote": false,
+      "description_pages": [
+        258,
+        259
+      ],
+      "description_title": "Convert Double-Precision Floating-Point Value to Integer",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": false,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".L"
+      ]
+    },
+    "DPSP": {
+      "base_mnemonic": "DPSP",
+      "compact_form_footnote": false,
+      "description_pages": [
+        260,
+        261
+      ],
+      "description_title": "Convert Double-Precision Floating-Point Value to Single-Precision Floating-Point Value",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": false,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".L"
+      ]
+    },
+    "DPTRUNC": {
+      "base_mnemonic": "DPTRUNC",
+      "compact_form_footnote": false,
+      "description_pages": [
+        262,
+        263
+      ],
+      "description_title": "Convert Double-Precision Floating-Point Value to Integer With Truncation",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": false,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".L"
+      ]
+    },
+    "EXT": {
+      "base_mnemonic": "EXT",
+      "compact_form_footnote": true,
+      "description_pages": [
+        264,
+        266
+      ],
+      "description_title": "Extract and Sign-Extend a Bit Field",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "EXTU": {
+      "base_mnemonic": "EXTU",
+      "compact_form_footnote": true,
+      "description_pages": [
+        267,
+        269
+      ],
+      "description_title": "Extract and Zero-Extend a Bit Field",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "GMPY": {
+      "base_mnemonic": "GMPY",
+      "compact_form_footnote": false,
+      "description_pages": [
+        270,
+        271
+      ],
+      "description_title": "Galois Field Multiply",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "GMPY4": {
+      "base_mnemonic": "GMPY4",
+      "compact_form_footnote": false,
+      "description_pages": [
+        272,
+        273
+      ],
+      "description_title": "Galois Field Multiply, Packed 8-Bit",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "IDLE": {
+      "base_mnemonic": "IDLE",
+      "compact_form_footnote": false,
+      "description_pages": [
+        274,
+        274
+      ],
+      "description_title": "Multicycle NOP With No Termination Until Interrupt",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": []
+    },
+    "INTDP": {
+      "base_mnemonic": "INTDP",
+      "compact_form_footnote": false,
+      "description_pages": [
+        275,
+        275
+      ],
+      "description_title": "Convert Signed Integer to Double-Precision Floating-Point Value",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": false,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".L"
+      ]
+    },
+    "INTDPU": {
+      "base_mnemonic": "INTDPU",
+      "compact_form_footnote": false,
+      "description_pages": [
+        276,
+        276
+      ],
+      "description_title": "Convert Unsigned Integer to Double-Precision Floating-Point Value",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": false,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".L"
+      ]
+    },
+    "INTSP": {
+      "base_mnemonic": "INTSP",
+      "compact_form_footnote": false,
+      "description_pages": [
+        277,
+        277
+      ],
+      "description_title": "Convert Signed Integer to Single-Precision Floating-Point Value",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": false,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".L"
+      ]
+    },
+    "INTSPU": {
+      "base_mnemonic": "INTSPU",
+      "compact_form_footnote": false,
+      "description_pages": [
+        278,
+        278
+      ],
+      "description_title": "Convert Unsigned Integer to Single-Precision Floating-Point Value",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": false,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".L"
+      ]
+    },
+    "LDB": {
+      "base_mnemonic": "LDB",
+      "compact_form_footnote": true,
+      "description_pages": [
+        279,
+        281
+      ],
+      "description_title": "Load Byte From Memory With a 5-Bit Unsigned Constant Offset or Register Offset",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".D"
+      ]
+    },
+    "LDB (15-bit offset)": {
+      "base_mnemonic": "LDB",
+      "compact_form_footnote": true,
+      "description_pages": [
+        282,
+        283
+      ],
+      "description_title": "Load Byte From Memory With a 15-Bit Unsigned Constant Offset",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".D"
+      ]
+    },
+    "LDBU": {
+      "base_mnemonic": "LDBU",
+      "compact_form_footnote": false,
+      "description_pages": [
+        279,
+        281
+      ],
+      "description_title": "Load Byte From Memory With a 5-Bit Unsigned Constant Offset or Register Offset",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".D"
+      ]
+    },
+    "LDBU (15-bit offset)": {
+      "base_mnemonic": "LDBU",
+      "compact_form_footnote": false,
+      "description_pages": [
+        282,
+        283
+      ],
+      "description_title": "Load Byte From Memory With a 15-Bit Unsigned Constant Offset",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".D"
+      ]
+    },
+    "LDDW": {
+      "base_mnemonic": "LDDW",
+      "compact_form_footnote": true,
+      "description_pages": [
+        284,
+        287
+      ],
+      "description_title": "Load Doubleword From Memory With a 5-Bit Unsigned Constant Offset or Register Offset",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".D"
+      ]
+    },
+    "LDH": {
+      "base_mnemonic": "LDH",
+      "compact_form_footnote": true,
+      "description_pages": [
+        288,
+        289
+      ],
+      "description_title": "Load Halfword From Memory With a 5-Bit Unsigned Constant Offset or Register Offset",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".D"
+      ]
+    },
+    "LDH (15-bit offset)": {
+      "base_mnemonic": "LDH",
+      "compact_form_footnote": false,
+      "description_pages": [
+        290,
+        291
+      ],
+      "description_title": "Load Halfword From Memory With a 15-Bit Unsigned Constant Offset",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".D"
+      ]
+    },
+    "LDHU": {
+      "base_mnemonic": "LDHU",
+      "compact_form_footnote": true,
+      "description_pages": [
+        288,
+        289
+      ],
+      "description_title": "Load Halfword From Memory With a 5-Bit Unsigned Constant Offset or Register Offset",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".D"
+      ]
+    },
+    "LDHU (15-bit offset)": {
+      "base_mnemonic": "LDHU",
+      "compact_form_footnote": false,
+      "description_pages": [
+        290,
+        291
+      ],
+      "description_title": "Load Halfword From Memory With a 15-Bit Unsigned Constant Offset",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".D"
+      ]
+    },
+    "LDNDW": {
+      "base_mnemonic": "LDNDW",
+      "compact_form_footnote": false,
+      "description_pages": [
+        292,
+        295
+      ],
+      "description_title": "Load Nonaligned Doubleword From Memory With Constant or Register Offset",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".D"
+      ]
+    },
+    "LDNW": {
+      "base_mnemonic": "LDNW",
+      "compact_form_footnote": true,
+      "description_pages": [
+        296,
+        298
+      ],
+      "description_title": "Load Nonaligned Word From Memory With Constant or Register Offset",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".D"
+      ]
+    },
+    "LDW": {
+      "base_mnemonic": "LDW",
+      "compact_form_footnote": true,
+      "description_pages": [
+        299,
+        301
+      ],
+      "description_title": "Load Word From Memory With a 5-Bit Unsigned Constant Offset or Register Offset",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".D"
+      ]
+    },
+    "LDW (15-bit offset)": {
+      "base_mnemonic": "LDW",
+      "compact_form_footnote": false,
+      "description_pages": [
+        302,
+        303
+      ],
+      "description_title": "Load Word From Memory With a 15-Bit Unsigned Constant Offset",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".D"
+      ]
+    },
+    "LMBD": {
+      "base_mnemonic": "LMBD",
+      "compact_form_footnote": false,
+      "description_pages": [
+        304,
+        305
+      ],
+      "description_title": "Leftmost Bit Detection",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".L"
+      ]
+    },
+    "MAX2": {
+      "base_mnemonic": "MAX2",
+      "compact_form_footnote": false,
+      "description_pages": [
+        306,
+        308
+      ],
+      "description_title": "Maximum, Signed, Packed 16-Bit",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".L",
+        ".S"
+      ]
+    },
+    "MAXU4": {
+      "base_mnemonic": "MAXU4",
+      "compact_form_footnote": false,
+      "description_pages": [
+        309,
+        310
+      ],
+      "description_title": "Maximum, Unsigned, Packed 8-Bit",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".L"
+      ]
+    },
+    "MIN2": {
+      "base_mnemonic": "MIN2",
+      "compact_form_footnote": false,
+      "description_pages": [
+        311,
+        313
+      ],
+      "description_title": "Minimum, Signed, Packed 16-Bit",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".L",
+        ".S"
+      ]
+    },
+    "MINU4": {
+      "base_mnemonic": "MINU4",
+      "compact_form_footnote": false,
+      "description_pages": [
+        314,
+        315
+      ],
+      "description_title": "Minimum, Unsigned, Packed 8-Bit",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".L"
+      ]
+    },
+    "MPY": {
+      "base_mnemonic": "MPY",
+      "compact_form_footnote": true,
+      "description_pages": [
+        316,
+        317
+      ],
+      "description_title": "Multiply Signed 16 LSB \u00d7 Signed 16 LSB",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "MPY2": {
+      "base_mnemonic": "MPY2",
+      "compact_form_footnote": false,
+      "description_pages": [
+        365,
+        366
+      ],
+      "description_title": "Multiply Signed by Signed, 16 LSB \u00d7 16 LSB and 16 MSB \u00d7 16 MSB",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "MPY2IR": {
+      "base_mnemonic": "MPY2IR",
+      "compact_form_footnote": false,
+      "description_pages": [
+        367,
+        368
+      ],
+      "description_title": "Multiply Two 16-Bit \u00d7 32-Bit, Shifted by 15 to Produce a Rounded 32-Bit Result",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "MPY32 (32-bit result)": {
+      "base_mnemonic": "MPY32",
+      "compact_form_footnote": false,
+      "description_pages": [
+        369,
+        369
+      ],
+      "description_title": "Multiply Signed 32-Bit \u00d7 Signed 32-Bit Into 32-Bit Result",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "MPY32 (64-bit result)": {
+      "base_mnemonic": "MPY32",
+      "compact_form_footnote": false,
+      "description_pages": [
+        370,
+        370
+      ],
+      "description_title": "Multiply Signed 32-Bit \u00d7 Signed 32-Bit Into Signed 64-Bit Result",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "MPY32SU": {
+      "base_mnemonic": "MPY32SU",
+      "compact_form_footnote": false,
+      "description_pages": [
+        371,
+        371
+      ],
+      "description_title": "Multiply Signed 32-Bit \u00d7 Unsigned 32-Bit Into Signed 64-Bit Result",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "MPY32U": {
+      "base_mnemonic": "MPY32U",
+      "compact_form_footnote": false,
+      "description_pages": [
+        372,
+        372
+      ],
+      "description_title": "Multiply Unsigned 32-Bit \u00d7 Unsigned 32-Bit Into Unsigned 64-Bit Result",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "MPY32US": {
+      "base_mnemonic": "MPY32US",
+      "compact_form_footnote": false,
+      "description_pages": [
+        373,
+        373
+      ],
+      "description_title": "Multiply Unsigned 32-Bit \u00d7 Signed 32-Bit Into Signed 64-Bit Result",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "MPYDP": {
+      "base_mnemonic": "MPYDP",
+      "compact_form_footnote": false,
+      "description_pages": [
+        318,
+        319
+      ],
+      "description_title": "Multiply Two Double-Precision Floating-Point Values",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": false,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "MPYH": {
+      "base_mnemonic": "MPYH",
+      "compact_form_footnote": true,
+      "description_pages": [
+        320,
+        321
+      ],
+      "description_title": "Multiply Signed 16 MSB \u00d7 Signed 16 MSB",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "MPYHI": {
+      "base_mnemonic": "MPYHI",
+      "compact_form_footnote": false,
+      "description_pages": [
+        322,
+        323
+      ],
+      "description_title": "Multiply 16 MSB \u00d7 32-Bit Into 64-Bit Result",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "MPYHIR": {
+      "base_mnemonic": "MPYHIR",
+      "compact_form_footnote": false,
+      "description_pages": [
+        324,
+        325
+      ],
+      "description_title": "Multiply 16 MSB \u00d7 32-Bit, Shifted by 15 to Produce a Rounded 32-Bit Result",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "MPYHL": {
+      "base_mnemonic": "MPYHL",
+      "compact_form_footnote": true,
+      "description_pages": [
+        326,
+        327
+      ],
+      "description_title": "Multiply Signed 16 MSB \u00d7 Signed 16 LSB",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "MPYHLU": {
+      "base_mnemonic": "MPYHLU",
+      "compact_form_footnote": false,
+      "description_pages": [
+        328,
+        328
+      ],
+      "description_title": "Multiply Unsigned 16 MSB \u00d7 Unsigned 16 LSB",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "MPYHSLU": {
+      "base_mnemonic": "MPYHSLU",
+      "compact_form_footnote": false,
+      "description_pages": [
+        329,
+        329
+      ],
+      "description_title": "Multiply Signed 16 MSB \u00d7 Unsigned 16 LSB",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "MPYHSU": {
+      "base_mnemonic": "MPYHSU",
+      "compact_form_footnote": false,
+      "description_pages": [
+        330,
+        330
+      ],
+      "description_title": "Multiply Signed 16 MSB \u00d7 Unsigned 16 MSB",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "MPYHU": {
+      "base_mnemonic": "MPYHU",
+      "compact_form_footnote": false,
+      "description_pages": [
+        331,
+        331
+      ],
+      "description_title": "Multiply Unsigned 16 MSB \u00d7 Unsigned 16 MSB",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "MPYHULS": {
+      "base_mnemonic": "MPYHULS",
+      "compact_form_footnote": false,
+      "description_pages": [
+        332,
+        332
+      ],
+      "description_title": "Multiply Unsigned 16 MSB \u00d7 Signed 16 LSB",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "MPYHUS": {
+      "base_mnemonic": "MPYHUS",
+      "compact_form_footnote": false,
+      "description_pages": [
+        333,
+        333
+      ],
+      "description_title": "Multiply Unsigned 16 MSB \u00d7 Signed 16 MSB",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "MPYI": {
+      "base_mnemonic": "MPYI",
+      "compact_form_footnote": false,
+      "description_pages": [
+        334,
+        334
+      ],
+      "description_title": "Multiply 32-Bit \u00d7 32-Bit Into 32-Bit Result",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": false,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "MPYID": {
+      "base_mnemonic": "MPYID",
+      "compact_form_footnote": false,
+      "description_pages": [
+        335,
+        336
+      ],
+      "description_title": "Multiply 32-Bit \u00d7 32-Bit Into 64-Bit Result",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": false,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "MPYIH": {
+      "base_mnemonic": "MPYIH",
+      "compact_form_footnote": false,
+      "description_pages": [
+        337,
+        337
+      ],
+      "description_title": "Multiply 32-Bit \u00d7 16-MSB Into 64-Bit Result",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "MPYIHR": {
+      "base_mnemonic": "MPYIHR",
+      "compact_form_footnote": false,
+      "description_pages": [
+        338,
+        338
+      ],
+      "description_title": "Multiply 32-Bit \u00d7 16 MSB, Shifted by 15 to Produce a Rounded 32-Bit Result",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "MPYIL": {
+      "base_mnemonic": "MPYIL",
+      "compact_form_footnote": false,
+      "description_pages": [
+        339,
+        339
+      ],
+      "description_title": "Multiply 32-Bit \u00d7 16 LSB Into 64-Bit Result",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "MPYILR": {
+      "base_mnemonic": "MPYILR",
+      "compact_form_footnote": false,
+      "description_pages": [
+        340,
+        340
+      ],
+      "description_title": "Multiply 32-Bit \u00d7 16 LSB, Shifted by 15 to Produce a Rounded 32-Bit Result",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "MPYLH": {
+      "base_mnemonic": "MPYLH",
+      "compact_form_footnote": false,
+      "description_pages": [
+        341,
+        342
+      ],
+      "description_title": "Multiply Signed 16 LSB \u00d7 Signed 16 MSB",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "MPYLHU": {
+      "base_mnemonic": "MPYLHU",
+      "compact_form_footnote": false,
+      "description_pages": [
+        343,
+        343
+      ],
+      "description_title": "Multiply Unsigned 16 LSB \u00d7 Unsigned 16 MSB",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "MPYLI": {
+      "base_mnemonic": "MPYLI",
+      "compact_form_footnote": false,
+      "description_pages": [
+        344,
+        345
+      ],
+      "description_title": "Multiply 16 LSB \u00d7 32-Bit Into 64-Bit Result",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "MPYLIR": {
+      "base_mnemonic": "MPYLIR",
+      "compact_form_footnote": false,
+      "description_pages": [
+        346,
+        347
+      ],
+      "description_title": "Multiply 16 LSB \u00d7 32-Bit, Shifted by 15 to Produce a Rounded 32-Bit Result",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "MPYLSHU": {
+      "base_mnemonic": "MPYLSHU",
+      "compact_form_footnote": false,
+      "description_pages": [
+        348,
+        348
+      ],
+      "description_title": "Multiply Signed 16 LSB \u00d7 Unsigned 16 MSB",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "MPYLUHS": {
+      "base_mnemonic": "MPYLUHS",
+      "compact_form_footnote": false,
+      "description_pages": [
+        349,
+        349
+      ],
+      "description_title": "Multiply Unsigned 16 LSB \u00d7 Signed 16 MSB",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "MPYSP": {
+      "base_mnemonic": "MPYSP",
+      "compact_form_footnote": false,
+      "description_pages": [
+        350,
+        351
+      ],
+      "description_title": "Multiply Two Single-Precision Floating-Point Values",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": false,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "MPYSP2DP": {
+      "base_mnemonic": "MPYSP2DP",
+      "compact_form_footnote": false,
+      "description_pages": [
+        354,
+        355
+      ],
+      "description_title": "Multiply Two Single-Precision Floating-Point Values for Double-Precision Result",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": false,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "MPYSPDP": {
+      "base_mnemonic": "MPYSPDP",
+      "compact_form_footnote": false,
+      "description_pages": [
+        352,
+        353
+      ],
+      "description_title": "Multiply Single-Precision Floating-Point Value \u00d7 Double-Precision Floating-Point Value",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": false,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "MPYSU": {
+      "base_mnemonic": "MPYSU",
+      "compact_form_footnote": false,
+      "description_pages": [
+        356,
+        356
+      ],
+      "description_title": "Multiply Signed 16 LSB \u00d7 Unsigned 16 LSB",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "MPYSU4": {
+      "base_mnemonic": "MPYSU4",
+      "compact_form_footnote": false,
+      "description_pages": [
+        357,
+        358
+      ],
+      "description_title": "Multiply Signed \u00d7 Unsigned, Four 8-Bit Pairs for Four 8-Bit Results",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "MPYU": {
+      "base_mnemonic": "MPYU",
+      "compact_form_footnote": false,
+      "description_pages": [
+        359,
+        359
+      ],
+      "description_title": "Multiply Unsigned 16 LSB \u00d7 Unsigned 16 LSB",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "MPYU4": {
+      "base_mnemonic": "MPYU4",
+      "compact_form_footnote": false,
+      "description_pages": [
+        360,
+        361
+      ],
+      "description_title": "Multiply Unsigned \u00d7 Unsigned, Four 8-Bit Pairs for Four 8-Bit Results",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "MPYUS": {
+      "base_mnemonic": "MPYUS",
+      "compact_form_footnote": false,
+      "description_pages": [
+        362,
+        362
+      ],
+      "description_title": "Multiply Unsigned 16 LSB \u00d7 Signed 16 LSB",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "MPYUS4": {
+      "base_mnemonic": "MPYUS4",
+      "compact_form_footnote": false,
+      "description_pages": [
+        363,
+        364
+      ],
+      "description_title": "Multiply Unsigned \u00d7 Signed, Four 8-Bit Pairs for Four 8-Bit Results",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "MV": {
+      "base_mnemonic": "MV",
+      "compact_form_footnote": false,
+      "description_pages": [
+        374,
+        375
+      ],
+      "description_title": "Move From Register to Register",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".L",
+        ".S",
+        ".D"
+      ]
+    },
+    "MVC": {
+      "base_mnemonic": "MVC",
+      "compact_form_footnote": true,
+      "description_pages": [
+        376,
+        378
+      ],
+      "description_title": "Move Between Control File and Register File",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "MVD": {
+      "base_mnemonic": "MVD",
+      "compact_form_footnote": false,
+      "description_pages": [
+        379,
+        379
+      ],
+      "description_title": "Move From Register to Register, Delayed",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "MVK": {
+      "base_mnemonic": "MVK",
+      "compact_form_footnote": true,
+      "description_pages": [
+        380,
+        382
+      ],
+      "description_title": "Move Signed Constant Into Register and Sign Extend",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".L",
+        ".S",
+        ".D"
+      ]
+    },
+    "MVKH": {
+      "base_mnemonic": "MVKH",
+      "compact_form_footnote": false,
+      "description_pages": [
+        383,
+        384
+      ],
+      "description_title": "Move 16-Bit Constant Into Upper Bits of Register",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "MVKL": {
+      "base_mnemonic": "MVKL",
+      "compact_form_footnote": false,
+      "description_pages": [
+        385,
+        386
+      ],
+      "description_title": "Move Signed Constant Into Register and Sign Extend",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "MVKLH": {
+      "base_mnemonic": "MVKLH",
+      "compact_form_footnote": false,
+      "description_pages": [
+        383,
+        384
+      ],
+      "description_title": "Move 16-Bit Constant Into Upper Bits of Register",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "NEG": {
+      "base_mnemonic": "NEG",
+      "compact_form_footnote": false,
+      "description_pages": [
+        387,
+        387
+      ],
+      "description_title": "Negate",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".L",
+        ".S"
+      ]
+    },
+    "NOP": {
+      "base_mnemonic": "NOP",
+      "compact_form_footnote": true,
+      "description_pages": [
+        388,
+        389
+      ],
+      "description_title": "No Operation",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": []
+    },
+    "NORM": {
+      "base_mnemonic": "NORM",
+      "compact_form_footnote": false,
+      "description_pages": [
+        390,
+        391
+      ],
+      "description_title": "Normalize Integer",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".L"
+      ]
+    },
+    "NOT": {
+      "base_mnemonic": "NOT",
+      "compact_form_footnote": false,
+      "description_pages": [
+        392,
+        393
+      ],
+      "description_title": "Bitwise NOT",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".L",
+        ".S",
+        ".D"
+      ]
+    },
+    "OR": {
+      "base_mnemonic": "OR",
+      "compact_form_footnote": true,
+      "description_pages": [
+        394,
+        396
+      ],
+      "description_title": "Bitwise OR",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".L",
+        ".S",
+        ".D"
+      ]
+    },
+    "PACK2": {
+      "base_mnemonic": "PACK2",
+      "compact_form_footnote": false,
+      "description_pages": [
+        397,
+        398
+      ],
+      "description_title": "Pack Two 16 LSBs Into Upper and Lower Register Halves",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".L",
+        ".S"
+      ]
+    },
+    "PACKH2": {
+      "base_mnemonic": "PACKH2",
+      "compact_form_footnote": false,
+      "description_pages": [
+        399,
+        400
+      ],
+      "description_title": "Pack Two 16 MSBs Into Upper and Lower Register Halves",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".L",
+        ".S"
+      ]
+    },
+    "PACKH4": {
+      "base_mnemonic": "PACKH4",
+      "compact_form_footnote": false,
+      "description_pages": [
+        401,
+        402
+      ],
+      "description_title": "Pack Four High Bytes Into Four 8-Bit Halfwords",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".L"
+      ]
+    },
+    "PACKHL2": {
+      "base_mnemonic": "PACKHL2",
+      "compact_form_footnote": false,
+      "description_pages": [
+        403,
+        404
+      ],
+      "description_title": "Pack 16 MSB Into Upper and 16 LSB Into Lower Register Halves",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".L",
+        ".S"
+      ]
+    },
+    "PACKL4": {
+      "base_mnemonic": "PACKL4",
+      "compact_form_footnote": false,
+      "description_pages": [
+        407,
+        408
+      ],
+      "description_title": "Pack Four Low Bytes Into Four 8-Bit Halfwords",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".L"
+      ]
+    },
+    "PACKLH2": {
+      "base_mnemonic": "PACKLH2",
+      "compact_form_footnote": false,
+      "description_pages": [
+        405,
+        406
+      ],
+      "description_title": "Pack 16 LSB Into Upper and 16 MSB Into Lower Register Halves",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".L",
+        ".S"
+      ]
+    },
+    "RCPDP": {
+      "base_mnemonic": "RCPDP",
+      "compact_form_footnote": false,
+      "description_pages": [
+        409,
+        410
+      ],
+      "description_title": "Double-Precision Floating-Point Reciprocal Approximation",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": false,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "RCPSP": {
+      "base_mnemonic": "RCPSP",
+      "compact_form_footnote": false,
+      "description_pages": [
+        411,
+        412
+      ],
+      "description_title": "Single-Precision Floating-Point Reciprocal Approximation",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": false,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "RINT": {
+      "base_mnemonic": "RINT",
+      "compact_form_footnote": false,
+      "description_pages": [
+        413,
+        413
+      ],
+      "description_title": "Restore Previous Enable State",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": []
+    },
+    "ROTL": {
+      "base_mnemonic": "ROTL",
+      "compact_form_footnote": false,
+      "description_pages": [
+        414,
+        415
+      ],
+      "description_title": "Rotate Left",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "RPACK2": {
+      "base_mnemonic": "RPACK2",
+      "compact_form_footnote": false,
+      "description_pages": [
+        416,
+        417
+      ],
+      "description_title": "Shift With Saturation and Pack Two 16 MSBs Into Upper and Lower Register Halves",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "RSQRDP": {
+      "base_mnemonic": "RSQRDP",
+      "compact_form_footnote": false,
+      "description_pages": [
+        418,
+        419
+      ],
+      "description_title": "Double-Precision Floating-Point Square-Root Reciprocal Approximation",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": false,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "RSQRSP": {
+      "base_mnemonic": "RSQRSP",
+      "compact_form_footnote": false,
+      "description_pages": [
+        420,
+        421
+      ],
+      "description_title": "Single-Precision Floating-Point Square-Root Reciprocal Approximation",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": false,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "SADD": {
+      "base_mnemonic": "SADD",
+      "compact_form_footnote": true,
+      "description_pages": [
+        422,
+        424
+      ],
+      "description_title": "Add Two Signed Integers With Saturation",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".L",
+        ".S"
+      ]
+    },
+    "SADD2": {
+      "base_mnemonic": "SADD2",
+      "compact_form_footnote": false,
+      "description_pages": [
+        425,
+        426
+      ],
+      "description_title": "Add Two Signed 16-Bit Integers on Upper and Lower Register Halves With Saturation",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "SADDSU2": {
+      "base_mnemonic": "SADDSU2",
+      "compact_form_footnote": false,
+      "description_pages": [
+        431,
+        432
+      ],
+      "description_title": "Add Two Signed and Unsigned 16-Bit Integers on Register Halves With Saturation",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "SADDSUB": {
+      "base_mnemonic": "SADDSUB",
+      "compact_form_footnote": false,
+      "description_pages": [
+        427,
+        428
+      ],
+      "description_title": "Parallel SADD and SSUB Operations On Common Inputs",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".L"
+      ]
+    },
+    "SADDSUB2": {
+      "base_mnemonic": "SADDSUB2",
+      "compact_form_footnote": false,
+      "description_pages": [
+        429,
+        430
+      ],
+      "description_title": "Parallel SADD2 and SSUB2 Operations On Common Inputs",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".L"
+      ]
+    },
+    "SADDU4": {
+      "base_mnemonic": "SADDU4",
+      "compact_form_footnote": false,
+      "description_pages": [
+        435,
+        436
+      ],
+      "description_title": "Add With Saturation, Four Unsigned 8-Bit Pairs for Four 8-Bit Results",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "SADDUS2": {
+      "base_mnemonic": "SADDUS2",
+      "compact_form_footnote": false,
+      "description_pages": [
+        433,
+        434
+      ],
+      "description_title": "Add Two Unsigned and Signed 16-Bit Integers on Register Halves With Saturation",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "SAT": {
+      "base_mnemonic": "SAT",
+      "compact_form_footnote": false,
+      "description_pages": [
+        437,
+        439
+      ],
+      "description_title": "Saturate a 40-Bit Integer to a 32-Bit Integer",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".L"
+      ]
+    },
+    "SET": {
+      "base_mnemonic": "SET",
+      "compact_form_footnote": false,
+      "description_pages": [
+        440,
+        442
+      ],
+      "description_title": "Set a Bit Field",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "SHFL": {
+      "base_mnemonic": "SHFL",
+      "compact_form_footnote": false,
+      "description_pages": [
+        443,
+        444
+      ],
+      "description_title": "Shuffle",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "SHFL3": {
+      "base_mnemonic": "SHFL3",
+      "compact_form_footnote": false,
+      "description_pages": [
+        445,
+        446
+      ],
+      "description_title": "3-Way Bit Interleave On Three 16-Bit Values Into a 48-Bit Result",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".L"
+      ]
+    },
+    "SHL": {
+      "base_mnemonic": "SHL",
+      "compact_form_footnote": false,
+      "description_pages": [
+        447,
+        448
+      ],
+      "description_title": "Arithmetic Shift Left",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "SHLMB": {
+      "base_mnemonic": "SHLMB",
+      "compact_form_footnote": false,
+      "description_pages": [
+        449,
+        450
+      ],
+      "description_title": "Shift Left and Merge Byte",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".L",
+        ".S"
+      ]
+    },
+    "SHR": {
+      "base_mnemonic": "SHR",
+      "compact_form_footnote": true,
+      "description_pages": [
+        451,
+        452
+      ],
+      "description_title": "Arithmetic Shift Right",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "SHR2": {
+      "base_mnemonic": "SHR2",
+      "compact_form_footnote": false,
+      "description_pages": [
+        453,
+        454
+      ],
+      "description_title": "Arithmetic Shift Right, Signed, Packed 16-Bit",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "SHRMB": {
+      "base_mnemonic": "SHRMB",
+      "compact_form_footnote": false,
+      "description_pages": [
+        455,
+        456
+      ],
+      "description_title": "Shift Right and Merge Byte",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".L",
+        ".S"
+      ]
+    },
+    "SHRU": {
+      "base_mnemonic": "SHRU",
+      "compact_form_footnote": true,
+      "description_pages": [
+        457,
+        458
+      ],
+      "description_title": "Logical Shift Right",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "SHRU2": {
+      "base_mnemonic": "SHRU2",
+      "compact_form_footnote": false,
+      "description_pages": [
+        459,
+        460
+      ],
+      "description_title": "Arithmetic Shift Right, Unsigned, Packed 16-Bit",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "SMPY": {
+      "base_mnemonic": "SMPY",
+      "compact_form_footnote": false,
+      "description_pages": [
+        461,
+        462
+      ],
+      "description_title": "Multiply Signed 16 LSB \u00d7 Signed 16 LSB With Left Shift and Saturation",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "SMPY2": {
+      "base_mnemonic": "SMPY2",
+      "compact_form_footnote": false,
+      "description_pages": [
+        468,
+        469
+      ],
+      "description_title": "Multiply Signed by Signed, 16 LSB \u00d7 16 LSB and 16 MSB \u00d7 16 MSB With Left Shift and Saturation",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "SMPY32": {
+      "base_mnemonic": "SMPY32",
+      "compact_form_footnote": false,
+      "description_pages": [
+        470,
+        471
+      ],
+      "description_title": "Multiply Signed 32-Bit \u00d7 Signed 32-Bit Into 64-Bit Result With Left Shift and Saturation",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "SMPYH": {
+      "base_mnemonic": "SMPYH",
+      "compact_form_footnote": true,
+      "description_pages": [
+        463,
+        463
+      ],
+      "description_title": "Multiply Signed 16 MSB \u00d7 Signed 16 MSB With Left Shift and Saturation",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "SMPYHL": {
+      "base_mnemonic": "SMPYHL",
+      "compact_form_footnote": true,
+      "description_pages": [
+        464,
+        465
+      ],
+      "description_title": "Multiply Signed 16 MSB \u00d7 Signed 16 LSB With Left Shift and Saturation",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "SMPYLH": {
+      "base_mnemonic": "SMPYLH",
+      "compact_form_footnote": false,
+      "description_pages": [
+        466,
+        467
+      ],
+      "description_title": "Multiply Signed 16 LSB \u00d7 Signed 16 MSB With Left Shift and Saturation",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "SPACK2": {
+      "base_mnemonic": "SPACK2",
+      "compact_form_footnote": false,
+      "description_pages": [
+        472,
+        473
+      ],
+      "description_title": "Saturate and Pack Two 16 LSBs Into Upper and Lower Register Halves",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "SPACKU4": {
+      "base_mnemonic": "SPACKU4",
+      "compact_form_footnote": false,
+      "description_pages": [
+        474,
+        476
+      ],
+      "description_title": "Saturate and Pack Four Signed 16-Bit Integers Into Four Unsigned 8-Bit Halfwords",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "SPDP": {
+      "base_mnemonic": "SPDP",
+      "compact_form_footnote": false,
+      "description_pages": [
+        477,
+        478
+      ],
+      "description_title": "Convert Single-Precision Floating-Point Value to Double-Precision Floating-Point Value",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": false,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "SPINT": {
+      "base_mnemonic": "SPINT",
+      "compact_form_footnote": false,
+      "description_pages": [
+        479,
+        480
+      ],
+      "description_title": "Convert Single-Precision Floating-Point Value to Integer",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": false,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".L"
+      ]
+    },
+    "SPKERNEL": {
+      "base_mnemonic": "SPKERNEL",
+      "compact_form_footnote": false,
+      "description_pages": [
+        481,
+        482
+      ],
+      "description_title": "Software Pipelined Loop (SPLOOP) Buffer Operation Code Boundary",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": []
+    },
+    "SPKERNELR": {
+      "base_mnemonic": "SPKERNELR",
+      "compact_form_footnote": false,
+      "description_pages": [
+        483,
+        483
+      ],
+      "description_title": "Software Pipelined Loop (SPLOOP) Buffer Operation Code Boundary",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": []
+    },
+    "SPLOOP": {
+      "base_mnemonic": "SPLOOP",
+      "compact_form_footnote": true,
+      "description_pages": [
+        484,
+        484
+      ],
+      "description_title": "Software Pipelined Loop (SPLOOP) Buffer Operation",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": []
+    },
+    "SPLOOPD": {
+      "base_mnemonic": "SPLOOPD",
+      "compact_form_footnote": false,
+      "description_pages": [
+        485,
+        485
+      ],
+      "description_title": "Software Pipelined Loop (SPLOOP) Buffer Operation With Delayed Testing",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": []
+    },
+    "SPLOOPW": {
+      "base_mnemonic": "SPLOOPW",
+      "compact_form_footnote": false,
+      "description_pages": [
+        486,
+        486
+      ],
+      "description_title": "Software Pipelined Loop (SPLOOP) Buffer Operation With Delayed Testing and No Epilog",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": []
+    },
+    "SPMASK": {
+      "base_mnemonic": "SPMASK",
+      "compact_form_footnote": true,
+      "description_pages": [
+        487,
+        488
+      ],
+      "description_title": "Software Pipelined Loop (SPLOOP) Buffer Operation Load/Execution Control",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": []
+    },
+    "SPMASKR": {
+      "base_mnemonic": "SPMASKR",
+      "compact_form_footnote": true,
+      "description_pages": [
+        489,
+        490
+      ],
+      "description_title": "Software Pipelined Loop (SPLOOP) Buffer Operation Load/Execution Control",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": []
+    },
+    "SPTRUNC": {
+      "base_mnemonic": "SPTRUNC",
+      "compact_form_footnote": false,
+      "description_pages": [
+        491,
+        492
+      ],
+      "description_title": "Convert Single-Precision Floating-Point Value to Integer With Truncation",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": false,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".L"
+      ]
+    },
+    "SSHL": {
+      "base_mnemonic": "SSHL",
+      "compact_form_footnote": true,
+      "description_pages": [
+        493,
+        494
+      ],
+      "description_title": "Shift Left With Saturation",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".S"
+      ]
+    },
+    "SSHVL": {
+      "base_mnemonic": "SSHVL",
+      "compact_form_footnote": false,
+      "description_pages": [
+        495,
+        496
+      ],
+      "description_title": "Variable Shift Left",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "SSHVR": {
+      "base_mnemonic": "SSHVR",
+      "compact_form_footnote": false,
+      "description_pages": [
+        497,
+        498
+      ],
+      "description_title": "Variable Shift Right",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "SSUB": {
+      "base_mnemonic": "SSUB",
+      "compact_form_footnote": true,
+      "description_pages": [
+        499,
+        501
+      ],
+      "description_title": "Subtract Two Signed Integers With Saturation",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".L"
+      ]
+    },
+    "SSUB2": {
+      "base_mnemonic": "SSUB2",
+      "compact_form_footnote": false,
+      "description_pages": [
+        502,
+        503
+      ],
+      "description_title": "Subtract Two Signed 16-Bit Integers on Upper and Lower Register Halves With Saturation",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".L"
+      ]
+    },
+    "STB": {
+      "base_mnemonic": "STB",
+      "compact_form_footnote": false,
+      "description_pages": [
+        504,
+        506
+      ],
+      "description_title": "Store Byte to Memory With a 5-Bit Unsigned Constant Offset or Register Offset",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".D"
+      ]
+    },
+    "STB (15-bit offset)": {
+      "base_mnemonic": "STB",
+      "compact_form_footnote": false,
+      "description_pages": [
+        507,
+        508
+      ],
+      "description_title": "Store Byte to Memory With a 15-Bit Unsigned Constant Offset",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".D"
+      ]
+    },
+    "STDW": {
+      "base_mnemonic": "STDW",
+      "compact_form_footnote": true,
+      "description_pages": [
+        509,
+        512
+      ],
+      "description_title": "Store Doubleword to Memory With a 5-Bit Unsigned Constant Offset or Register Offset",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".D"
+      ]
+    },
+    "STH": {
+      "base_mnemonic": "STH",
+      "compact_form_footnote": true,
+      "description_pages": [
+        513,
+        514
+      ],
+      "description_title": "Store Halfword to Memory With a 5-Bit Unsigned Constant Offset or Register Offset",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".D"
+      ]
+    },
+    "STH (15-bit offset)": {
+      "base_mnemonic": "STH",
+      "compact_form_footnote": false,
+      "description_pages": [
+        515,
+        515
+      ],
+      "description_title": "Store Halfword to Memory With a 15-Bit Unsigned Constant Offset",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".D"
+      ]
+    },
+    "STNDW": {
+      "base_mnemonic": "STNDW",
+      "compact_form_footnote": true,
+      "description_pages": [
+        516,
+        518
+      ],
+      "description_title": "Store Nonaligned Doubleword to Memory With a 5-Bit Unsigned Constant Offset or Register Offset",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".D"
+      ]
+    },
+    "STNW": {
+      "base_mnemonic": "STNW",
+      "compact_form_footnote": true,
+      "description_pages": [
+        519,
+        521
+      ],
+      "description_title": "Store Nonaligned Word to Memory With a 5-Bit Unsigned Constant Offset or Register Offset",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".D"
+      ]
+    },
+    "STW": {
+      "base_mnemonic": "STW",
+      "compact_form_footnote": false,
+      "description_pages": [
+        522,
+        524
+      ],
+      "description_title": "Store Word to Memory With a 5-Bit Unsigned Constant Offset or Register Offset",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".D"
+      ]
+    },
+    "STW (15-bit offset)": {
+      "base_mnemonic": "STW",
+      "compact_form_footnote": true,
+      "description_pages": [
+        525,
+        526
+      ],
+      "description_title": "Store Word to Memory With a 15-Bit Unsigned Constant Offset",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".D"
+      ]
+    },
+    "SUB": {
+      "base_mnemonic": "SUB",
+      "compact_form_footnote": true,
+      "description_pages": [
+        527,
+        531
+      ],
+      "description_title": "Subtract Two Signed Integers Without Saturation",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".L",
+        ".S",
+        ".D"
+      ]
+    },
+    "SUB2": {
+      "base_mnemonic": "SUB2",
+      "compact_form_footnote": false,
+      "description_pages": [
+        548,
+        550
+      ],
+      "description_title": "Subtract Two 16-Bit Integers on Upper and Lower Register Halves",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".L",
+        ".S",
+        ".D"
+      ]
+    },
+    "SUB4": {
+      "base_mnemonic": "SUB4",
+      "compact_form_footnote": false,
+      "description_pages": [
+        551,
+        552
+      ],
+      "description_title": "Subtract Without Saturation, Four 8-Bit Pairs for Four 8-Bit Results",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".L"
+      ]
+    },
+    "SUBAB": {
+      "base_mnemonic": "SUBAB",
+      "compact_form_footnote": false,
+      "description_pages": [
+        532,
+        533
+      ],
+      "description_title": "Subtract Using Byte Addressing Mode",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".D"
+      ]
+    },
+    "SUBABS4": {
+      "base_mnemonic": "SUBABS4",
+      "compact_form_footnote": false,
+      "description_pages": [
+        534,
+        535
+      ],
+      "description_title": "Subtract With Absolute Value, Four 8-Bit Pairs for Four 8-Bit Results",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".L"
+      ]
+    },
+    "SUBAH": {
+      "base_mnemonic": "SUBAH",
+      "compact_form_footnote": false,
+      "description_pages": [
+        536,
+        536
+      ],
+      "description_title": "Subtract Using Halfword Addressing Mode",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".D"
+      ]
+    },
+    "SUBAW": {
+      "base_mnemonic": "SUBAW",
+      "compact_form_footnote": false,
+      "description_pages": [
+        537,
+        538
+      ],
+      "description_title": "Subtract Using Word Addressing Mode",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".D"
+      ]
+    },
+    "SUBC": {
+      "base_mnemonic": "SUBC",
+      "compact_form_footnote": false,
+      "description_pages": [
+        539,
+        540
+      ],
+      "description_title": "Subtract Conditionally and Shift\u2014Used for Division",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".L"
+      ]
+    },
+    "SUBDP": {
+      "base_mnemonic": "SUBDP",
+      "compact_form_footnote": false,
+      "description_pages": [
+        541,
+        543
+      ],
+      "description_title": "Subtract Two Double-Precision Floating-Point Values",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": false,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".L",
+        ".S"
+      ]
+    },
+    "SUBSP": {
+      "base_mnemonic": "SUBSP",
+      "compact_form_footnote": false,
+      "description_pages": [
+        544,
+        545
+      ],
+      "description_title": "Subtract Two Single-Precision Floating-Point Values",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": false,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".L",
+        ".S"
+      ]
+    },
+    "SUBU": {
+      "base_mnemonic": "SUBU",
+      "compact_form_footnote": false,
+      "description_pages": [
+        546,
+        547
+      ],
+      "description_title": "Subtract Two Unsigned Integers Without Saturation",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".L"
+      ]
+    },
+    "SWAP2": {
+      "base_mnemonic": "SWAP2",
+      "compact_form_footnote": false,
+      "description_pages": [
+        553,
+        554
+      ],
+      "description_title": "Swap Bytes in Upper and Lower Register Halves",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".L",
+        ".S"
+      ]
+    },
+    "SWAP4": {
+      "base_mnemonic": "SWAP4",
+      "compact_form_footnote": false,
+      "description_pages": [
+        555,
+        556
+      ],
+      "description_title": "Swap Byte Pairs in Upper and Lower Register Halves",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".L"
+      ]
+    },
+    "SWE": {
+      "base_mnemonic": "SWE",
+      "compact_form_footnote": false,
+      "description_pages": [
+        557,
+        557
+      ],
+      "description_title": "Software Exception",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": []
+    },
+    "SWENR": {
+      "base_mnemonic": "SWENR",
+      "compact_form_footnote": false,
+      "description_pages": [
+        558,
+        558
+      ],
+      "description_title": "Software Exception\u2014No Return",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": []
+    },
+    "UNPKHU4": {
+      "base_mnemonic": "UNPKHU4",
+      "compact_form_footnote": false,
+      "description_pages": [
+        559,
+        560
+      ],
+      "description_title": "Unpack 16 MSB Into Two Lower 8-Bit Halfwords of Upper and Lower Register Halves",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".L",
+        ".S"
+      ]
+    },
+    "UNPKLU4": {
+      "base_mnemonic": "UNPKLU4",
+      "compact_form_footnote": false,
+      "description_pages": [
+        561,
+        562
+      ],
+      "description_title": "Unpack 16 LSB Into Two Lower 8-Bit Halfwords of Upper and Lower Register Halves",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".L",
+        ".S"
+      ]
+    },
+    "XOR": {
+      "base_mnemonic": "XOR",
+      "compact_form_footnote": false,
+      "description_pages": [
+        563,
+        565
+      ],
+      "description_title": "Bitwise Exclusive OR",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".L",
+        ".S",
+        ".D"
+      ]
+    },
+    "XORMPY": {
+      "base_mnemonic": "XORMPY",
+      "compact_form_footnote": false,
+      "description_pages": [
+        566,
+        567
+      ],
+      "description_title": "Galois Field Multiply With Zero Polynomial",
+      "families": {
+        "c62x": false,
+        "c64x": false,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "XPND2": {
+      "base_mnemonic": "XPND2",
+      "compact_form_footnote": false,
+      "description_pages": [
+        568,
+        569
+      ],
+      "description_title": "Expand Bits to Packed 16-Bit Masks",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "XPND4": {
+      "base_mnemonic": "XPND4",
+      "compact_form_footnote": false,
+      "description_pages": [
+        570,
+        571
+      ],
+      "description_title": "Expand Bits to Packed 8-Bit Masks",
+      "families": {
+        "c62x": false,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": false,
+        "c67x_plus": false
+      },
+      "units": [
+        ".M"
+      ]
+    },
+    "ZERO": {
+      "base_mnemonic": "ZERO",
+      "compact_form_footnote": false,
+      "description_pages": [
+        572,
+        573
+      ],
+      "description_title": "Zero a Register",
+      "families": {
+        "c62x": true,
+        "c64x": true,
+        "c64x_plus": true,
+        "c674x": true,
+        "c67x": true,
+        "c67x_plus": true
+      },
+      "units": [
+        ".L",
+        ".S",
+        ".D"
+      ]
+    }
+  },
+  "parse_diagnostics": {
+    "in_table_b1_only": [],
+    "rows_without_description_page": [],
+    "rows_without_unit": [
+      "DINT",
+      "IDLE",
+      "NOP",
+      "RINT",
+      "SPKERNEL",
+      "SPKERNELR",
+      "SPLOOP",
+      "SPLOOPD",
+      "SPLOOPW",
+      "SPMASK",
+      "SPMASKR",
+      "SWE",
+      "SWENR"
+    ],
+    "unparsed_checkmark_lines": []
+  },
+  "schema": 1,
+  "scope": "Manual-derived denominator: every Table A-1 row with a C674x check mark.  Rows are instruction names as TI writes them, including the separate B displacement/register/IRP/NRP and 15-bit-offset load rows.  This is not a count of distinct encodings: one row can cover many opfields, operand types and unit variants.",
+  "source": {
+    "document": "SPRUFE8B",
+    "generator_sha256": "72655445a66602a9446ca0f19bf51cf971035bbe3af6a5c59375ff52b1a1a02d",
+    "printed_page_equals_pdf_page": true,
+    "revision": "July 2010",
+    "section_3_12_pages": [
+      98,
+      708
+    ],
+    "sha256": "34bc36312d37b092be9741986e70088f0fcefa00d8401a078f2b2981bb7b1d37",
+    "table_a1_pages": [
+      709,
+      714
+    ],
+    "table_b1_pages": [
+      715,
+      720
+    ],
+    "url": "https://www.ti.com/lit/ug/sprufe8b/sprufe8b.pdf"
+  }
+}

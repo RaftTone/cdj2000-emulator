@@ -220,10 +220,17 @@ class Builder:
         self.image[base:base + SECTOR] = boot
         self.image[base + 6 * SECTOR:base + 7 * SECTOR] = boot
 
+        # A free count of 0xFFFFFFFF means "unknown", and a driver that is
+        # asked for free space then counts it by reading every FAT sector.
+        # These images have a 1,023-sector FAT, and a CDJ traced mounting one
+        # walks all of it before it touches a single data sector -- minutes of
+        # emulated time, during which a SOURCE key gets one-row answers the GUI
+        # abandons. The builder knows the real number, so it writes it.
         fsinfo = bytearray(SECTOR)
         fsinfo[0:4] = b"RRaA"
         fsinfo[484:488] = b"rrAa"
-        struct.pack_into("<II", fsinfo, 488, 0xFFFFFFFF, self.next_cluster)
+        free = self.max_cluster - (self.next_cluster - 2)
+        struct.pack_into("<II", fsinfo, 488, free, self.next_cluster)
         fsinfo[510:512] = b"\x55\xaa"
         self.image[base + SECTOR:base + 2 * SECTOR] = fsinfo
 

@@ -1,0 +1,65 @@
+--- a/sim/bfin/dv-bfin_ppi.c
++++ b/sim/bfin/dv-bfin_ppi.c
+@@ -1497,6 +1497,23 @@
+   bytes[63] = crc >> 8;
+ }
+ 
++/* The run-local capture path is fixed for the process lifetime. Keep the
++   descriptor open, but flush each complete record for live readers and for
++   the launcher's terminate-on-close behavior. */
++static FILE *bfin_sport_dump_stream;
++static int bfin_sport_dump_registered;
++
++static void
++bfin_sport_link_dump_close (void)
++{
++  if (bfin_sport_dump_stream)
++    {
++      if (fclose (bfin_sport_dump_stream) != 0)
++        fprintf (stderr, "bfin: SPORT capture close failed\n");
++      bfin_sport_dump_stream = NULL;
++    }
++}
++
+ static void
+ bfin_sport_link_dump (const void *data, unsigned nr_bytes)
+ {
+@@ -1505,19 +1522,32 @@
+ 
+   if (path == NULL || *path == 0)
+     return;
+-  stream = fopen (path, "ab");
+-  if (stream == NULL)
+-    return;
++  if (!bfin_sport_dump_stream)
++    {
++      bfin_sport_dump_stream = fopen (path, "ab");
++      if (!bfin_sport_dump_stream)
++        return;
++      if (!bfin_sport_dump_registered)
++        {
++          atexit (bfin_sport_link_dump_close);
++          bfin_sport_dump_registered = 1;
++        }
++    }
++  stream = bfin_sport_dump_stream;
+   {
+     unsigned char header[8] =
+     {
+       'S', 'P', 'R', 'X',
+       nr_bytes, nr_bytes >> 8, nr_bytes >> 16, nr_bytes >> 24,
+     };
+-    fwrite (header, 1, sizeof (header), stream);
+-    fwrite (data, 1, nr_bytes, stream);
++    if (fwrite (header, 1, sizeof (header), stream) != sizeof (header)
++        || fwrite (data, 1, nr_bytes, stream) != nr_bytes
++        || fflush (stream) != 0)
++      {
++        fprintf (stderr, "bfin: SPORT capture write failed\n");
++        bfin_sport_link_dump_close ();
++      }
+   }
+-  fclose (stream);
+ }
+ 
+ /* BFIN_LINK_RX_CENSUS=<seconds> -- print the fresh/repeat split periodically.

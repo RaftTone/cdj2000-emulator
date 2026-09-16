@@ -97,6 +97,77 @@ def make_running_checkpoint(tmp_path):
     return checkpoint_dir, checkpoint
 
 
+def test_accepts_hashmatched_fault_only_checkpoint_as_diagnostic_provenance(tmp_path):
+    from tools.cdj_dsp.replay import checkpoint_info, checkpoint_provenance, newest_checkpoint
+
+    checkpoint_dir, checkpoint = make_checkpoint(tmp_path)
+    digest = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+    (checkpoint_dir / 'manifest.json').write_text(json.dumps({
+        'complete': False,
+        'architectural_validation_eligible': False,
+        'dsp_checkpoint_policy': 'fault',
+        'checkpoint_capture_complete': True,
+        'checkpoints': [{'file': checkpoint.name, 'sha256': digest}],
+    }))
+    info = checkpoint_info(checkpoint.read_bytes())
+    provenance = checkpoint_provenance(checkpoint, checkpoint.read_bytes(), info)
+    assert provenance['origin'] == 'diagnostic_connected_checkpoint'
+    selected, *_ = newest_checkpoint(checkpoint_dir)
+    assert selected == checkpoint
+
+
+def test_diagnostic_checkpoint_rejects_event_injection_even_with_forged_hash(
+        tmp_path):
+    checkpoint_dir, checkpoint = make_checkpoint(tmp_path)
+    transcript = tmp_path / 'events.jsonl'
+    transcript.write_text(encoded_event(1, 'boot_phase'))
+    (checkpoint_dir / 'manifest.json').write_text(json.dumps({
+        'complete': False,
+        'architectural_validation_eligible': False,
+        'dsp_checkpoint_policy': 'fault',
+        'checkpoint_capture_complete': True,
+        'checkpoints': [{
+            'file': checkpoint.name,
+            'sha256': hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
+        }],
+        'event_transcript': {
+            'sha256': hashlib.sha256(transcript.read_bytes()).hexdigest(),
+        },
+    }))
+    result = subprocess.run([
+        sys.executable, '-m', 'tools.cdj_dsp.replay', str(checkpoint),
+        str(tmp_path / 'replay'), '--events', str(transcript),
+    ], cwd=ROOT, text=True, capture_output=True, timeout=10)
+    assert result.returncode != 0
+    assert 'diagnostic fault-only checkpoint' in result.stderr
+
+
+@pytest.mark.parametrize('change', [
+    {'checkpoints': [{'file': 'state.cdjdsp', 'sha256': 'wrong'}]},
+    {'checkpoint_capture_complete': False},
+])
+def test_rejects_fault_only_checkpoint_without_hashmatched_complete_snapshot_proof(
+        tmp_path, change):
+    from tools.cdj_dsp.replay import checkpoint_info, checkpoint_provenance
+
+    checkpoint_dir, checkpoint = make_checkpoint(tmp_path)
+    manifest = {
+        'complete': False,
+        'architectural_validation_eligible': False,
+        'dsp_checkpoint_policy': 'fault',
+        'checkpoint_capture_complete': True,
+        'checkpoints': [{
+            'file': checkpoint.name,
+            'sha256': hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
+        }],
+    }
+    manifest.update(change)
+    (checkpoint_dir / 'manifest.json').write_text(json.dumps(manifest))
+    data = checkpoint.read_bytes()
+    with pytest.raises(ValueError, match='absent from a complete connected manifest'):
+        checkpoint_provenance(checkpoint, data, checkpoint_info(data))
+
+
 def test_injects_and_repeat_gates_connected_stop(tmp_path):
     checkpoint_dir, checkpoint = make_checkpoint(tmp_path)
 

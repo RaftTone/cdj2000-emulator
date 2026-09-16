@@ -17,11 +17,14 @@ import sys
 
 from .coverage import build_coverage
 from .tx_capture import tx_capture_metadata
+from .build_cache import build_native
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCES = [ROOT / 'tools/cdj_dsp/replay.c', *[
     ROOT / 'emulator/qemu' / name for name in
-    ('cdj_c674x.c', 'cdj_c674x_loop.c', 'cdj_c6747_syscfg.c', 'cdj_c6747_psc.c',
+    ('cdj_c674x.c', 'cdj_c674x_mpy.c', 'cdj_c674x_dotp.c', 'cdj_c674x_packed8.c', 'cdj_c674x_packed16.c', 'cdj_c674x_packbits.c', 'cdj_c674x_mpy32.c', 'cdj_c674x_dp.c', 'cdj_c674x_approx.c', 'cdj_c674x_uncond.c',
+     'cdj_c674x_sp.c', 'cdj_c674x_control.c',
+     'cdj_c674x_loop.c', 'cdj_c6747_syscfg.c', 'cdj_c6747_psc.c',
      'cdj_c6747_mcasp.c', 'cdj_c6747_gpio.c', 'cdj_c6747_i2c.c', 'cdj_c6747_pll.c',
      'cdj_c6747_hpi.c', 'cdj_c6747_emifb.c', 'cdj_c6747_intc.c',
      'cdj_c6747_timer.c',
@@ -35,9 +38,10 @@ CHECKPOINT_HEADER = struct.Struct('<8sIIII9I5IQQ')
 CHECKPOINT_MAGIC = {1: b'CDJDSP1\0', 2: b'CDJDSP2\0', 3: b'CDJDSP3\0',
                     4: b'CDJDSP4\0', 5: b'CDJDSP5\0', 6: b'CDJDSP6\0',
                     7: b'CDJDSP7\0', 8: b'CDJDSP8\0', 9: b'CDJDSP9\0',
-                    10: b'CDJDSP10', 11: b'CDJDSP11'}
+                    10: b'CDJDSP10', 11: b'CDJDSP11', 12: b'CDJDSP12'}
 SCHEDULER_STATE = struct.Struct('<QQIIBBBB')
 SHARED_RAM_SIZE = 0x20000
+L1D_SIZE = 0x8000
 DEFAULT_FORMATS = ROOT / 'build/gdb-17.2/include/opcode/tic6x-insn-formats.h'
 ANALYSIS_SOURCES = [ROOT / 'tools/cdj_dsp/coverage.py',
                     ROOT / 'tools/cdj_dsp/inventory.py',
@@ -98,8 +102,11 @@ def checkpoint_info(data: bytes) -> dict:
     shared_size = SHARED_RAM_SIZE if schema >= 2 else 0
     shared_start = l2_start + l2_size
     shared = data[shared_start:shared_start + shared_size]
+    l1d_size = L1D_SIZE if schema >= 12 else 0
+    l1d_start = shared_start + shared_size
+    l1d = data[l1d_start:l1d_start + l1d_size]
     bitmap_size = (page_count + 7) // 8
-    bitmap_start = shared_start + shared_size
+    bitmap_start = l1d_start + l1d_size
     bitmap = data[bitmap_start:bitmap_start + bitmap_size]
     pages = memoryview(data)[bitmap_start + bitmap_size:]
     sdram_hash = hashlib.sha256()
@@ -125,6 +132,9 @@ def checkpoint_info(data: bytes) -> dict:
                     data, header_size, state_size, schema),
                 shared_ram_sha256=(hashlib.sha256(shared).hexdigest()
                                    if schema >= 2 else None),
+                l1d_captured=schema >= 12,
+                l1d_sha256=(hashlib.sha256(l1d).hexdigest()
+                             if schema >= 12 else None),
                 sdram_sha256=sdram_hash.hexdigest(), present_pages=present_pages)
 
 
@@ -166,6 +176,19 @@ def checkpoint_provenance(path: Path, data: bytes, info: dict) -> dict:
             matching[0].get('sha256') == info['checkpoint_sha256']):
         result['origin'] = 'connected_checkpoint'
         return result
+    # Lightweight launcher runs intentionally omit the event transcript.  A
+    # checksum-matched, structurally validated checkpoint remains useful for
+    # standalone fault diagnosis, but it cannot be promoted to connected-run
+    # or architectural evidence.  Require every marker so an old/incomplete
+    # manifest cannot accidentally open this weaker replay path.
+    if (capture_manifest.get('dsp_checkpoint_policy') == 'fault' and
+            capture_manifest.get('checkpoint_capture_complete') is True and
+            capture_manifest.get('complete') is False and
+            capture_manifest.get('architectural_validation_eligible') is False and
+            len(matching) == 1 and
+            matching[0].get('sha256') == info['checkpoint_sha256']):
+        result['origin'] = 'diagnostic_connected_checkpoint'
+        return result
     gate_path = path.parent / 'gate.json'
     gate_data = gate_path.read_bytes() if gate_path.is_file() else b''
     gate = json.loads(gate_data) if gate_data else {}
@@ -184,6 +207,23 @@ def checkpoint_provenance(path: Path, data: bytes, info: dict) -> dict:
         result.update(origin='diagnostic_replay_checkpoint')
         return result
     raise ValueError('checkpoint is absent from a complete connected manifest or replay provenance')
+
+
+def write_manifest(output: Path, manifest: dict):
+    """Persist the run manifest, never claiming eligibility for an unfinished run.
+
+    `architectural_validation_eligible` is a claim about a run that ran to a
+    recorded stop, so it cannot outrank `complete`.  The manifest used to be
+    written once before the replay binary started and again afterwards, which
+    left six aborted runs in runs/ (dsp-interrupt-entry-fixed-events-1/3/4,
+    dsp-schema5-strict-migration-1, dsp-spi-gap-connected-replay-1 and
+    dsp-spkernel-h7-candidate-2) claiming eligibility with no output checkpoint,
+    no coverage and no terminal stop record.  The pre-execution write is gone;
+    this gate keeps the claim honest for whatever write sites come later.
+    """
+    if not manifest.get('complete'):
+        manifest['architectural_validation_eligible'] = False
+    (output / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
 
 
 def exploratory_ancestry(manifest):
@@ -209,7 +249,8 @@ def newest_checkpoint(directory: Path, *, timing_mode=None, audio_mode=None,
             provenance = checkpoint_provenance(path, data, info)
             manifest = provenance['capture_manifest']
             if (timing_mode == 'strict' and audio_mode == 'stopped-clock' and
-                    exploratory_ancestry(manifest)):
+                    exploratory_ancestry(manifest) and
+                    provenance['origin'] != 'diagnostic_connected_checkpoint'):
                 raise ValueError('checkpoint inherits exploratory state')
             for field, requested, default in (
                     ('dsp_timing_mode', timing_mode, 'strict'),
@@ -246,6 +287,12 @@ def main():
                         help='fixed external MAIN boot-phase GPIO value, 0..7 (default: captured phase 0)')
     parser.add_argument('--verify-repeat', action='store_true',
                         help='run the same compiled binary twice and gate on identical traces')
+    parser.add_argument('--build-profile', choices=('optimized', 'debug'), default='optimized',
+                        help='optimized (-O2, default) or debug (-O0) native replay build')
+    parser.add_argument('--no-build-cache', action='store_true',
+                        help='compile a fresh binary instead of reusing the content-addressed cache')
+    parser.add_argument('--trace-mode', choices=('detailed', 'compact'), default='detailed',
+                        help='compact omits standalone per-step diagnostics; events, stops and coverage remain')
     parser.add_argument('--observe-pcm', action='store_true',
                         help='record at most 64 RAM-only stock PCM PC observations; includes fall-through, not ownership proof')
     parser.add_argument('--connected-stops', type=int, default=0,
@@ -333,6 +380,8 @@ def main():
     if event_data is not None:
         if not checkpoint:
             parser.error('event injection requires a connected checkpoint')
+        if checkpoint_origin == 'diagnostic_connected_checkpoint':
+            parser.error('diagnostic fault-only checkpoint has no connected event transcript; omit --events')
         transcript = capture_manifest.get('event_transcript')
         expected_event_hash = (transcript.get('sha256') if isinstance(transcript, dict)
                                else capture_manifest.get('event_transcript_sha256'))
@@ -343,8 +392,11 @@ def main():
     expected = args.expect_trace.read_bytes() if args.expect_trace is not None else None
     # Compile the exact source/header bytes whose hashes are recorded. A later
     # worktree edit must not make the manifest describe a different binary.
+    # Headers are derived from SOURCES by suffix, so any header with no matching
+    # .c has to be listed explicitly or the standalone build cannot find it.
     inputs = (SOURCES + [p.with_suffix('.h') for p in SOURCES[1:]] +
-              [ROOT / 'emulator/qemu/cdj_c6747_spi_clock.h'])
+              [ROOT / 'emulator/qemu/cdj_c6747_spi_clock.h',
+               ROOT / 'emulator/qemu/cdj_c674x_multicycle.h'])
     source_data = {p: p.read_bytes() for p in inputs}
     format_data = args.formats.read_bytes()
     analysis_data = {path: path.read_bytes() for path in ANALYSIS_SOURCES}
@@ -357,23 +409,38 @@ def main():
             event_snapshot.write_bytes(event_data)
         for path, content in source_data.items():
             (Path(temp) / path.name).write_bytes(content)
-        subprocess.run([cc, '-std=c11', '-Wall', '-Wextra', '-Werror',
-                        '-I', temp, *[str(Path(temp) / p.name) for p in SOURCES],
-                        '-o', str(binary)], check=True)
+        binary, build = build_native(cc, Path(temp),
+            [Path(temp) / p.name for p in SOURCES],
+            cache=None if args.no_build_cache else Path(os.environ.get(
+                'CDJ_REPLAY_CACHE', str(ROOT / 'build/replay-cache'))),
+            optimization='-O0' if args.build_profile == 'debug' else '-O2')
         args.output.mkdir(parents=True, exist_ok=False)
         external_event_assumption = (
             'ordered post-checkpoint MAIN/HPI events injected and gated against every connected DSP stop'
             if event_data is not None else
             'no later MAIN/HPI events injected; replay stops when an external event is required')
         approximations = [
+            'EMIFB mirrors populated 32 MiB SDRAM through the C0000000-DFFFFFFF aperture; upper D-window decoding is inferred from MPU2 coverage and unused SDRAM address pins (SPRUH91D 5.2.2 and 19.2.6.10), not hardware-validated; MPU protection and geometry reconfiguration are not modeled',
+            'EDMA ICR is write-only (SPRUH91D 16.4.2.6.5); read-zero is a firmware compatibility choice, not a hardware-validated read value',
             *(['two-cycle SPLOOPD functional run-ahead; not cycle-accurate']
                if args.functional_dsp_timing else []),
             *(['SPI1 WM8740 control transfers complete at commit; serial timing is not modeled']
                if args.functional_dsp_timing else []),
-            *(['interrupt-return SPMASK pipe-up is reconstructed from the stable program image; retained-buffer timing is not modeled']
-               if args.functional_dsp_timing else []),
-            *(['an ISR SPLOOP may replace retained loop validation state; a later SPLX return is reconstructed from the current program image and self-modifying loop bodies are unsupported']
-               if args.functional_dsp_timing else []),
+            # SPRUFE8B 7.7.3.1 resumes an interrupted loop by re-executing
+            # its prolog from program memory, so this is how the hardware
+            # works rather than a timing mode, and the caveat applies to every
+            # run that interrupts a software loop, strict or breadth.
+            'an interrupted SPLOOP resumes by rebuilding the loop buffer from program memory (SPRUFE8B 7.7.3.1); a loop body changed between the interrupt and the return is undetected once an ISR software loop has replaced the retained cross-check',
+            # Timer64P0/1 advance one input clock per CPU cycle_tick, which is
+            # one modelled VLIW issue.  cpu->cycles has no stall, memory
+            # latency or cache model and no TI page relates it to Hz, so this
+            # is a counter and an ORDER, never a rate: a run in which a timer
+            # period expired says the register sequence of SPRUH91D chapter 28
+            # is correct and says nothing whatever about how long it took, how
+            # it relates to AUXCLK or cdj_c6747_timer_input_hz(), or what a
+            # firmware delay loop would measure on hardware.
+            'the reciprocal approximations RCPSP/RCPDP/RSQRSP/RSQRDP deliver a correct exponent and a mantissa within the 2^-8 the manual specifies, but their bits below the eighth mantissa position are not hardware-exact; firmware that refines the seed (the documented Newton-Raphson use) converges regardless, firmware that consumes it directly may diverge',
+            'Timer64P counts one input clock per emulated CPU cycle (SPRUH91D chapter 28 register order, not rate); the step-to-tick ratio is unrelated to AUXCLK, so no elapsed-time, frequency or audio-rate conclusion may be drawn from a timer period expiring',
             *(['interrupt entry retires already-issued results with minimum empty cycles; exact interrupt pipeline latency is not modeled']
                if args.functional_dsp_timing else []),
             *(['coarse packet-driven McASP slots; not audio-rate or cycle-accurate']
@@ -397,7 +464,9 @@ def main():
         limits = dict(steps=args.steps, packets=args.packets, cycles=args.cycles,
                       packet_cycle_origin='input checkpoint counters',
                       boundary_semantics='checked between successful core steps; multicycle steps may cross a cycle ceiling')
-        manifest = dict(dump_sha256=hashlib.sha256(data).hexdigest(),
+        manifest = dict(build=build, trace_mode=args.trace_mode,
+                        complete=False,
+                        dump_sha256=hashlib.sha256(data).hexdigest(),
                         dump_path=str(args.dump.resolve()), steps=args.steps,
                         limits=limits, approximations=approximations,
                         dsp_timing_mode=('functional-runahead' if args.functional_dsp_timing else 'strict'),
@@ -451,13 +520,17 @@ def main():
                                for path, content in analysis_data.items()},
                             str(args.formats.resolve()): hashlib.sha256(format_data).hexdigest(),
                         })
-        (args.output / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+        # No manifest is written before execution: a manifest on disk is a
+        # record of a finished run, and a crashed replay must leave none.
         command = [str(binary), str(snapshot), str(args.steps), str(args.packets),
                    str(args.cycles), str(args.break_pc), str(args.boot_phase),
                    str(args.output / 'final.cdjdsp')]
         if event_data is not None:
             command.append(str(event_snapshot))
         replay_env = os.environ.copy()
+        replay_env.pop('CDJ_DSP_COMPACT_TRACE', None)
+        if args.trace_mode == 'compact':
+            replay_env['CDJ_DSP_COMPACT_TRACE'] = '1'
         replay_env.pop('CDJ_DSP_OBSERVE_PCM', None)
         replay_env.pop('CDJ_DSP_CONNECTED_STOPS', None)
         if args.connected_stops:
@@ -509,8 +582,7 @@ def main():
                     'sha256': hashlib.sha256(failure_bytes).hexdigest(),
                 },
             )
-            (args.output / 'manifest.json').write_text(
-                json.dumps(manifest, indent=2) + '\n')
+            write_manifest(args.output, manifest)
             if args.verify_repeat or expected is not None:
                 gate = dict(
                     scope='bounded event replay did not reach a connected boundary',
@@ -635,11 +707,12 @@ def main():
             'distinct_unsupported_encodings': len(unsupported_encodings),
         }
     manifest['complete'] = True
-    (args.output / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+    write_manifest(args.output, manifest)
     print(json.dumps(stop, separators=(',', ':')))
     if args.verify_repeat or expected is not None:
         actual = (args.output / 'trace.jsonl').read_bytes()
-        gate = dict(scope='trace equivalence only; not architectural correctness or boot',
+        gate = dict(scope='trace equivalence within selected mode; not architectural correctness or boot',
+                    trace_mode=args.trace_mode,
                     architectural_validation_eligible=validation_eligible,
                     limits=manifest['limits'],
                     approximations=manifest['approximations'],

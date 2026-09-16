@@ -6,6 +6,10 @@
 /bin/
 /build/
 
+# Claude Code creates agent worktrees here; they are checkouts of this repo and
+# must never be committed into it.
+/.claude/worktrees/
+
 # Belt and braces: the same files by name, wherever they land.
 *.UPD
 *.upd

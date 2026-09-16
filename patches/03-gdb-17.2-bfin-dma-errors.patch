@@ -1,0 +1,81 @@
+--- a/sim/bfin/dv-bfin_dma.c
++++ b/sim/bfin/dv-bfin_dma.c
+@@ -129,6 +129,15 @@
+   return (dma->irq_status & DMA_RUN);
+ }
+ 
++/* A DMA error terminates the channel and latches an interrupt request.  The
++   hardware keeps DMA_ERR set until firmware clears it with W1C; leaving
++   DMA_RUN asserted here would make a failed channel look busy forever. */
++static void
++bfin_dma_latch_error (struct hw *me, struct bfin_dma *dma)
++{
++  dma->irq_status = (dma->irq_status & ~DMA_RUN) | DMA_ERR;
++  hw_port_event (me, 0, 1);
++}
+ 
+ static struct hw *
+ bfin_dma_get_peer (struct hw *me, struct bfin_dma *dma)
+@@ -161,6 +170,9 @@
+ 
+   /* Address has to be mutiple of transfer size.  */
+   if (dma->start_addr & (dma->ele_size - 1))
+-    dma->irq_status |= DMA_ERR;
++    {
++      bfin_dma_latch_error (me, dma);
++      return;
++    }
+ 
+   if (dma->ele_size != (unsigned) abs (dma->x_modify))
+@@ -177,16 +189,31 @@
+     case DMAFLOW_ARRAY:
+       if (ndsize == 0 || ndsize > 7)
+ 	hw_abort (me, "DMA config error: DMAFLOW_ARRAY requires NDSIZE 1...7");
+-      sim_read (hw_system (me), dma->curr_desc_ptr, flows, ndsize * 2);
++      if (sim_read (hw_system (me), dma->curr_desc_ptr, flows, ndsize * 2)
++	  != ndsize * 2)
++	{
++	  bfin_dma_latch_error (me, dma);
++	  return;
++	}
+       break;
+     case DMAFLOW_SMALL:
+       if (ndsize == 0 || ndsize > 8)
+ 	hw_abort (me, "DMA config error: DMAFLOW_SMALL requires NDSIZE 1...8");
+-      sim_read (hw_system (me), dma->next_desc_ptr, flows, ndsize * 2);
++      if (sim_read (hw_system (me), dma->next_desc_ptr, flows, ndsize * 2)
++	  != ndsize * 2)
++	{
++	  bfin_dma_latch_error (me, dma);
++	  return;
++	}
+       break;
+     case DMAFLOW_LARGE:
+       if (ndsize == 0 || ndsize > 9)
+ 	hw_abort (me, "DMA config error: DMAFLOW_LARGE requires NDSIZE 1...9");
+-      sim_read (hw_system (me), dma->next_desc_ptr, flows, ndsize * 2);
++      if (sim_read (hw_system (me), dma->next_desc_ptr, flows, ndsize * 2)
++	  != ndsize * 2)
++	{
++	  bfin_dma_latch_error (me, dma);
++	  return;
++	}
+       break;
+     default:
+@@ -528,6 +555,6 @@
+  error:
+   /* Don't reschedule on errors ...  */
+-  dma->irq_status |= DMA_ERR;
++  bfin_dma_latch_error (me, dma);
+ }
+ 
+ static unsigned
+@@ -621,7 +648,8 @@
+ 	  dma->cdj_fresh = 1;
+ 	  bfin_dma_process_desc (me, dma);
+ 	  /* The writer is the master.  */
+-	  if (!(dma->peripheral_map & CTYPE) || (dma->config & WNR))
++	  if (bfin_dma_running (dma)
++	      && (!(dma->peripheral_map & CTYPE) || (dma->config & WNR)))
+ 	    bfin_dma_reschedule (me, 1);
+ 	}

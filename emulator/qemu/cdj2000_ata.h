@@ -53,6 +53,11 @@
 /*
  * Attach the drive.  `irq` is the INTC line for INTEVT 0xc00.
  *
+ * A real image may be attached with QEMU's normal IDE drive option:
+ * `-drive if=ide,media=cdrom,bus=0,unit=0,file=disc.iso,format=raw`.  When no
+ * matching drive is supplied the model keeps an empty, present CD drive, so
+ * the firmware still sees a real ATAPI device reporting no medium.
+ *
  * CDJ_ATAPI_ABSENT=1 skips the whole device, which restores the machine as it
  * was before this file existed and makes the A/B one binary.
  */

@@ -12,7 +12,7 @@ halfwords 29 and 30 (count, length in halfwords) and fetched by firmware.
 Printed, in record order:
 
 * a line whenever one of the watched status halfwords changes -- 13 (protocol
-  mode), 18 (source), 19, 20 (caution code), 26 (media state), 29/30 (the
+  mode), 18 (source), 19, 20 (caution code), 26 (legacy media state), 29/30 (the
   announcement);
 * every payload, identical consecutive ones collapsed with a repeat count.
   List answers (commands ``0x10..0x1f`` except ``0x19``, the layout of
@@ -23,6 +23,11 @@ Printed, in record order:
   that length ever went over.  An announcement that stands to the end of the
   dump with nothing delivered is the signature of a frame the link lost --
   the 896-byte track list of a playlist was found that way (2026-09-02).
+
+The semantic labels above originate in CDJ-2000 analysis. In particular,
+NXS halfword 26 is not a validated media-readiness indicator: the verified
+native-load capture lists TESTTONE.WAV while it remains 0x1000. Report its
+raw value, and use actual list replies to establish NXS browsing progress.
 """
 
 # SPDX-License-Identifier: GPL-2.0-or-later

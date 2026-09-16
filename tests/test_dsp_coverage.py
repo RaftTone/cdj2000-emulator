@@ -156,7 +156,7 @@ def test_faulting_word_is_probable_and_never_confirmed():
     ('parallel register write conflict', False),
     ('delayed-result write conflict', False),
     ('unmapped memory read', False),
-    ('SPLOOP interrupt-return buffer unavailable', False),
+    ('SPLOOP retained schedule mismatch', False),
     ('circular memory addressing not implemented', False),
 ])
 @pytest.mark.parametrize('stop_reason', ['fault', 'connected stop'])

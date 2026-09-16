@@ -678,6 +678,13 @@ def encode_hold(byte: int, mask: int, down: bool) -> str:
     return encode("down" if down else "up", byte, "%02x" % mask)
 
 
+def encode_level(byte: int, mask: int, high: bool) -> str:
+    """Set a persistent literal contact level, including active-low switches."""
+    if not 0 <= byte < PANEL_PAYLOAD_LEN or not 1 <= mask <= 0xff:
+        raise ValueError("level requires a payload byte and nonzero 8-bit mask")
+    return encode("level", byte, "%02x" % mask, int(high))
+
+
 def encode_analog(field: int, value: int) -> str:
     return encode("analog", field, value)
 

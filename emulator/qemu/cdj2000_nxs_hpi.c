@@ -42,6 +42,7 @@
 typedef struct {
     MemoryRegion registers;
     uint8_t l2[L2_SIZE];
+    uint8_t l1d[CDJ_DSP_L1D_SIZE];
     uint32_t address;
     CdjC6747Hpi hpi;
     bool reset_released, dsp_started, dsp_halted, dsp_running;
@@ -51,6 +52,7 @@ typedef struct {
     unsigned boot_phase;
     uint64_t words;
     uint64_t event_sequence, checkpoint_sequence;
+    int64_t checkpoint_check_ns; /* Host-only diagnostic polling throttle. */
     CdjC674x cpu;
     CdjC6747Syscfg syscfg;
     CdjC6747Psc psc;
@@ -108,13 +110,16 @@ static void record_event(NxsHpi *s, const char *type, uint64_t offset,
         error_report("nxs-hpi: DSP event transcript write failed");
 }
 
-static void capture_checkpoint(NxsHpi *s, const char *reason)
+static bool capture_checkpoint(NxsHpi *s, const char *reason)
 {
+    const char *policy = getenv("CDJ_NXS_DSP_CHECKPOINT_POLICY");
+    if (policy && !strcmp(policy, "fault") && !s->dsp_halted &&
+        strcmp(reason, "debug request")) return false;
     const char *directory = getenv("CDJ_NXS_DSP_CHECKPOINT_DIR");
-    if (!directory || !*directory || !s->shared_ram || !s->sdram) return;
+    if (!directory || !*directory || !s->shared_ram || !s->sdram) return false;
     if (g_mkdir_with_parents(directory, 0700)) {
         error_report("nxs-hpi: cannot create DSP checkpoint directory %s", directory);
-        return;
+        return false;
     }
     CdjDspCheckpointState state = {0};
     state.hpi_address = s->address;
@@ -150,13 +155,36 @@ static void capture_checkpoint(NxsHpi *s, const char *reason)
                                              state.checkpoint_sequence);
     g_autofree char *path = g_build_filename(directory, name, NULL);
     char error[160] = {0};
-    if (!cdj_dsp_checkpoint_write(path, &state, s->l2, sizeof(s->l2),
-                                  s->shared_ram, SHARED_RAM_SIZE,
-                                  s->sdram, SDRAM_SIZE, error, sizeof(error)))
+    if (!cdj_dsp_checkpoint_write_with_l1d(
+            path, &state, s->l2, sizeof(s->l2),
+            s->shared_ram, SHARED_RAM_SIZE, s->l1d, sizeof(s->l1d),
+            s->sdram, SDRAM_SIZE, error, sizeof(error))) {
         error_report("nxs-hpi: checkpoint failed: %s", error);
-    else
-        info_report("nxs-hpi: checkpoint=%s reason=%s event-sequence=%" PRIu64,
-                    path, reason, state.event_sequence);
+        return false;
+    }
+    info_report("nxs-hpi: checkpoint=%s reason=%s event-sequence=%" PRIu64,
+                path, reason, state.event_sequence);
+    return true;
+}
+
+static void capture_requested_checkpoint(NxsHpi *s)
+{
+    const char *request = getenv("CDJ_NXS_DSP_CHECKPOINT_REQUEST");
+    if (!request || !*request || s->dsp_running) return;
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    if (now < s->checkpoint_check_ns) return;
+    s->checkpoint_check_ns = now + 100000000;
+    if (!g_file_test(request, G_FILE_TEST_EXISTS)) return;
+    bool ok = capture_checkpoint(s, "debug request");
+    g_autofree char *response = ok ?
+        g_strdup_printf("{\"ok\":true,\"file\":\"%020" PRIu64 ".cdjdsp\"}\n",
+                        s->checkpoint_sequence) :
+        g_strdup("{\"ok\":false,\"error\":\"DSP checkpoint capture failed; inspect main-stderr.log\"}\n");
+    g_autofree char *done = g_strconcat(request, ".done", NULL);
+    if (!g_file_set_contents(done, response, -1, NULL))
+        error_report("nxs-hpi: cannot acknowledge DSP checkpoint request");
+    if (remove(request))
+        error_report("nxs-hpi: cannot remove DSP checkpoint request");
 }
 
 bool cdj_nxs_hpi_port(hwaddr address)
@@ -187,6 +215,10 @@ void cdj_nxs_hpi_reset_line(bool released)
         cdj_c6747_spi_transfer_reset(&s->spi_transfer);
         cdj_wm8740_reset(&s->wm8740);
         cdj_c6747_cache_reset(&s->cache);
+        /* SRAM contents are undefined across external reset.  Clear the
+         * functional backing store so a later SRAM partition cannot expose
+         * bytes retained from the preceding DSP lifetime. */
+        memset(s->l1d, 0, sizeof(s->l1d));
         cdj_c6747_edma_reset(&s->edma);
         cdj_c6747_mcasp_reset(&s->mcasp);
         cdj_c6747_mcasp_control_reset(&s->mcasp_control);
@@ -232,14 +264,19 @@ void cdj_nxs_hpi_boot_phase(unsigned phase)
 
 static uint8_t *host_memory(NxsHpi *s, uint32_t address)
 {
+    uint32_t l1d_offset;
+    if (address >= 0x11f00000u &&
+        cdj_c6747_l1d_sram_span(&s->cache, address, 4, &l1d_offset))
+        return s->l1d + l1d_offset;
     if (address >= L2_BASE && address <= L2_BASE + L2_SIZE - 4)
         return s->l2 + address - L2_BASE;
     if (address >= SHARED_RAM_BASE &&
         address <= SHARED_RAM_BASE + SHARED_RAM_SIZE - 4)
         return s->shared_ram + address - SHARED_RAM_BASE;
-    if (cdj_c6747_emifb_sdram_enabled(&s->emifb) && address >= SDRAM_BASE &&
-        address <= SDRAM_BASE + SDRAM_SIZE - 4)
-        return s->sdram + address - SDRAM_BASE;
+    uint32_t sdram_offset;
+    if (cdj_c6747_emifb_sdram_offset(&s->emifb, address, 4, SDRAM_SIZE,
+                                    &sdram_offset))
+        return s->sdram + sdram_offset;
     return NULL;
 }
 
@@ -252,6 +289,34 @@ static bool valid_data(NxsHpi *s)
 static bool dsp_read(void *opaque, uint32_t address, uint32_t *value)
 {
     NxsHpi *s = opaque;
+    /* RAM and its local L2 alias do not overlap any peripheral window.
+     * Instruction fetches dominate reads: avoid probing every MMIO device.
+     * Keep SDRAM's dynamic enable gate and all alignment checks. */
+    uint32_t l1d_offset;
+    if (!(address & 3) && cdj_c6747_l1d_sram_span(
+            &s->cache, address, 4, &l1d_offset)) {
+        *value = ldl_le_p(s->l1d + l1d_offset);
+        return true;
+    }
+    if (!(address & 3) && address >= SHARED_RAM_BASE &&
+        address <= SHARED_RAM_BASE + SHARED_RAM_SIZE - 4) {
+        *value = ldl_le_p(s->shared_ram + address - SHARED_RAM_BASE);
+        return true;
+    }
+    uint32_t sdram_offset;
+    if (!(address & 3) && address >= SDRAM_BASE && address < 0xe0000000u &&
+        cdj_c6747_emifb_sdram_offset(&s->emifb, address, 4, SDRAM_SIZE,
+                                    &sdram_offset)) {
+        *value = ldl_le_p(s->sdram + sdram_offset);
+        return true;
+    }
+    uint32_t local_address = address;
+    if (address >= 0x00800000 && address < 0x00840000) local_address += 0x11000000;
+    if (!(local_address & 3) && local_address >= L2_BASE &&
+        local_address <= L2_BASE + L2_SIZE - 4) {
+        *value = ldl_le_p(s->l2 + local_address - L2_BASE);
+        return true;
+    }
     if (cdj_c6747_syscfg_read(&s->syscfg, address, value)) return true;
     if (cdj_c6747_syscfg_priority_read(&s->syscfg_priority, address, value))
         return true;
@@ -273,26 +338,16 @@ static bool dsp_read(void *opaque, uint32_t address, uint32_t *value)
     if (cdj_c6747_emifb_read(&s->emifb, address, value)) return true;
     if ((s->syscfg.cfgchip[1] & 0x8000) &&
         cdj_c6747_hpi_cpu_read(&s->hpi, address, value)) return true;
-    if (!(address & 3) && address >= SHARED_RAM_BASE &&
-        address <= SHARED_RAM_BASE + SHARED_RAM_SIZE - 4) {
-        *value = ldl_le_p(s->shared_ram + address - SHARED_RAM_BASE);
-        return true;
-    }
-    if (cdj_c6747_emifb_sdram_enabled(&s->emifb) && !(address & 3) &&
-        address >= SDRAM_BASE && address <= SDRAM_BASE + SDRAM_SIZE - 4) {
-        *value = ldl_le_p(s->sdram + address - SDRAM_BASE);
-        return true;
-    }
-    if (address >= 0x00800000 && address < 0x00840000) address += 0x11000000;
-    if ((address & 3) || address < L2_BASE || address > L2_BASE + L2_SIZE - 4) return false;
-    *value = ldl_le_p(s->l2 + address - L2_BASE);
-    return true;
+    return false;
 }
 
 static uint8_t *dsp_memory_span(NxsHpi *s, uint32_t address, size_t size)
 {
     uint64_t end = (uint64_t)address + size;
     if (!size || end > UINT64_C(0x100000000)) return NULL;
+    uint32_t l1d_offset;
+    if (cdj_c6747_l1d_sram_span(&s->cache, address, size, &l1d_offset))
+        return s->l1d + l1d_offset;
     if (address >= L2_BASE && end <= (uint64_t)L2_BASE + L2_SIZE)
         return s->l2 + address - L2_BASE;
     if (address >= 0x00800000u &&
@@ -301,10 +356,28 @@ static uint8_t *dsp_memory_span(NxsHpi *s, uint32_t address, size_t size)
     if (address >= SHARED_RAM_BASE &&
         end <= (uint64_t)SHARED_RAM_BASE + SHARED_RAM_SIZE)
         return s->shared_ram + address - SHARED_RAM_BASE;
-    if (cdj_c6747_emifb_sdram_enabled(&s->emifb) &&
-        address >= SDRAM_BASE && end <= (uint64_t)SDRAM_BASE + SDRAM_SIZE)
-        return s->sdram + address - SDRAM_BASE;
+    uint32_t sdram_offset;
+    if (cdj_c6747_emifb_sdram_offset(&s->emifb, address, size, SDRAM_SIZE,
+                                    &sdram_offset))
+        return s->sdram + sdram_offset;
     return NULL;
+}
+
+static bool dsp_l1d_write(NxsHpi *s, uint32_t address, uint64_t value,
+                          unsigned size, bool commit)
+{
+    uint32_t offset;
+    if ((size != 1 && size != 2 && size != 4 && size != 8) ||
+        !cdj_c6747_l1d_sram_span(&s->cache, address, size, &offset))
+        return false;
+    if (commit) {
+        uint8_t *target = s->l1d + offset;
+        if (size == 8) stq_le_p(target, value);
+        else if (size == 1) *target = value;
+        else if (size == 2) stw_le_p(target, value);
+        else stl_le_p(target, value);
+    }
+    return true;
 }
 
 typedef struct {
@@ -419,6 +492,9 @@ static bool edma_mcasp_transaction(NxsHpi *s, bool edma_access,
                                    uint32_t address, uint64_t value,
                                    unsigned size, bool commit)
 {
+    if (!(edma_access ? cdj_c6747_edma_write_mapped(address, size) :
+                       cdj_c6747_mcasp_control_write_mapped(address, size)))
+        return false;
     CdjC6747Edma trial_edma = s->edma;
     CdjC6747McaspControl trial_mcasp = s->mcasp_control;
     EdmaBusContext trial_context = {.owner = s, .mcasp = &trial_mcasp};
@@ -530,6 +606,7 @@ static bool dsp_write(void *opaque, uint32_t address, uint64_t value,
                       unsigned size, bool commit)
 {
     NxsHpi *s = opaque;
+    if (dsp_l1d_write(s, address, value, size, commit)) return true;
     if (cdj_c6747_syscfg_pll_locked(&s->syscfg) &&
         cdj_c6747_pll_write_mapped(address, size)) {
         if (commit) info_report("nxs-pll: locked write ignored address=%#x value=%#x",
@@ -650,14 +727,15 @@ static bool dsp_write(void *opaque, uint32_t address, uint64_t value,
         }
         return true;
     }
-    if (cdj_c6747_emifb_sdram_enabled(&s->emifb) &&
-        (size == 1 || size == 2 || size == 4 || size == 8) &&
-        address >= SDRAM_BASE && address <= SDRAM_BASE + SDRAM_SIZE - size) {
+    uint32_t sdram_offset;
+    if ((size == 1 || size == 2 || size == 4 || size == 8) &&
+        cdj_c6747_emifb_sdram_offset(&s->emifb, address, size, SDRAM_SIZE,
+                                    &sdram_offset)) {
         if (commit) {
-            if (size == 8) stq_le_p(s->sdram + address - SDRAM_BASE, value);
-            else if (size == 1) s->sdram[address - SDRAM_BASE] = value;
-            else if (size == 2) stw_le_p(s->sdram + address - SDRAM_BASE, value);
-            else stl_le_p(s->sdram + address - SDRAM_BASE, value);
+            if (size == 8) stq_le_p(s->sdram + sdram_offset, value);
+            else if (size == 1) s->sdram[sdram_offset] = value;
+            else if (size == 2) stw_le_p(s->sdram + sdram_offset, value);
+            else stl_le_p(s->sdram + sdram_offset, value);
         }
         return true;
     }
@@ -683,10 +761,25 @@ static void dsp_cycle_tick(void *opaque)
         info_report("nxs-spi: timed WM8740 latch word=%#x transfers=%" PRIu64,
                     s->wm8740.last_word, s->wm8740.transfers);
     cdj_c6747_pll_tick(&s->pll);
+    /* SPRUH91D chapter 28 counts on the timer input clock; this callback is
+     * the only per-cycle hook the core offers, so one call is one input clock
+     * period - an approximation of nothing measurable.  It is declared in BOTH
+     * provenance artifacts, because both reach this line: tools/cdj_dsp/replay.py
+     * for replay runs and tools/cdj_main/nxs_vm.py for the QEMU firmware boots
+     * that write runs/<run>/dsp-checkpoints/manifest.json.  This is the board a
+     * "firmware delay loop terminated" observation would be made on, so the
+     * declaration there is load-bearing, not decorative.  The events themselves
+     * are Table 2-1's, mapped by cdj_c6747_timer_event(). */
+    uint32_t timer_outputs = cdj_c6747_timers_tick(s->timers);
+    for (unsigned bit = 0; timer_outputs >> bit; ++bit)
+        if (timer_outputs & (1u << bit))
+            cdj_c6747_intc_deliver_event(&s->intc, &s->intc_delivery,
+                                         cdj_c6747_timer_event(bit));
 }
 
 static void report_dsp(NxsHpi *s, const char *reason)
 {
+    capture_requested_checkpoint(s);
     info_report("nxs-c674x: packets=%" PRIu64 " cycles=%" PRIu64
                 " pc=%#x word=%#x stop=%s B15=%#x B14=%#x B3=%#x",
                 s->cpu.packets, s->cpu.cycles, s->cpu.fault ? s->cpu.fault_pc : s->cpu.pc,
@@ -818,6 +911,7 @@ static void start_dsp(NxsHpi *s)
 static uint64_t hpi_read(void *opaque, hwaddr offset, unsigned size)
 {
     NxsHpi *s = opaque;
+    capture_requested_checkpoint(s);
     uint32_t result = 0xffffffff;
     uint32_t address = s->address;
     bool data_access = offset == 0x80000 || offset == 0xc0000;

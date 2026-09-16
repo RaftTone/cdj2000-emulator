@@ -3,6 +3,7 @@
 #define CDJ_C6747_CACHE_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #define CDJ_C6747_CACHE_BASE 0x01840000u
@@ -24,5 +25,9 @@ bool cdj_c6747_cache_read(CdjC6747Cache *cache, uint32_t address,
  * registers remain unreadable; coherence commands complete immediately. */
 bool cdj_c6747_cache_write(CdjC6747Cache *cache, uint32_t address,
                            uint64_t value, unsigned size, bool commit);
+/* Translate a currently exposed local/global L1D SRAM span to its physical
+ * 32 KiB backing-store offset. Reserved cache modes expose no SRAM. */
+bool cdj_c6747_l1d_sram_span(const CdjC6747Cache *cache, uint32_t address,
+                             size_t size, uint32_t *offset);
 
 #endif

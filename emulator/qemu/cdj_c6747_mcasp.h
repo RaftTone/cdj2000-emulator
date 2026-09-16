@@ -31,10 +31,40 @@ typedef struct {
     uint64_t xrsr_source_sequence[3][16], tx_slot_boundaries[3];
 } CdjC6747McaspControl;
 void cdj_c6747_mcasp_reset(CdjC6747Mcasp *s);
+/* Candidate window only; the control write still validates register/value. */
+bool cdj_c6747_mcasp_control_write_mapped(uint32_t address, unsigned size);
 bool cdj_c6747_mcasp_read(const CdjC6747Mcasp *s, uint32_t address,
                          uint32_t *value);
 bool cdj_c6747_mcasp_write(CdjC6747Mcasp *s, uint32_t address,
                           uint64_t value, unsigned size, bool commit);
+/* Taps in the transmit clock chain AUXCLK -> AHCLKX -> ACLKX -> AFSX. */
+#define CDJ_C6747_MCASP_AHCLKX 0u
+#define CDJ_C6747_MCASP_ACLKX  1u
+#define CDJ_C6747_MCASP_AFSX   2u
+
+/* One tap of the transmit clock chain for one McASP, as an exact unreduced
+ * fraction: *numerator Hz over *denominator, given AUXCLK in Hz from
+ * cdj_c6747_pll_auxclk_hz().  SPRUH91D Table 6-2 printed page 104 (PDF page
+ * 104) and Table 7-1 printed page 118 put the McASP serial clock on AUXCLK
+ * (the McASP's peripheral bus interface is on SYSCLK2 instead, which is a
+ * different clock and not what this returns).  Figure 24-15 printed page 996
+ * and Tables 24-37 and 24-38 printed pages 1077 and 1078 give
+ *   AHCLKX = AUXCLK / (HCLKXDIV + 1)    (/1 ... /4096)
+ *   ACLKX  = AHCLKX / (CLKXDIV + 1)     (/1 ... /32)
+ * and for the internally generated TDM frame sync SPRUH91D printed page 1011
+ * gives XMOD as the TDM slot count (2h..20h), so
+ *   AFSX   = ACLKX / (slot bits x slots).
+ * False - outputs untouched - wherever the manuals fix no rate: an external
+ * AHCLKX/ACLKX pin source, an externally generated frame sync, burst mode,
+ * DIT mode, or an illegal slot size.  This is a rate, not a run condition:
+ * GBLCTL's clock/serializer resets and the PSC1 LPSC that gates the McASP
+ * module (LPSC 7, 8 and 9, Table 8-2 printed page 141) decide whether these
+ * clocks run, and none of them change this rate. */
+bool cdj_c6747_mcasp_tx_clock_hz(const CdjC6747McaspControl *s,
+                                unsigned instance, uint32_t auxclk_hz,
+                                unsigned tap, uint64_t *numerator,
+                                uint32_t *denominator);
+
 void cdj_c6747_mcasp_control_reset(CdjC6747McaspControl *s);
 bool cdj_c6747_mcasp_control_valid(const CdjC6747McaspControl *s);
 bool cdj_c6747_mcasp_control_read(const CdjC6747McaspControl *s,

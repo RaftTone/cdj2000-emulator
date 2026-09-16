@@ -67,17 +67,17 @@ bool cdj_c674x_loop_issue_filtered(CdjC674xLoop *loop, uint32_t tags[8], unsigne
     uint32_t result[8];
     unsigned n = 0;
     if (!loop->ii || (!loop->sealed && loop->cycle >= 48)) return false;
-    for (unsigned origin = 0; origin < loop->length; ++origin) {
-        if (origin > loop->cycle) continue;
+    /* Only origins congruent to this cycle modulo II can issue. Preserve
+     * ascending origin/tag order, but skip all the other schedule entries.
+     * Use a wide origin so the increment cannot wrap for a large II. */
+    bool finite = !loop->predicate_loop ||
+                  (loop->sealed && loop->end_cycle != UINT64_MAX);
+    for (uint64_t origin = loop->cycle % loop->ii;
+         origin < loop->length && origin <= loop->cycle;
+         origin += loop->ii) {
         uint64_t age = loop->cycle - origin;
-        /* Predicate loops are normally unbounded.  Interrupt detection turns
-         * their current launch count into a finite epilog schedule, just as
-         * it does for SPLOOP/SPLOOPD (SPRUFE8B 7.13.1). */
-        bool interrupt_epilog = loop->predicate_loop && loop->sealed &&
-                                loop->end_cycle != UINT64_MAX;
-        if (age % loop->ii ||
-            ((!loop->predicate_loop || interrupt_epilog) &&
-             age / loop->ii >= loop->iterations))
+        /* Predicate loops become finite when interrupt draining begins. */
+        if (finite && age / loop->ii >= loop->iterations)
             continue;
         for (unsigned j = 0; j < loop->count[origin]; ++j) {
             uint32_t tag = loop->tags[origin][j];

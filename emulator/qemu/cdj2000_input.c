@@ -35,11 +35,12 @@
  *   press <byte> <mask> [ms]  queue one down/up pulse, mask is hex
  *   down <byte> <mask>        hold bits down until "up" (for chords and holds)
  *   up <byte> <mask>          release them
+ *   level <byte> <mask> <0|1> persistently force literal contact levels
  *   analog <field> <value>    set analogue field 0..7 outright (7 = the encoder)
  *   rotary <field> <delta>    move it by <delta>, one step per panel frame
  *   step <n>                  steps per frame for the rotary ramp (default 1)
  *   hold <ms> / gap <ms>      default press hold and the quiet time after it
- *   clear                     release every bit and stop driving the analogue
+ *   clear                     release bits, level overrides and analogue fields
  *   state                     report held bits, analogue fields, queue depth
  *   sd-lid open|closed|toggle|state  persistent NXS lid contact, not a key
  *
@@ -120,6 +121,9 @@ static int64_t cdj_input_phase_since;
 static unsigned cdj_input_phase_frames;
 
 static uint8_t cdj_input_held[CDJ_INPUT_PAYLOAD_MAX];
+/* Literal levels override the base frame and other runtime inputs. */
+static uint8_t cdj_input_level_mask[CDJ_INPUT_PAYLOAD_MAX];
+static uint8_t cdj_input_level_value[CDJ_INPUT_PAYLOAD_MAX];
 /* NXS lid is a level contact, not a key. -1 preserves legacy raw input. */
 static int cdj_input_sd_lid = -1; /* 0=open, 1=closed */
 static bool cdj_input_lid_initialized;
@@ -306,6 +310,14 @@ static void cdj_input_report_state(void)
     for (i = 0; i < CDJ_INPUT_PAYLOAD_MAX; i++) {
         g_string_append_printf(text, "%02x", cdj_input_held[i]);
     }
+    g_string_append_printf(text, " level_mask=");
+    for (i = 0; i < CDJ_INPUT_PAYLOAD_MAX; i++) {
+        g_string_append_printf(text, "%02x", cdj_input_level_mask[i]);
+    }
+    g_string_append_printf(text, " level_value=");
+    for (i = 0; i < CDJ_INPUT_PAYLOAD_MAX; i++) {
+        g_string_append_printf(text, "%02x", cdj_input_level_value[i]);
+    }
     for (i = 0; i < CDJ_INPUT_ANALOG_FIELDS; i++) {
         g_string_append_printf(text, " a%u=%s%d/%d", i,
                                cdj_input_analog_driven[i] ? "" : "-",
@@ -323,6 +335,8 @@ static void cdj_input_clear(void)
     unsigned i;
 
     memset(cdj_input_held, 0, sizeof(cdj_input_held));
+    memset(cdj_input_level_mask, 0, sizeof(cdj_input_level_mask));
+    memset(cdj_input_level_value, 0, sizeof(cdj_input_level_value));
     cdj_input_queue_head = 0;
     cdj_input_queue_len = 0;
     for (i = 0; i < CDJ_INPUT_ANALOG_FIELDS; i++) {
@@ -339,7 +353,7 @@ static void cdj_input_clear(void)
  */
 static void cdj_input_command(char *line)
 {
-    char *word[4] = { NULL, NULL, NULL, NULL };
+    char *word[5] = { NULL, NULL, NULL, NULL, NULL };
     const char *verb;
     const char *arg1;
     const char *arg2;
@@ -348,7 +362,7 @@ static void cdj_input_command(char *line)
     long second = 0;
     long third = 0;
 
-    cdj_input_split(line, word, 4);
+    cdj_input_split(line, word, 5);
     verb = word[0];
     arg1 = word[1];
     arg2 = word[2];
@@ -391,6 +405,26 @@ static void cdj_input_command(char *line)
         cdj_input_clear();
         info_report("cdj2000-input: cleared");
         cdj_input_reply("ok clear\n");
+        return;
+    }
+    if (!strcmp(verb, "level")) {
+        if (!cdj_input_number(arg1, &first)
+            || first < 0 || first >= CDJ_INPUT_PAYLOAD_MAX
+            || !cdj_input_hex(arg2, &second) || second == 0
+            || !arg3 || (strcmp(arg3, "0") && strcmp(arg3, "1"))
+            || word[4]) {
+            cdj_input_reply("err level <byte 0..21> <mask hex 01..ff> <0|1>\n");
+            return;
+        }
+        cdj_input_level_mask[first] |= (uint8_t)second;
+        if (arg3[0] == '1') {
+            cdj_input_level_value[first] |= (uint8_t)second;
+        } else {
+            cdj_input_level_value[first] &= (uint8_t)~second;
+        }
+        info_report("cdj2000-input: byte %ld mask %#lx level %s", first,
+                    second, arg3);
+        cdj_input_reply("ok level\n");
         return;
     }
     if (!strcmp(verb, "step")) {
@@ -798,6 +832,10 @@ void cdj_input_apply(uint8_t *payload, unsigned len)
     }
     cdj_input_run_press(payload, len, now);
     cdj_input_run_analog(payload, len, now);
+    for (i = 0; i < len && i < CDJ_INPUT_PAYLOAD_MAX; i++) {
+        payload[i] = (payload[i] & ~cdj_input_level_mask[i])
+                     | cdj_input_level_value[i];
+    }
     if (len > 17 && cdj_input_sd_lid >= 0) {
         payload[17] = (payload[17] & ~4u) | (cdj_input_sd_lid ? 4u : 0u);
     }

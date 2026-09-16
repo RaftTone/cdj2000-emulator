@@ -65,6 +65,12 @@ fi
 echo "mirroring board sources into $QEMU_SRC/hw/sh4"
 for source in "$REPO"/emulator/qemu/*.c "$REPO"/emulator/qemu/*.h; do
     [ -e "$source" ] || continue
+    # Preserve mtimes for unchanged inputs so Ninja can reuse their objects.
+    # Compare bytes, not timestamps: checkout/restore may retain old mtimes.
+    destination=$QEMU_SRC/hw/sh4/$(basename "$source")
+    if cmp -s "$source" "$destination"; then
+        continue
+    fi
     cp -v "$source" "$QEMU_SRC/hw/sh4/"
 done
 

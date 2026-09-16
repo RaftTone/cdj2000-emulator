@@ -401,3 +401,49 @@ Store the mask first. The BF531 NXS GUI uses the **bf537** register-layout path.
 forwarding stub, covering masking, unmasking, pending shared sources and no
 pending source. It requires the locally patched simulator source and a compiler.
 This is a mask-ordering fix, not a complete SIC/CEC pulse/acknowledgment model.
+
+## 08: skip full-frame comparisons after unchanged scans
+
+Track whether a scanline was converted during the current frame. If none was,
+the RGB buffer cannot have changed, so skip comparing it with the previously
+published frame. A changed scan still compares RGB before publishing: changes
+in unused raw pixel bits must not create duplicate images. Initial publication,
+forced publication, scoring, raw output, scan timing, and DMA consumption retain
+their existing behavior.
+
+`tests/test_bfin_frame_change.py` compiles the actual locally patched file
+backend and feeds black, unchanged, changed, and restored scanlines. It checks
+publication counts and that unchanged scans avoid the full RGB comparison.
+Rebuild with `sh scripts/build-bfin-sim.sh` to apply the patch.
+
+## 09: move the LZSS accelerator off the instruction stack
+
+Extract the optional decompressor into a non-inlined helper. Its 4 KiB window
+no longer enlarges every `interp_insn_bfin` call, including NXS runs where the
+accelerator is disabled. Preserve all bank checks, memory writes, return-PC
+updates, and the original pre-probe bypass when acceleration declines.
+
+`tests/test_bfin_cold_lzss.py` exercises the built helper with a synthetic
+space-producing bank and an unsupported source. Fixed-tick firmware benchmarks
+and the generated dispatcher prologue are recorded in `ITERATION_ANALYSIS.md`.
+Rebuild with `sh scripts/build-bfin-sim.sh` to apply the patch.
+
+## 10: retain the SPORT receive capture descriptor
+
+Keep the run-local receive capture file open, flushing each complete SPRX
+record immediately. Normal exit closes the descriptor; abrupt termination
+still retains already flushed records. Write/close failures are reported.
+The capture path is a process-lifetime setting, as used by the NXS launcher.
+`tests/test_bfin_sport_capture.py` checks descriptor reuse, record visibility,
+and byte-exact output after both normal and abrupt process exit.
+
+## 11: retain the SPORT transmit capture descriptor
+
+Keep the `BFIN_SPORT_TX_OUTPUT` capture file open for the process, flushing each
+complete `SPTX` record immediately and closing it at normal exit. The packet
+header, SPORT base, payload bytes, append behavior and abrupt-termination
+visibility are unchanged. The destination is read once, matching the
+receive-capture lifetime contract. `tests/test_bfin_sport_tx_capture.py`
+checks one-open descriptor reuse, visibility before close, and byte-exact
+normal/abrupt output. `tools/cdj_gui/benchmark_sport_tx.py` measures the
+capture path against the previous open/write/close implementation.

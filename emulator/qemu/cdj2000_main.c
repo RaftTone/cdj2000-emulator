@@ -54,6 +54,7 @@
 #include "cdj2000_dsp.h"
 #include "cdj2000_nxs_hpi.h"
 #include "cdj_nxs_iic.h"
+#include "cdj_nxs_eth.h"
 
 static bool cdj_nxs_profile;
 #include "cdj2000_input.h"
@@ -256,6 +257,7 @@ enum {
     CDJ_INTC_ATA,
     CDJ_INTC_USB,
     CDJ_INTC_USB_DMA,
+    CDJ_INTC_ETH,
     CDJ_INTC_TMU3,
     CDJ_INTC_TMU4,
     CDJ_INTC_TMU5,
@@ -3970,7 +3972,7 @@ static void cdj_sdhi_data_ready(void *opaque)
 }
 
 /*
- * The media state the GUI routes on.
+ * The CDJ-2000 media state the GUI routes on (not an NXS address map).
  *
  * Status halfword 26 carries one 3-bit state per source, built by 0x218afe
  * from the four words at 0x0489bd68, one per source in MAIN's own numbering
@@ -4392,6 +4394,7 @@ static void cdj_intc_timer_init(MemoryRegion *system, SuperHCPU *cpu)
         INTC_VECT(CDJ_INTC_ATA, INTEVT_ATA),
         INTC_VECT(CDJ_INTC_USB, INTEVT_USB),
         INTC_VECT(CDJ_INTC_USB_DMA, INTEVT_USB_DMA),
+        INTC_VECT(CDJ_INTC_ETH, 0x920), /* SH7764 EtherC, manual Table13.2 */
         INTC_VECT(CDJ_INTC_TMU3, INTEVT_TMU3),
         INTC_VECT(CDJ_INTC_TMU4, INTEVT_TMU4),
         INTC_VECT(CDJ_INTC_TMU5, INTEVT_TMU5),
@@ -4416,7 +4419,7 @@ static void cdj_intc_timer_init(MemoryRegion *system, SuperHCPU *cpu)
         /* INT2PRI3: H-UDI, DMAC (DMINT0..), reserved, reserved. */
         { 0xffd4000c, 0, 32, 8, { 0, CDJ_INTC_USB_DMA, 0, 0 } },
         /* INT2PRI12: VDC2, reserved, USB, EtherC. */
-        { 0xffd400b0, 0, 32, 8, { 0, 0, CDJ_INTC_USB, 0 } },
+        { 0xffd400b0, 0, 32, 8, { 0, 0, CDJ_INTC_USB, CDJ_INTC_ETH } },
     };
     struct intc_desc *intc = g_new0(struct intc_desc, 1);
     MemoryRegion *ccn = g_new(MemoryRegion, 1);
@@ -4454,6 +4457,7 @@ static void cdj_intc_timer_init(MemoryRegion *system, SuperHCPU *cpu)
     cpu->env.intc_handle = intc;
 
     cdj_sdhi_init(system, intc->irqs[CDJ_INTC_SDHI]);
+    if (cdj_nxs_profile) cdj_nxs_eth_init(intc->irqs[CDJ_INTC_ETH]);
     cdj_link_board_init(system, intc);
     cdj_panel_scif_init(system);
     /*

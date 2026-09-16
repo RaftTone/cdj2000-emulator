@@ -96,6 +96,7 @@ static unsigned harness_replies;
 static char harness_reply_line[4096];
 static size_t harness_reply_fill;
 static bool harness_defer_frame_replies;
+static uint8_t harness_base_payload[HARNESS_PAYLOAD];
 
 static void harness_sleep_ms(int milliseconds)
 {
@@ -188,7 +189,7 @@ static void frame(void)
     uint8_t payload[HARNESS_PAYLOAD];
     int i;
 
-    memset(payload, 0, sizeof(payload));
+    memcpy(payload, harness_base_payload, sizeof(payload));
     cdj_input_apply(payload, sizeof(payload));
     printf("f %d %" PRId64 " ", harness_frame++, cdj_stub_clock_ns);
     for (i = 0; i < HARNESS_PAYLOAD; i++) {
@@ -251,6 +252,16 @@ int main(int argc, char **argv)
 {
     const char *scenario = argc > 1 ? argv[1] : "press";
     const char *port = getenv("CDJ_INPUT_PORT");
+    const char *base = getenv("CDJ_TEST_PANEL_BASE");
+
+    if (base) {
+        assert(strlen(base) == 2 * HARNESS_PAYLOAD);
+        for (unsigned i = 0; i < HARNESS_PAYLOAD; i++) {
+            unsigned value;
+            assert(sscanf(base + 2 * i, "%2x", &value) == 1);
+            harness_base_payload[i] = value;
+        }
+    }
 
 #ifdef _WIN32
     WSADATA started;

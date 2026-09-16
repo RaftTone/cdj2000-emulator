@@ -8,7 +8,7 @@
 #include <string.h>
 
 #define CHECKPOINT_ENDIAN 0x01020304u
-#define CHECKPOINT_MAGIC "CDJDSP11"
+#define CHECKPOINT_MAGIC "CDJDSP12"
 #define CHECKPOINT_SCHEMA1_MAGIC "CDJDSP1\0"
 #define CHECKPOINT_SCHEMA2_MAGIC "CDJDSP2\0"
 #define CHECKPOINT_SCHEMA3_MAGIC "CDJDSP3\0"
@@ -19,6 +19,7 @@
 #define CHECKPOINT_SCHEMA8_MAGIC "CDJDSP8\0"
 #define CHECKPOINT_SCHEMA9_MAGIC "CDJDSP9\0"
 #define CHECKPOINT_SCHEMA10_MAGIC "CDJDSP10"
+#define CHECKPOINT_SCHEMA11_MAGIC "CDJDSP11"
 #define CHECKPOINT_COMPONENTS 9u
 
 typedef struct {
@@ -127,6 +128,72 @@ static void legacy_component_sizes(uint32_t sizes[CHECKPOINT_COMPONENTS])
     sizes[8] = sizeof(CdjC6747Emifb);
 }
 
+/* Every size above is derived from the CURRENT structure layout, so growing or
+ * reordering any serialised structure silently redefines what an older schema
+ * was, and every checkpoint already written under that schema number stops
+ * matching its recorded header.  That has happened: 146 checkpoints in runs/
+ * carry schema-7/8 headers whose component tail is 1900, 7080, 7092 or 7096
+ * bytes where the derivations below now produce 2188 and 7712, and the reader
+ * refuses them.  The numbers below are the ones recorded in every loadable
+ * run's manifest, so pin them: a layout change now fails the build instead of
+ * orphaning checkpoints.  Update one only together with a new schema and its
+ * own migration path, never to make a derivation match a changed struct. */
+_Static_assert(sizeof(CdjC674x) == 6592, "CdjC674x ABI is checkpoint-bound");
+_Static_assert(sizeof(CdjC6747Syscfg) == 112, "component 1 size changed");
+_Static_assert(sizeof(CdjC6747Psc) == 784, "component 2 size changed");
+_Static_assert(sizeof(CdjC6747Mcasp) == 36, "component 3 size changed");
+_Static_assert(sizeof(CdjC6747Gpio) == 84, "component 4 size changed");
+_Static_assert(sizeof(CdjC6747I2c) == 32, "component 5 size changed");
+_Static_assert(sizeof(CdjC6747Pll) == 144, "component 6 size changed");
+_Static_assert(sizeof(CdjC6747Hpi) == 6, "component 7 size changed");
+/* Component 8 is one lumped total, so these pin its members individually. */
+_Static_assert(sizeof(CdjC6747Emifb) == 28, "component 8 member size changed");
+_Static_assert(sizeof(CdjC6747Intc) == 60, "component 8 member size changed");
+_Static_assert(sizeof(CdjC6747Timer) * CDJ_C6747_TIMER_COUNT == 200,
+               "component 8 member size changed");
+_Static_assert(sizeof(CdjC6747Spi) * CDJ_C6747_SPI_COUNT == 168,
+               "component 8 member size changed");
+_Static_assert(sizeof(CdjC6747Cache) == 1072, "component 8 member size changed");
+_Static_assert(sizeof(CdjC6747McaspControl) == 1912,
+               "component 8 member size changed");
+_Static_assert(sizeof(CdjC6747Edma) == 4256, "component 8 member size changed");
+_Static_assert(sizeof(CdjC6747SyscfgPriority) == 12,
+               "component 8 member size changed");
+_Static_assert(sizeof(CdjC6747IntcDelivery) == 4,
+               "component 8 member size changed");
+_Static_assert(sizeof(CdjWm8740) == 32, "component 8 member size changed");
+_Static_assert(sizeof(CdjC6747SpiTransfer) == 40,
+               "component 8 member size changed");
+_Static_assert(sizeof(CdjDspScheduler) == 32, "component 8 member size changed");
+/* State sizes every recorded schema's header carries.  SCHEMA7_MCASP_CONTROL_SIZE
+ * is the one migration constant taken from a member offset rather than a member
+ * size; 660 is the value the four loadable schema-7 checkpoints were written
+ * with.  (The "Schema-7 state ends above" comment in cdj_c6747_mcasp.h sits
+ * before xrsr, which would give 1300 and match no recorded file.) */
+_Static_assert(SCHEMA7_MCASP_CONTROL_SIZE == 660, "schema-7 prefix moved");
+_Static_assert(sizeof(CdjDspCheckpointState) == 15808, "schema-11 state size");
+_Static_assert(_Alignof(CdjDspCheckpointState) == 8, "state alignment changed");
+/* The reader rounds each prefix up to the structure's alignment, exactly as
+ * below, because appending INTC reused schema-2's trailing padding. */
+#define CHECKPOINT_ROUND(bytes) \
+    (((bytes) + _Alignof(CdjDspCheckpointState) - 1) / \
+     _Alignof(CdjDspCheckpointState) * _Alignof(CdjDspCheckpointState))
+#define CHECKPOINT_PREFIX(member) \
+    CHECKPOINT_ROUND(offsetof(CdjDspCheckpointState, member))
+_Static_assert(CHECKPOINT_PREFIX(intc) == 8024, "schema-1/2 state size");
+_Static_assert(CHECKPOINT_PREFIX(timers) == 8080, "schema-3 state size");
+_Static_assert(CHECKPOINT_PREFIX(spis) == 8280, "schema-4 state size");
+_Static_assert(CHECKPOINT_PREFIX(cache) == 8448, "schema-5 state size");
+_Static_assert(CHECKPOINT_PREFIX(mcasp_control) == 9520, "schema-6 state size");
+_Static_assert(CHECKPOINT_ROUND(offsetof(CdjDspCheckpointState, mcasp_control) +
+                                SCHEMA7_MCASP_CONTROL_SIZE) == 10184,
+               "schema-7 state size");
+_Static_assert(CHECKPOINT_PREFIX(wm8740) == 15704, "schema-8 state size");
+_Static_assert(CHECKPOINT_PREFIX(spi_transfer) == 15736, "schema-9 state size");
+_Static_assert(CHECKPOINT_PREFIX(scheduler) == 15776, "schema-10 state size");
+#undef CHECKPOINT_PREFIX
+#undef CHECKPOINT_ROUND
+
 void cdj_dsp_checkpoint_prepare(CdjDspCheckpointState *state,
                                 const char *reason)
 {
@@ -207,17 +274,19 @@ static bool state_valid(const CdjDspCheckpointState *state)
            state->fault[sizeof(state->fault) - 1] == '\0';
 }
 
-bool cdj_dsp_checkpoint_write(const char *path,
-                              const CdjDspCheckpointState *input,
-                              const uint8_t *l2, size_t l2_size,
-                              const uint8_t *shared_ram, size_t shared_ram_size,
-                              const uint8_t *sdram, size_t sdram_size,
-                              char *error, size_t error_size)
+bool cdj_dsp_checkpoint_write_with_l1d(
+    const char *path, const CdjDspCheckpointState *input,
+    const uint8_t *l2, size_t l2_size,
+    const uint8_t *shared_ram, size_t shared_ram_size,
+    const uint8_t *l1d, size_t l1d_size,
+    const uint8_t *sdram, size_t sdram_size,
+    char *error, size_t error_size)
 {
     CdjDspCheckpointState state = *input;
-    if (!path || !l2 || !shared_ram || !sdram ||
+    if (!path || !l2 || !shared_ram || !l1d || !sdram ||
         l2_size != CDJ_DSP_L2_SIZE ||
         shared_ram_size != CDJ_DSP_SHARED_RAM_SIZE ||
+        l1d_size != CDJ_DSP_L1D_SIZE ||
         sdram_size != CDJ_DSP_SDRAM_SIZE || !state_valid(&state)) {
         fail(error, error_size, "invalid checkpoint state or memory size");
         return false;
@@ -251,12 +320,13 @@ bool cdj_dsp_checkpoint_write(const char *path,
     header.page_size = CDJ_DSP_CHECKPOINT_PAGE_SIZE;
     header.page_count = page_count;
     header.present_pages = present;
-    header.payload_size = sizeof(state) + l2_size + shared_ram_size + bitmap_size +
+    header.payload_size = sizeof(state) + l2_size + shared_ram_size + l1d_size + bitmap_size +
                           (uint64_t)present * CDJ_DSP_CHECKPOINT_PAGE_SIZE;
     uint64_t hash = UINT64_C(14695981039346656037);
     hash = checksum(hash, &state, sizeof(state));
     hash = checksum(hash, l2, l2_size);
     hash = checksum(hash, shared_ram, shared_ram_size);
+    hash = checksum(hash, l1d, l1d_size);
     hash = checksum(hash, bitmap, bitmap_size);
     for (uint32_t page = 0; page < page_count; ++page) {
         if (bitmap[page / 8] & (1u << (page % 8)))
@@ -275,6 +345,7 @@ bool cdj_dsp_checkpoint_write(const char *path,
               fwrite(&state, 1, sizeof(state), file) == sizeof(state) &&
               fwrite(l2, 1, l2_size, file) == l2_size &&
               fwrite(shared_ram, 1, shared_ram_size, file) == shared_ram_size &&
+              fwrite(l1d, 1, l1d_size, file) == l1d_size &&
               fwrite(bitmap, 1, bitmap_size, file) == bitmap_size;
     for (uint32_t page = 0; ok && page < page_count; ++page) {
         if (bitmap[page / 8] & (1u << (page % 8))) {
@@ -291,16 +362,18 @@ bool cdj_dsp_checkpoint_write(const char *path,
     return ok;
 }
 
-bool cdj_dsp_checkpoint_read(const char *path,
-                             CdjDspCheckpointState *state,
-                             uint8_t *l2, size_t l2_size,
-                             uint8_t *shared_ram, size_t shared_ram_size,
-                             uint8_t *sdram, size_t sdram_size,
-                             char *error, size_t error_size)
+bool cdj_dsp_checkpoint_read_with_l1d(
+    const char *path, CdjDspCheckpointState *state,
+    uint8_t *l2, size_t l2_size,
+    uint8_t *shared_ram, size_t shared_ram_size,
+    uint8_t *l1d, size_t l1d_size,
+    uint8_t *sdram, size_t sdram_size,
+    char *error, size_t error_size)
 {
-    if (!path || !state || !l2 || !shared_ram || !sdram ||
+    if (!path || !state || !l2 || !shared_ram || !l1d || !sdram ||
         l2_size != CDJ_DSP_L2_SIZE ||
         shared_ram_size != CDJ_DSP_SHARED_RAM_SIZE ||
+        l1d_size != CDJ_DSP_L1D_SIZE ||
         sdram_size != CDJ_DSP_SDRAM_SIZE) {
         fail(error, error_size, "missing checkpoint destination");
         return false;
@@ -362,6 +435,9 @@ bool cdj_dsp_checkpoint_read(const char *path,
     bool schema10 = header_read &&
                     memcmp(header.magic, CHECKPOINT_SCHEMA10_MAGIC,
                            sizeof(header.magic)) == 0 && header.schema == 10;
+    bool schema11 = header_read &&
+                    memcmp(header.magic, CHECKPOINT_SCHEMA11_MAGIC,
+                           sizeof(header.magic)) == 0 && header.schema == 11;
     bool current = header_read &&
                    memcmp(header.magic, CHECKPOINT_MAGIC,
                           sizeof(header.magic)) == 0 &&
@@ -416,9 +492,13 @@ bool cdj_dsp_checkpoint_read(const char *path,
     bool old_schema10 = schema10 && header.state_size == schema10_state_size &&
                         memcmp(header.component_size, schema10_expected,
                                sizeof(schema10_expected)) == 0;
+    bool old_schema11 = schema11 && header.state_size == sizeof(*state) &&
+                        memcmp(header.component_size, expected,
+                               sizeof(expected)) == 0;
     bool old = legacy || old_schema3 || old_schema4 || old_schema5 ||
                old_schema6 || old_schema7 || old_schema8 || old_schema9 ||
-               old_schema10;
+               old_schema10 || old_schema11;
+    bool legacy_schema = old && !old_schema11;
     bool ok = (old || current) &&
               header.endian == CHECKPOINT_ENDIAN &&
               header.header_size == sizeof(header) &&
@@ -431,6 +511,7 @@ bool cdj_dsp_checkpoint_read(const char *path,
     const size_t bitmap_size = ok ? (header.page_count + 7u) / 8u : 0;
     uint64_t expected_payload = header.state_size + l2_size +
         (schema1 ? 0 : shared_ram_size) + bitmap_size +
+        (current ? l1d_size : 0u) +
         (uint64_t)header.present_pages * CDJ_DSP_CHECKPOINT_PAGE_SIZE;
     ok = ok && header.present_pages <= header.page_count &&
          header.payload_size == expected_payload;
@@ -440,6 +521,8 @@ bool cdj_dsp_checkpoint_read(const char *path,
          fread(l2, 1, l2_size, file) == l2_size;
     if (ok && schema1) memset(shared_ram, 0, shared_ram_size);
     else if (ok) ok = fread(shared_ram, 1, shared_ram_size, file) == shared_ram_size;
+    if (ok && current) ok = fread(l1d, 1, l1d_size, file) == l1d_size;
+    else if (ok) memset(l1d, 0, l1d_size);
     ok = ok && fread(bitmap, 1, bitmap_size, file) == bitmap_size;
     if (ok) memset(sdram, 0, sdram_size);
     uint32_t present = 0;
@@ -448,6 +531,7 @@ bool cdj_dsp_checkpoint_read(const char *path,
         hash = checksum(hash, state, header.state_size);
         hash = checksum(hash, l2, l2_size);
         if (!schema1) hash = checksum(hash, shared_ram, shared_ram_size);
+        if (current) hash = checksum(hash, l1d, l1d_size);
         hash = checksum(hash, bitmap, bitmap_size);
     }
     for (uint32_t page = 0; ok && page < header.page_count; ++page) {
@@ -469,7 +553,7 @@ bool cdj_dsp_checkpoint_read(const char *path,
         cdj_c6747_spis_reset(state->spis);
     if (ok && (legacy || old_schema3 || old_schema4 || old_schema5))
         cdj_c6747_cache_reset(&state->cache);
-    if (ok && old && !old_schema7 && !old_schema8 && !old_schema9 &&
+    if (ok && legacy_schema && !old_schema7 && !old_schema8 && !old_schema9 &&
         !old_schema10) {
         cdj_c6747_mcasp_control_reset(&state->mcasp_control);
         cdj_c6747_edma_reset(&state->edma);
@@ -491,16 +575,58 @@ bool cdj_dsp_checkpoint_read(const char *path,
             state->spis[i].receive_buffer_full = false;
             state->spis[i].receive_buffer_data = 0;
         }
-    if (ok && old && !old_schema9 && !old_schema10)
+    if (ok && legacy_schema && !old_schema9 && !old_schema10)
         cdj_wm8740_reset(&state->wm8740);
-    if (ok && old && !old_schema10)
+    if (ok && legacy_schema && !old_schema10)
         cdj_c6747_spi_transfer_reset(&state->spi_transfer);
     /* Scheduler reset opts into DEFERRED_V1. Historical checkpoints instead
      * retain their actual legacy synchronous policy as the all-zero mode. */
-    if (ok && old) memset(&state->scheduler, 0, sizeof(state->scheduler));
+    if (ok && legacy_schema)
+        memset(&state->scheduler, 0, sizeof(state->scheduler));
     ok = ok && state_valid(state);
     fclose(file);
     free(bitmap);
     if (!ok) fail(error, error_size, "incompatible, corrupt, or incomplete checkpoint");
+    return ok;
+}
+
+bool cdj_dsp_checkpoint_write(const char *path,
+                              const CdjDspCheckpointState *state,
+                              const uint8_t *l2, size_t l2_size,
+                              const uint8_t *shared_ram, size_t shared_ram_size,
+                              const uint8_t *sdram, size_t sdram_size,
+                              char *error, size_t error_size)
+{
+    uint8_t *l1d = calloc(1, CDJ_DSP_L1D_SIZE);
+    bool ok = l1d && cdj_dsp_checkpoint_write_with_l1d(
+        path, state, l2, l2_size, shared_ram, shared_ram_size,
+        l1d, CDJ_DSP_L1D_SIZE, sdram, sdram_size, error, error_size);
+    if (!l1d) fail(error, error_size, "cannot allocate L1D checkpoint image");
+    free(l1d);
+    return ok;
+}
+
+bool cdj_dsp_checkpoint_read(const char *path,
+                             CdjDspCheckpointState *state,
+                             uint8_t *l2, size_t l2_size,
+                             uint8_t *shared_ram, size_t shared_ram_size,
+                             uint8_t *sdram, size_t sdram_size,
+                             char *error, size_t error_size)
+{
+    uint8_t *l1d = malloc(CDJ_DSP_L1D_SIZE);
+    bool ok = l1d && cdj_dsp_checkpoint_read_with_l1d(
+        path, state, l2, l2_size, shared_ram, shared_ram_size,
+        l1d, CDJ_DSP_L1D_SIZE, sdram, sdram_size, error, error_size);
+    if (ok) {
+        for (size_t i = 0; i < CDJ_DSP_L1D_SIZE; ++i)
+            if (l1d[i]) {
+                fail(error, error_size,
+                     "checkpoint contains L1D state but caller cannot restore it");
+                ok = false;
+                break;
+            }
+    }
+    if (!l1d) fail(error, error_size, "cannot allocate L1D checkpoint image");
+    free(l1d);
     return ok;
 }

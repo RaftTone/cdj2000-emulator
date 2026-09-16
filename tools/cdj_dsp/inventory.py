@@ -19,11 +19,13 @@ BASE = 0x11800000
 SHARED_RAM_BASE = 0x80000000
 SHARED_RAM_SIZE = 0x20000
 SDRAM_BASE = 0xc0000000
+L1D_BASE = 0x00f00000
+L1D_SIZE = 0x8000
 CHECKPOINT_HEADER = struct.Struct('<8sIIII9I5IQQ')
 CHECKPOINT_MAGIC = {1: b'CDJDSP1\0', 2: b'CDJDSP2\0', 3: b'CDJDSP3\0',
                     4: b'CDJDSP4\0', 5: b'CDJDSP5\0', 6: b'CDJDSP6\0',
                     7: b'CDJDSP7\0', 8: b'CDJDSP8\0', 9: b'CDJDSP9\0',
-                    10: b'CDJDSP10', 11: b'CDJDSP11'}
+                    10: b'CDJDSP10', 11: b'CDJDSP11', 12: b'CDJDSP12'}
 SCHEDULER_STATE = struct.Struct('<QQIIBBBB')
 
 
@@ -88,8 +90,10 @@ def read_input(data):
     l2_start = state_size
     shared_size = SHARED_RAM_SIZE if schema >= 2 else 0
     shared_start = l2_start + l2_size
+    l1d_size = L1D_SIZE if schema >= 12 else 0
+    l1d_start = shared_start + shared_size
     bitmap_size = (page_count + 7) // 8
-    bitmap_start = shared_start + shared_size
+    bitmap_start = l1d_start + l1d_size
     pages_start = bitmap_start + bitmap_size
     expected_size = pages_start + present_pages * page_size
     if len(payload) != expected_size:
@@ -114,6 +118,7 @@ def read_input(data):
         raise ValueError('checkpoint sparse page count does not match')
     memories = {BASE: l2, SDRAM_BASE: sdram}
     if shared_ram is not None: memories[SHARED_RAM_BASE] = shared_ram
+    if l1d_size: memories[L1D_BASE] = bytes(payload[l1d_start:bitmap_start])
     return memories, dict(
         kind='checkpoint', schema=schema, state_size=state_size,
         component_sizes=list(component_sizes),
@@ -121,6 +126,7 @@ def read_input(data):
         dsp_scheduler_mode=_checkpoint_scheduler_mode(
             data, header_size, state_size, schema),
         shared_ram_captured=shared_ram is not None,
+        l1d_captured=bool(l1d_size),
         present_sdram_pages=present_pages)
 
 

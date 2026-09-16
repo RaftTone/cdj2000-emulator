@@ -1,8 +1,10 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include <assert.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 #include "cdj_c674x.h"
+#include "cdj_c674x_control.h"
 #include "cdj_c674x_loop.h"
 static uint32_t memory[64];
 static bool read_word(void *unused, uint32_t address, uint32_t *value)
@@ -44,8 +46,363 @@ static void finish_interrupt_entry(CdjC674x *c)
         assert(c->idle_cycles == 8 - i);
     }
 }
+static unsigned fetch_reads;
+static bool count_fetch_read(void *unused, uint32_t address, uint32_t *value)
+{
+    ++fetch_reads;
+    return read_word(unused, address, value);
+}
+
+static void test_fetch_headers(void)
+{
+    CdjC674x cpu;
+    CdjC674xPacket packet;
+    memset(memory, 0, sizeof(memory));
+    /* Eight parallel full instructions share one header read. */
+    for (unsigned i = 0; i < 7; ++i) memory[i] = 1;
+    cdj_c674x_reset(&cpu, 0x1000);
+    fetch_reads = 0;
+    assert(cdj_c674x_fetch(&cpu, count_fetch_read, NULL, &packet));
+    assert(packet.count == 8 && packet.next_pc == 0x1020);
+    assert(fetch_reads == 9 && cpu.pc == 0x1000 && cpu.cycles == 0);
+    /* Crossing a fetch block must inspect the new block's compact header. */
+    memory[7] = 1;
+    memory[8] = 0x12345678;
+    memory[15] = 0xe0200001; /* slot 0 compact, first half parallel */
+    cdj_c674x_reset(&cpu, 0x101c);
+    fetch_reads = 0;
+    assert(cdj_c674x_fetch(&cpu, count_fetch_read, NULL, &packet));
+    assert(packet.count == 3 && packet.next_pc == 0x1024 && fetch_reads == 5);
+    assert(!packet.instructions[0].compact);
+    assert(packet.instructions[1].compact && packet.instructions[1].word == 0x5678);
+    assert(packet.instructions[2].compact && packet.instructions[2].word == 0x1234);
+    /* No cache survives a fetch: firmware/DMA updates are immediately seen. */
+    memory[15] = 0;
+    cdj_c674x_reset(&cpu, 0x1020);
+    assert(cdj_c674x_fetch(&cpu, count_fetch_read, NULL, &packet));
+    assert(packet.count == 1 && !packet.instructions[0].compact);
+    assert(packet.instructions[0].word == 0x12345678);
+    /* A missing next header fails without publishing a partial packet. */
+    memory[63] = 1;
+    cdj_c674x_reset(&cpu, 0x10fc);
+    memset(&packet, 0, sizeof(packet));
+    packet.next_pc = 0xdeadbeef;
+    assert(!cdj_c674x_fetch(&cpu, count_fetch_read, NULL, &packet));
+    assert(cpu.fault && cpu.fault_pc == 0x1100);
+    assert(cpu.pc == 0x10fc && cpu.cycles == 0 && packet.next_pc == 0xdeadbeef);
+}
+
+static void test_packet_preserves_loop_storage(void)
+{
+    CdjC674x c;
+    cdj_c674x_reset(&c, 0x1000);
+    assert(cdj_c674x_loop_init(&c.loop, 4, 12));
+    c.loop.tags[47][7] = 91;
+    c.loop_instructions[111] = (CdjC674xInstruction){.pc=0x1234, .word=0x5678};
+    c.loop_active = true;
+    c.control[26] |= 1u << 14;
+    c.branch_due = 1; c.branch_target = 0x2000;
+    CdjC674x before = c;
+    CdjC674xPacket p = {.count=1, .next_pc=0x1004,
+        .instructions={{.pc=0x1000, .word=0x01803da8}}}; /* MVK 123,A3 */
+    assert(cdj_c674x_execute(&c, &p, NULL, NULL, NULL));
+    assert(c.pc == 0x2000 && !c.loop_active && !(c.control[26] & (1u << 14)));
+    assert(c.r[0][3] == 123);
+    assert(!memcmp(&c.loop, &before.loop, sizeof(c) - offsetof(CdjC674x, loop)));
+    /* A conflicting parallel register write must roll back the entire
+     * architectural state, including the uncopied retained loop storage. */
+    before = c;
+    p.count = 2; p.instructions[1] = p.instructions[0];
+    assert(!cdj_c674x_execute(&c, &p, NULL, NULL, NULL));
+    assert(c.fault);
+    c.fault = before.fault; c.fault_pc = before.fault_pc; c.fault_word = before.fault_word;
+    assert(!memcmp(&c, &before, sizeof(c)));
+}
+
+/* SPRUFE8B printed page 93, verbatim: "When PROT is 1, four cycles of NOP are
+ * added after each LD instruction within the fetch packet whether the LD is in
+ * 16-bit compact format or 32-bit format."  Both loads of a parallel pair issue
+ * in the execute packet's one cycle, so the four added cycles follow that one
+ * cycle once: the packet is 1 + 4 = 5 cycles, the same as a single protected
+ * load.  Loads in *different* execute packets of the same fetch packet issue in
+ * different cycles and so are expanded separately, once per execute packet.
+ *
+ * Encodings from asm6x -mv6740 (TMS320C6x Assembler v8.5.0):
+ *   LDW .D1 *+A4[0], A10   -> 05100264, with the p bit set 05100265
+ *   LDW .D2 *+B4[0], B10   -> 051002E6
+ *   STW .D2 B10, *+B4[0]   -> 051002F6
+ * The mixed fetch-packet header is built by hand from Figure 3-7 (printed page
+ * 93): top nibble 0xE marks the compact header, bit 20 is PROT.  asm6x emits
+ * compact headers only under compiler control, so the header word is the one
+ * value here not taken from the assembler. */
+static void test_protected_fetch_packet_expands_once(void)
+{
+    CdjC674x c;
+    for (unsigned pair = 0; pair < 2; ++pair) {
+        memset(memory, 0, sizeof(memory));
+        cdj_c674x_reset(&c, 0x1000);
+        memory[0] = pair ? 0x05100265u : 0x05100264u;
+        if (pair) memory[1] = 0x051002E6u;
+        memory[7] = 0xe0000000u | (1u << 20);
+        memory[16] = 0x11223344; /* 0x1040 */
+        memory[18] = 0x55667788; /* 0x1048 */
+        c.r[0][4] = 0x1040; c.r[1][4] = 0x1048;
+        assert(cdj_c674x_step(&c, read_word, write_memory, NULL));
+        /* Hand-derived from printed page 93: one issue cycle plus four. */
+        assert(c.cycles == 5 && c.pc == (pair ? 0x1008u : 0x1004u));
+        /* Table 4-10, printed page 593: a load writes dst in E5, four delay
+         * slots after E1, so both results are architectural by cycle 5. */
+        assert(c.r[0][10] == 0x11223344 && !c.load_count);
+        assert(c.r[1][10] == (pair ? 0x55667788u : 0u));
+    }
+    /* The narrowed guard still rejects a PROT packet that also holds a
+     * genuinely conflicting multicycle instruction: printed page 82 forbids two
+     * multicycle-NOP generators in one execute packet, and printed page 481
+     * counts protected loads among the instructions that initiate them. */
+    const uint32_t conflicts[] = {
+        0x00002000u,        /* NOP 2, asm6x */
+        0x00006000u,        /* NOP 4, asm6x */
+        0x0001E000u,        /* IDLE, asm6x */
+        (3u << 13) | 0x120u /* BNOP label, 3 */
+    };
+    for (unsigned i = 0; i < sizeof(conflicts) / sizeof(conflicts[0]); ++i)
+    for (unsigned order = 0; order < 2; ++order) {
+        memset(memory, 0, sizeof(memory));
+        cdj_c674x_reset(&c, 0x1000);
+        memory[order] = 0x05100264u | (order ? 0u : 1u);
+        memory[order ^ 1] = conflicts[i] | (order ? 1u : 0u);
+        memory[7] = 0xe0000000u | (1u << 20);
+        c.r[0][4] = 0x1040;
+        assert(!cdj_c674x_step(&c, read_word, write_memory, NULL));
+        assert(c.cycles == 0 && !c.load_count);
+    }
+}
+
+/* METAMORPHIC TEST, not an absolute reference-backed one.  What comes from
+     * SPRUFE8B printed page 93 is the EQUIVALENCE: a protected LD expands to the
+     * same thing as that LD followed by an explicit NOP 4.  The absolute values
+     * compared below (register files, loop.cycle/length/sealed, loop_tags,
+     * load_count) are this emulator's own trace of the unprotected-plus-NOP-4
+     * program, captured into reference[] in this same test.  So if our handling
+     * of NOP 4 inside an SPLOOP body were itself wrong, both sides would be
+     * wrong together and this test would still pass.  It is load-bearing -
+     * reverting the per-packet protected-load fix fails this test and only this
+     * test - but it pins a relation to the manual, not a number.  The coverage
+     * inventory records its expected values as "mixed" for that reason.
+     */
+    /* The same rule inside a software-pipelined loop body, which is the case
+ * BUILD.md:996 records the NXS firmware hitting at 0x11802ea8.  SPRUFE8B
+ * printed page 93 again: the four cycles follow the execute packet's one issue
+ * cycle, so a protected body packet holding two parallel loads is cycle-for-
+ * cycle the same program as the unprotected pair followed by an explicit NOP 4.
+ *
+ * Encodings from asm6x -mv6740:
+ *   SPLOOP 5             -> 02038000
+ *   LDW .D1 *A4, A5      -> 02900264, p bit set 02900265
+ *   LDW .D2 *B4, B5      -> 029002E6
+ *   NOP 4                -> 00006000
+ *   SPKERNEL 0, 0        -> 00034001
+ *   ADD .L1 A5, A5, A6   -> 0314A078
+ * asm6x accepts that whole body, two parallel loads included. */
+static void test_protected_loop_body_expands_once(void)
+{
+    CdjC674x c, reference[20];
+    for (unsigned prot = 0; prot < 2; ++prot) {
+        memset(memory, 0, sizeof(memory));
+        cdj_c674x_reset(&c, 0x1000);
+        memory[0] = 0x02038000u;
+        memory[1] = 0x02900265u;
+        memory[2] = 0x029002E6u;
+        unsigned slot = 3;
+        if (!prot) memory[slot++] = 0x00006000u; /* explicit NOP 4 */
+        memory[slot++] = 0;                      /* NOP */
+        memory[slot++] = 0x00034001u;            /* SPKERNEL 0,0 */
+        memory[slot] = 0x0314A078u;              /* || ADD .L1 A5,A5,A6 */
+        memory[7] = 0xe0000000u | (prot ? (1u << 20) : 0u);
+        memory[16] = 0x00000101; /* 0x1040 */
+        memory[18] = 0x00000202; /* 0x1048 */
+        c.r[0][4] = 0x1040; c.r[1][4] = 0x1048;
+        c.control[13] = 3; /* ILC */
+        for (unsigned cycle = 0; cycle < 20; ++cycle) {
+            assert(cdj_c674x_step(&c, read_word, write_memory, NULL));
+            assert(c.cycles == cycle + 1);
+            if (!prot) reference[cycle] = c;
+            else {
+                const CdjC674x *r = &reference[cycle];
+                assert(!memcmp(c.r, r->r, sizeof(c.r)));
+                assert(c.loop.cycle == r->loop.cycle &&
+                       c.loop.length == r->loop.length);
+                assert(c.loop.sealed == r->loop.sealed &&
+                       c.loop_tags == r->loop_tags);
+                assert(c.load_count == r->load_count);
+                /* loop_wait itself is deliberately not compared: the protected
+                 * form consumes the load's own issue cycle as the first of the
+                 * five, so its countdown leads the explicit NOP 4 by one
+                 * cycle while the program state matches. */
+            }
+        }
+        /* The expansion is four cycles, counted once for the pair. */
+        if (prot) assert(c.r[0][5] == 0x101 && c.r[1][5] == 0x202);
+    }
+    /* The narrowed loop-path guard still rejects the cases printed page 481
+     * forbids: SPKERNEL in the protected packet, and a second multicycle-NOP
+     * generator in it. */
+    const uint32_t conflicts[] = {0x00034001u /* SPKERNEL */, 0x00002000u /* NOP 2 */};
+    for (unsigned i = 0; i < sizeof(conflicts) / sizeof(conflicts[0]); ++i) {
+        memset(memory, 0, sizeof(memory));
+        cdj_c674x_reset(&c, 0x1000);
+        memory[0] = 0x02038000u;
+        memory[1] = 0x02900265u;
+        memory[2] = 0x029002E7u; /* second protected load, p bit set */
+        memory[3] = conflicts[i];
+        memory[7] = 0xe0000000u | (1u << 20);
+        c.r[0][4] = 0x1040; c.r[1][4] = 0x1048;
+        c.control[13] = 3;
+        assert(cdj_c674x_step(&c, read_word, write_memory, NULL)); /* setup */
+        assert(!cdj_c674x_step(&c, read_word, write_memory, NULL));
+        assert(c.loop_tags == 0 && c.loop.length == 0);
+    }
+}
+
+/* SPRUFE8B 3.8.11.5, printed page 83, verbatim: "A NOP n (with n > 1)
+ * instruction cannot be placed in parallel with other multicycle NOP counts
+ * (ADDKPC, BNOP, CALLP) with the exception of another NOP n where the NOP count
+ * is the same."  asm6x agrees: NOP 2 || NOP 2 assembles, while NOP 4 || NOP 2
+ * is rejected with "[E0801] Multiple multi-cycle NOP ... instructions not
+ * allowed in the same execute packet".
+ *
+ * NOP encodings are from printed page 388 (src = count - 1 at bits 16-13) and
+ * confirmed by asm6x: NOP 2 -> 00002000, NOP 4 -> 00006000, NOP 9 -> 00010000. */
+static void test_equal_count_parallel_nops(void)
+{
+    CdjC674x c;
+    for (unsigned count = 2; count <= 9; ++count) {
+        memset(memory, 0, sizeof(memory));
+        cdj_c674x_reset(&c, 0x1000);
+        memory[0] = ((count - 1) << 13) | 1u;
+        memory[1] = (count - 1) << 13;
+        assert(cdj_c674x_step(&c, read_word, write_memory, NULL));
+        /* Printed page 388: "For src + 1 cycles, no operation is performed." */
+        assert(c.cycles == count && c.pc == 0x1008);
+    }
+    /* Unequal counts remain a fault in both orders. */
+    for (unsigned order = 0; order < 2; ++order) {
+        memset(memory, 0, sizeof(memory));
+        cdj_c674x_reset(&c, 0x1000);
+        memory[order] = 0x00006000u | (order ? 0u : 1u);     /* NOP 4 */
+        memory[order ^ 1] = 0x00002000u | (order ? 1u : 0u); /* NOP 2 */
+        assert(!cdj_c674x_step(&c, read_word, write_memory, NULL));
+        assert(c.cycles == 0);
+    }
+    /* A BNOP whose count happens to match is still forbidden: printed page 83
+     * grants the exception to another NOP n only. */
+    memset(memory, 0, sizeof(memory));
+    cdj_c674x_reset(&c, 0x1000);
+    memory[0] = 0x00002001u;          /* NOP 2 */
+    memory[1] = (1u << 13) | 0x120u;  /* BNOP label, 1 -> two cycles */
+    assert(!cdj_c674x_step(&c, read_word, write_memory, NULL));
+    assert(c.cycles == 0);
+}
+
+/* SPRUFE8B IDLE, printed page 274: opcode bits 16-13 = 1111 with every other
+ * bit zero except p, i.e. 0001E000 - confirmed by asm6x, which assembles IDLE
+ * to 0001E000 and IDLE || NOP to 0001E001 / 00000000.  Description, verbatim:
+ * "Performs an infinite multicycle NOP that terminates upon servicing an
+ * interrupt, or a branch occurs due to an IDLE instruction being in the delay
+ * slots of a branch."  Delay Slots: 0.
+ *
+ * NOP's own entry, printed page 388: "The maximum value for count is 9", so
+ * src 9..14 stay reserved and must still be rejected. */
+static void test_idle_waits_for_an_interrupt_or_a_branch(void)
+{
+    CdjC674x c;
+    /* src 9..14 -> count 10..15: still reserved, still rejected. */
+    for (unsigned src = 9; src <= 14; ++src) {
+        memset(memory, 0, sizeof(memory));
+        cdj_c674x_reset(&c, 0x1000);
+        memory[0] = src << 13;
+        assert(!cdj_c674x_step(&c, read_word, write_memory, NULL));
+        assert(c.cycles == 0);
+    }
+    /* Zero delay slots: the packet issues one cycle, then waits. */
+    memset(memory, 0, sizeof(memory));
+    cdj_c674x_reset(&c, 0x1000);
+    memory[0] = 0x0001E000u;
+    assert(cdj_c674x_step(&c, read_word, write_memory, NULL));
+    assert(c.cycles == 1 && c.pc == 0x1004);
+    assert(c.idle_cycles == CDJ_C674X_IDLE_FOREVER);
+    /* The wait does not count down, however long the core is stepped. */
+    for (unsigned i = 0; i < 64; ++i) {
+        assert(cdj_c674x_step(&c, read_word, write_memory, NULL));
+        assert(c.pc == 0x1004 && c.cycles == 2 + i);
+        assert(c.idle_cycles == CDJ_C674X_IDLE_FOREVER);
+    }
+    /* Servicing an interrupt terminates it.  Table 5-3 / section 5.4.4: IRP is
+     * the first annulled execute packet, which is the one after the IDLE. */
+    c.control[1] |= 1u;                /* CSR.GIE */
+    c.control[4] |= (1u << 4) | 2u;    /* IER.IE4, NMIE */
+    assert(cdj_c674x_interrupt(&c, 1u << 4));
+    assert(c.control[6] == 0x1004 && c.pc == 0x00700080);
+    finish_interrupt_entry(&c);
+    /* The entry interval is the documented nine cycles, not the sentinel, so
+     * the core resumes at the vector instead of idling forever. */
+    assert(!c.idle_cycles && c.pc == 0x00700080);
+
+    /* An IDLE in the delay slots of a branch ends when the branch completes
+     * (printed page 274).  B .S2 B3 is 0x000C0362 by the branch-register
+     * encoding; five delay slots put the target in E1 on cycle 6 (Table 4-11,
+     * printed page 594). */
+    memset(memory, 0, sizeof(memory));
+    cdj_c674x_reset(&c, 0x1000);
+    memory[0] = 0x00000362u | (3u << 18);
+    memory[1] = 0x0001E000u;
+    c.r[1][3] = 0x1080;
+    assert(cdj_c674x_step(&c, read_word, write_memory, NULL));
+    assert(c.branch_due == 6);
+    assert(cdj_c674x_step(&c, read_word, write_memory, NULL));
+    assert(c.cycles == 2 && c.idle_cycles == CDJ_C674X_IDLE_FOREVER);
+    while (c.cycles < 6) assert(cdj_c674x_step(&c, read_word, write_memory, NULL));
+    assert(c.pc == 0x1080 && !c.idle_cycles && !c.branch_due);
+
+    /* Printed page 83, 3.8.11.4: IDLE "can be placed in parallel with the NOP
+     * instruction" and with ordinary single-cycle work, but with no other
+     * multicycle-NOP generator. */
+    const uint32_t legal[] = {0x00000000u, 0x008000A8u /* MVK .S1 1,A1 */};
+    for (unsigned i = 0; i < sizeof(legal) / sizeof(legal[0]); ++i) {
+        memset(memory, 0, sizeof(memory));
+        cdj_c674x_reset(&c, 0x1000);
+        memory[0] = 0x0001E001u; memory[1] = legal[i];
+        assert(cdj_c674x_step(&c, read_word, write_memory, NULL));
+        assert(c.cycles == 1 && c.idle_cycles == CDJ_C674X_IDLE_FOREVER);
+        assert(c.r[0][1] == (i ? 1u : 0u));
+    }
+    const uint32_t illegal[] = {
+        0x00002000u,          /* NOP 2 */
+        0x0001E000u,          /* IDLE */
+        (3u << 13) | 0x120u,  /* BNOP label, 3 */
+        (1u << 13) | 0x162u,  /* ADDKPC label, B3, 1 */
+        0x10004000u,          /* DINT */
+        0x10006000u,          /* RINT */
+    };
+    for (unsigned i = 0; i < sizeof(illegal) / sizeof(illegal[0]); ++i)
+    for (unsigned order = 0; order < 2; ++order) {
+        memset(memory, 0, sizeof(memory));
+        cdj_c674x_reset(&c, 0x1000);
+        memory[order] = 0x0001E000u | (order ? 0u : 1u);
+        memory[order ^ 1] = illegal[i] | (order ? 1u : 0u);
+        assert(!cdj_c674x_step(&c, read_word, write_memory, NULL));
+        assert(c.cycles == 0 && !c.idle_cycles);
+    }
+}
+
 int main(void)
 {
+    test_fetch_headers();
+    test_packet_preserves_loop_storage();
+    test_protected_fetch_packet_expands_once();
+    test_protected_loop_body_expands_once();
+    test_equal_count_parallel_nops();
+    test_idle_waits_for_an_interrupt_or_a_branch();
     CdjC674x c;
     /* Board clocks advance on every cycle, including PROT/NOP delays;
      * E3 captures the value on that edge, not the step's final value. */
@@ -423,16 +780,43 @@ int main(void)
         }
         assert(c.r[0][3] == 2 + minimum && c.control[13] == 0);
     }
+    /* Post-loop packets can prepare ILC for a following software loop.
+     * Once SPLOOPD reaches its post phase, it must not consume the new value
+     * written by that packet as though it belonged to the completed loop. */
+    memset(memory, 0, sizeof(memory)); cdj_c674x_reset(&c, 0x1000);
+    c.loop_active = true; c.control[26] = 1u << 14;
+    c.loop.ii = 1; c.loop.iterations = 5; c.loop.delayed_count = true;
+    c.loop.sealed = true; c.loop.cycle = 4;
+    c.loop.post_cycle = c.loop.end_cycle = 4;
+    c.r[0][2] = 8;
+    memory[0] = 13u << 23 | 2u << 18 | 0x13a2; /* MVC A2,ILC */
+    assert(cdj_c674x_step(&c, read_word, write_memory, NULL));
+    assert(!c.loop_active && c.control[13] == 8);
     /* H-6 conditional SPLOOPD requests reload/nested-loop behavior, which
-     * remains fail-closed and leaves the setup packet atomic. */
-    const unsigned compact_sploopd_reload[] = {0x8c66, 0x8c67};
-    for (unsigned i = 0; i < 2; ++i) {
-        memset(memory, 0, sizeof(memory)); cdj_c674x_reset(&c, 0x1000);
-        c.control[13] = 3; c.r[0][1] = 99;
-        memory[0] = compact_sploopd_reload[i]; memory[7] = 0xe0200000;
-        assert(!cdj_c674x_step(&c, read_word, write_memory, NULL));
-        assert(c.cycles == 0 && !c.loop_active && c.r[0][1] == 99);
-        assert(!strcmp(c.fault, "SPLOOPD reload not implemented"));
+     * remains fail-closed and leaves the setup packet atomic.  SPRUFE8B's
+     * SPLOOPD description (printed page 485) is what makes this a reload
+     * rather than a plain predicate: "When the SPLOOPD instruction is
+     * predicated, it indicates that the loop is a nested loop using the
+     * SPLOOP reload capability."  Retained-buffer reload is not claimed.
+     *
+     * Sweep the whole format rather than two samples, because
+     * analysis/dsp/audit_sweeps.json now claims exactly 32 words here:
+     * Figure H-6 (printed page 766) fixes bit 15 = 1, bits 13-12 = 00,
+     * bits 11-10 = 11 and bits 6-1 = 110011, leaving ii3 (bit 14), ii2-0
+     * (bits 9-7) and op (bit 0) free - 2 * 8 * 2 = 32 encodings, every one of
+     * which must fault with the same text and change nothing.  ii is
+     * irrelevant to the refusal; the predicate is the whole reason for it. */
+    for (unsigned encoded = 0; encoded < 16; ++encoded) {
+        for (unsigned op = 0; op < 2; ++op) {
+            memset(memory, 0, sizeof(memory)); cdj_c674x_reset(&c, 0x1000);
+            c.control[13] = 3; c.r[0][1] = 99;
+            memory[0] = 0x8c66 | (encoded & 8) << 11 | (encoded & 7) << 7 | op;
+            memory[7] = 0xe0200000;
+            assert(!cdj_c674x_step(&c, read_word, write_memory, NULL));
+            assert(c.cycles == 0 && !c.loop_active && c.r[0][1] == 99 &&
+                   c.pc == 0x1000 && c.control[13] == 3);
+            assert(!strcmp(c.fault, "SPLOOPD reload not implemented"));
+        }
     }
     /* More than 14 source packets fit when they occupy no functional slots. */
     memset(memory, 0, sizeof(memory)); cdj_c674x_reset(&c, 0x1000);
@@ -1290,13 +1674,16 @@ int main(void)
     assert(cdj_c674x_step(&c, read_word, NULL, NULL));
     assert(c.r[0][6] == 0xbf800000 && c.control[18] == 0x88);
 
-    /* A later unknown compact instruction rolls back the whole packet. */
+    /* A later unknown compact instruction rolls back the whole packet.
+     * fff7h is not an instruction at all: TI's own disassembler prints it as
+     * ".word 0x0000fff7".  (ffffh used to serve here, but it is the Figure E-5
+     * M3 word MPYHL .M2X B7,A7,B6 and is now executed.) */
     memset(memory, 0, sizeof(memory));
     cdj_c674x_reset(&c, 0x1000);
     memory[0] = mvk(0, 0, 99) | 1;
-    memory[1] = 0xffff; memory[7] = 0xe0400000;
+    memory[1] = 0xfff7; memory[7] = 0xe0400000;
     assert(!cdj_c674x_step(&c, read_word, NULL, NULL));
-    assert(c.fault_pc == 0x1004 && c.fault_word == 0xffff);
+    assert(c.fault_pc == 0x1004 && c.fault_word == 0xfff7);
     assert(c.r[0][0] == 0 && c.pc == 0x1000 && c.cycles == 0);
     /* Stack stores sample old registers and update B15 in E1, RAM in E3.
      * RS is ignored by Dpp. Two pushes can be in flight simultaneously. */
@@ -1379,10 +1766,11 @@ int main(void)
     assert(c.r[1][20] == 0xface1234 && c.r[1][4] == 0 &&
            c.r[1][15] == 0x10e8);
 
-    /* Unsupported parallel operation must not enqueue the earlier store. */
+    /* Unsupported parallel operation must not enqueue the earlier store.
+     * fff7h, not ffffh: see the M3 note above. */
     memset(memory, 0, sizeof(memory));
     cdj_c674x_reset(&c, 0x1000); c.r[1][15] = 0x10f8;
-    memory[0] = 0xffff3577; memory[7] = 0xe0200001;
+    memory[0] = 0xfff73577; memory[7] = 0xe0200001;
     assert(!cdj_c674x_step(&c, read_word, write_memory, NULL));
     assert(c.r[1][15] == 0x10f8 && !c.store_count && !c.cycles && !memory[62]);
 
@@ -1546,13 +1934,29 @@ int main(void)
                                       : 0x1000u + constant * 4));
         assert(c.cycles == 1);
     }
-    /* C-19 fixes s=1. The otherwise matching s=0 encoding is reserved. */
-    cdj_c674x_reset(&c, 0x1000);
-    CdjC674xPacket reserved_dx5p = {.count = 1, .next_pc = 0x1002,
-        .instructions = {{.compact = true, .pc = 0x1000,
-                          .word = 0x0c76}}};
-    assert(!cdj_c674x_execute(&c, &reserved_dx5p, read_word, NULL, NULL));
-    assert(c.cycles == 0 && c.r[1][15] == 0);
+    /* C-19 fixes s=1. The otherwise matching s=0 encoding is reserved, for
+     * both values of op: Figure C-19 (printed page 730) draws bit 0 as a
+     * literal "1" with "s=1" written beneath it, where Figure C-18 above it
+     * draws an unconstrained "s", and the note is "src2 = dst = B15".  The
+     * ADDAW description (printed page 123) gives the reason: "s = 1 indicates
+     * the unit is D2 and dst is in the B register file", so a B15 destination
+     * forces s = 1, and Dx5p carries no x bit to cross with.  cl6x -mv6740
+     * refuses "ADDAW .D1 B15,4,B15" (E0800, functional unit specifier
+     * disagrees with operation) and "SUBAW .D1 B15,4,B15" (E0800, unit side
+     * does not match side needed) while assembling both on .D2.  GNU
+     * libopcodes disassembles 0x0c76/0x0cf6 as "addaw/subaw .D1X b15,0,b15"
+     * all the same - a cross-path WRITE - which is why the compact sweep once
+     * counted these 64 words as a decode gap.  They are not one, and nothing
+     * here may be narrowed to admit them. */
+    for (unsigned j = 0; j < 2; ++j) {
+        cdj_c674x_reset(&c, 0x1000);
+        c.r[1][15] = 0x2000;
+        CdjC674xPacket reserved_dx5p = {.count = 1, .next_pc = 0x1002,
+            .instructions = {{.compact = true, .pc = 0x1000,
+                              .word = 0x0c76 | j << 7}}};
+        assert(!cdj_c674x_execute(&c, &reserved_dx5p, read_word, NULL, NULL));
+        assert(c.cycles == 0 && c.r[1][15] == 0x2000 && c.r[0][15] == 0);
+    }
 
     /* Figures C-8 through C-15 share the compact .D transfer layout.
      * Exercise every DSZ scalar interpretation plus aligned/nonaligned
@@ -1622,10 +2026,11 @@ int main(void)
     assert(memory[48] == 0x11223344 && memory[49] == 0xaabbccdd &&
            !c.store_count);
 
-    /* A later packet failure rolls compact base updates and queues back. */
+    /* A later packet failure rolls compact base updates and queues back.
+     * fff7h, not ffffh: see the M3 note above. */
     memset(memory, 0, sizeof(memory)); cdj_c674x_reset(&c, 0x1000);
     c.r[1][6] = 0x10c0; c.r[1][4] = 0x12345678;
-    memory[0] = 0xffff3d45; memory[7] = 0xe0240001;
+    memory[0] = 0xfff73d45; memory[7] = 0xe0240001;
     assert(!cdj_c674x_step(&c, read_word, write_memory, NULL));
     assert(c.r[1][6] == 0x10c0 && !c.store_count && !c.cycles);
     /* LDW postincrement updates its pointer in E1, samples RAM in E3,
@@ -2076,7 +2481,6 @@ int main(void)
     const unsigned reserved_lsdx1[] = {
         4u << 13 | 0x1866,                 /* op 4 on .L */
         2u << 13 | 2u << 3 | 0x1866,      /* op 2 on .D */
-        0u << 13 | 3u << 3 | 0x1866,      /* reserved unit */
     };
     for (unsigned j = 0; j < sizeof(reserved_lsdx1) /
                               sizeof(reserved_lsdx1[0]); ++j) {
@@ -2085,6 +2489,21 @@ int main(void)
         assert(!cdj_c674x_step(&c, read_word, NULL, NULL));
         assert(!c.cycles);
     }
+    /* Figure G-4's unit field (printed page 761, bits 4-3) has no 11b
+     * encoding, and 11b there puts 1111b in bits 4-1, which is exactly the
+     * Figure E-5 M3 signature (printed page 744).  So what used to look like a
+     * reserved LSDx1 unit is really a compact multiply, and TI's disassembler
+     * agrees: 187eh inside a .fphead-framed packet is "MPYHL.M1X A0,B0,A4".
+     * The reserved-unit guard in the core is therefore unreachable, not gone.
+     * A0 x B0 is 0 x 0, so the product is 0 and the register is already 0;
+     * what this asserts is that the packet is executed rather than rejected. */
+    memset(memory, 0, sizeof(memory)); cdj_c674x_reset(&c, 0x1000);
+    memory[0] = 0u << 13 | 3u << 3 | 0x1866; memory[7] = 0xe0200000;
+    c.r[0][4] = 0xdeadbeef;
+    assert(cdj_c674x_step(&c, read_word, NULL, NULL));
+    assert(c.cycles == 1 && c.load_count == 1 && c.r[0][4] == 0xdeadbeefu);
+    assert(cdj_c674x_step(&c, read_word, NULL, NULL));
+    assert(c.r[0][4] == 0);
     /* The genuine blocker is MVK .D2 0,B5 in a mixed fetch packet. */
     memset(memory, 0, sizeof(memory)); cdj_c674x_reset(&c, 0x1010);
     c.r[1][5] = 99; memory[4] = 0x1af7; memory[7] = 0xe2000200;
@@ -2366,6 +2785,36 @@ int main(void)
     assert(cdj_c674x_step(&c, read_word, NULL, NULL));
     assert(c.r[1][5] == 0xc6df);
 
+    /* FADCR (18), FAUCR (19) and FMCR (20) reserve bits 31-27 and 15-11 in
+     * every one of SPRUFE8B Tables 2-25 (printed page 59), 2-26 (printed
+     * page 61) and 2-27 (printed page 63): "The reserved bit location is
+     * always read as 0. A value written to this field has no effect."  Every
+     * other bit is R/W by MVC in Figures 2-29/2-30/2-31, so writing all ones
+     * and reading back must give 0x07ff07ff on all three.  The MVC encodings
+     * are asm6x -mv6740 output: "MVC .S2 B4, FADCR" = 0x091003a2,
+     * "MVC .S2 B4, FAUCR" = 0x099003a2, "MVC .S2 B4, FMCR" = 0x0a1003a2,
+     * "MVC .S2 FADCR, B5" = 0x02c803e2, FAUCR = 0x02cc03e2,
+     * FMCR = 0x02d003e2. */
+    static const struct { uint32_t write, read; } fp_status[] = {
+        {0x091003a2u, 0x02c803e2u}, {0x099003a2u, 0x02cc03e2u},
+        {0x0a1003a2u, 0x02d003e2u},
+    };
+    for (unsigned i = 0; i < 3; ++i) {
+        memset(memory, 0, sizeof(memory)); cdj_c674x_reset(&c, 0x1000);
+        c.r[1][4] = UINT32_MAX;
+        memory[0] = fp_status[i].write;
+        memory[1] = fp_status[i].read;
+        assert(cdj_c674x_step(&c, read_word, NULL, NULL));
+        assert(c.control[18 + i] == 0x07ff07ffu);
+        assert(cdj_c674x_step(&c, read_word, NULL, NULL));
+        assert(c.r[1][5] == 0x07ff07ffu);
+        /* A reserved bit already set in stored state still reads back as 0. */
+        c.control[18 + i] = UINT32_MAX;
+        memory[2] = fp_status[i].read;
+        assert(cdj_c674x_step(&c, read_word, NULL, NULL));
+        assert(c.r[1][5] == 0x07ff07ffu);
+    }
+
     /* Maskable CPU interrupts enter only at an execute-packet boundary.
      * Requests latch in IFR while globally/individually masked and are
      * recognized after all three architectural enables become true. */
@@ -2491,21 +2940,45 @@ int main(void)
     }
     cdj_c674x_loop_set_functional_timing(false);
 
-    /* A legacy/partial checkpoint cannot provide the interrupted buffer.
-     * Strict mode fails at returned setup instead of silently reconstructing
-     * it from program memory. */
+    /* SPRUFE8B 7.13.2 (printed page 698) resumes an interrupted loop by
+     * re-executing the SPLOOP(D/W) and its prolog out of program memory, and
+     * 7.13.1 (printed page 697) lists the entire save/restore contract an ISR
+     * owes - "the ITSR or NTSR, ILC, and RILC registers" - with no loop
+     * buffer in it. So a return with no retained provenance at all (a legacy
+     * or partial checkpoint, or an ISR that ran its own SPLOOP) must rebuild,
+     * not fail. Expected values are read off 7.13.2's bullet list: the
+     * SPLOOPD "executes as an SPLOOP instruction", so no four-cycle count
+     * delay is added and the trip count is exactly ILC; and the rebuilt
+     * buffer starts empty because nothing was retained. */
     memset(memory, 0, sizeof(memory)); cdj_c674x_reset(&c, 0x1000);
     c.control[26] = 1u << 14; c.control[13] = 2;
-    memory[0] = 0x0003a000; memory[1] = 0x00030000;
-    assert(!cdj_c674x_step(&c, read_word, NULL, NULL));
-    assert(!c.cycles &&
-           !strcmp(c.fault, "SPLOOP interrupt-return buffer unavailable"));
+    memory[0] = 0x0003a000;                 /* returned SPLOOPD 1 */
+    memory[1] = 3u << 23 | 3u << 18 | 1u << 13 |
+                0x12u << 7 | 0x40;          /* ADD .D1 A3,1,A3 */
+    memory[2] = 0x00034000;                 /* SPKERNEL 0,0 */
+    assert(cdj_c674x_step(&c, read_word, NULL, NULL));
+    assert(!c.fault && c.loop_active && !c.loop.delayed_count &&
+           c.loop.iterations == 2 && !c.loop_tags);
+    while (!c.loop.sealed)
+        assert(cdj_c674x_step(&c, read_word, NULL, NULL));
+    assert(!c.fault && c.loop_tags == 1 && c.loop.length == 2 &&
+           !(c.loop_pred_history & 8));
 
-    /* Breadth mode reconstructs the documented return reversal from retained
-     * tags: the D1 program operation beside SPMASK is a NOP, while the older
-     * overlapping D1 buffered ADD executes instead. */
+    /* SPMASK on both sides of an interrupt, in strict timing and in breadth.
+     * Every expected value here comes from SPRUFE8B chapter 7, not from a
+     * trace. Loading: 7.11.1/7.11.2 (printed pages 693-694) - the SPMASKed
+     * ADD .D1 A4 "is executed only once and is not loaded to the SPLOOP
+     * buffer", and on that one cycle the buffered .D1 operation does not
+     * issue (7.15.1 resource conflict), so after three loading cycles the
+     * buffered ADD .D1 A3 has run on cycles 0 and 2 only: A3 == 2, A4 == 7,
+     * one buffered tag. Return: 7.13.2/7.11.5 (printed pages 698, 696) -
+     * "SPMASKed instructions from program memory execute as a NOP" and
+     * "SPMASKed instructions in the loop buffer execute as normal", so A3
+     * advances on both pipe-up cycles while A4 never moves again. 7.13
+     * (printed page 697) puts the SPLOOP execute-packet address in IRP. */
+    for (unsigned breadth = 0; breadth < 2; ++breadth) {
     memset(memory, 0, sizeof(memory)); cdj_c674x_reset(&c, 0x1000);
-    cdj_c674x_loop_set_functional_timing(true);
+    cdj_c674x_loop_set_functional_timing(breadth != 0);
     c.control[5] = 0x1000;
     c.control[1] |= 1; c.control[4] = (1u << 7) | 3u;
     c.control[13] = 12;
@@ -2526,10 +2999,15 @@ int main(void)
         assert(cdj_c674x_step(&c, read_word, NULL, NULL));
     assert(cdj_c674x_interrupt(&c, 0));
     assert(c.pc == 0x10e0 && c.control[6] == 0x1000);
-    assert(cdj_c674x_step(&c, read_word, NULL, NULL));
-    for (unsigned i = 0; i < 5; ++i)
+    /* Strict timing inserts the fixed nine-cycle entry interval (5.5.1,
+     * printed page 648) ahead of the handler, so wait for the return rather
+     * than counting cycles: B IRP plus its five delay slots land on the
+     * SPLOOP packet, which activates the loop again. */
+    unsigned return_guard = 0;
+    while (!c.loop_active) {
         assert(cdj_c674x_step(&c, read_word, NULL, NULL));
-    assert(cdj_c674x_step(&c, read_word, NULL, NULL)); /* returned setup */
+        assert(++return_guard < 40);
+    }
     uint32_t before_return_a3 = c.r[0][3], before_return_a4 = c.r[0][4];
     assert(cdj_c674x_step(&c, read_word, NULL, NULL));
     assert(c.r[0][3] == before_return_a3 + 1 &&
@@ -2539,7 +3017,111 @@ int main(void)
            c.r[0][4] == before_return_a4);
     assert(cdj_c674x_step(&c, read_word, NULL, NULL));
     assert(c.loop.sealed && !c.fault && !(c.loop_pred_history & 8));
+    }
     cdj_c674x_loop_set_functional_timing(false);
+
+    /* An interrupt service routine may use the loop buffer itself. SPRUFE8B
+     * 7.13.1 (printed page 697) states the whole contract - "Interrupt
+     * service routines must save and restore the ITSR or NTSR, ILC, and RILC
+     * registers" - and the loop buffer is not in it, because 7.13.2 (printed
+     * page 698) resumes by re-executing the SPLOOP(D/W) and its prolog from
+     * program memory. So the handler's own software loop overwrites the buffer
+     * and the interrupted loop still resumes, rebuilding from memory.
+     * Runs in strict timing and in breadth. */
+    for (unsigned breadth = 0; breadth < 2; ++breadth) {
+    memset(memory, 0, sizeof(memory)); cdj_c674x_reset(&c, 0x1000);
+    cdj_c674x_loop_set_functional_timing(breadth != 0);
+    c.control[5] = 0x1000;
+    c.control[1] |= 1; c.control[4] = (1u << 4) | 3u;
+    c.control[13] = 12;
+    memory[0] = 0x00038000;                 /* SPLOOP 1 */
+    memory[1] = 3u << 23 | 3u << 18 | 1u << 13 |
+                0x12u << 7 | 0x40;          /* ADD .D1 A3,1,A3 */
+    memory[2] = 0x00034000;                 /* SPKERNEL 0,0 */
+    /* The handler uses SPLOOPW, because 7.10 (printed page 690) says a
+     * SPLOOPW "ILC and RILC are not accessed or modified" - so the handler
+     * honours 7.13.2's requirement to leave the interrupted loop's ILC alone
+     * without needing an explicit save/restore. B0 is zero, so by 7.10.1 and
+     * 7.10.2 (printed page 691) the loop must execute at least one iteration,
+     * the termination condition "is always false for the first 3 cycles of the
+     * loop", and the cycle-4 stage boundary - which evaluates the condition
+     * "3 cycles before the stage boundary", i.e. cycle 1 - terminates it. Four
+     * loop cycles execute, so A5 == 4. Execution then resumes at the
+     * instruction after the loop body (7.10.3), which is the return branch -
+     * and the loop buffer is
+     * already idle there, so 7.14's "taken branch idles the loop buffer" and
+     * B IRP's restore of TSR from ITSR cannot contend for TSR.SPLX. */
+    memory[32] = 0x2003e000;                /* INT4 handler: [B0] SPLOOPW 1 */
+    memory[33] = 5u << 23 | 5u << 18 | 1u << 13 |
+                 0x12u << 7 | 0x40;         /* ADD .D1 A5,1,A5 */
+    memory[34] = 0x00034000;                /* SPKERNEL 0,0 */
+    memory[35] = 0x001800e2;                /* B .S2 IRP */
+    assert(cdj_c674x_step(&c, read_word, NULL, NULL));
+    while (!c.loop.sealed)
+        assert(cdj_c674x_step(&c, read_word, NULL, NULL));
+    while (c.loop.cycle < 5)
+        assert(cdj_c674x_step(&c, read_word, NULL, NULL));
+    assert(cdj_c674x_interrupt(&c, 1u << 4));
+    while (c.loop_active)
+        assert(cdj_c674x_step(&c, read_word, NULL, NULL));
+    assert(cdj_c674x_interrupt(&c, 0));
+    assert(c.pc == 0x1080 && c.control[6] == 0x1000 &&
+           (c.control[27] & (1u << 14)));
+    /* The handler's loop runs, overwriting the buffer, and B IRP returns. */
+    unsigned nested_guard = 0;
+    uint32_t interrupted_a3 = c.r[0][3];
+    while (c.pc != 0x1000 || c.loop_active) {
+        assert(cdj_c674x_step(&c, read_word, NULL, NULL));
+        assert(++nested_guard < 200);
+    }
+    assert(!c.fault && c.r[0][5] == 4 && c.r[0][3] == interrupted_a3 &&
+           (c.control[26] & (1u << 14)));
+    assert(cdj_c674x_step(&c, read_word, NULL, NULL)); /* returned setup */
+    assert(c.loop_active && !c.loop.delayed_count && !c.loop_tags);
+    uint32_t nested_a5 = c.r[0][5];
+    assert(cdj_c674x_step(&c, read_word, NULL, NULL));
+    assert(c.r[0][3] == interrupted_a3 + 1 && c.r[0][5] == nested_a5);
+    assert(cdj_c674x_step(&c, read_word, NULL, NULL));
+    assert(!c.fault && c.loop.sealed && c.loop_tags == 1 &&
+           !(c.loop_pred_history & 8));
+    }
+    cdj_c674x_loop_set_functional_timing(false);
+
+    /* SPRUFE8B 7.7.3.3, printed page 679, verbatim: "The NOP cycles
+     * associated with ADDKPC, BNOP, or protected LD instructions that are
+     * masked, are always executed when resuming an interrupted SPLOOP(D)."
+     * So on return the masked protected LDW is annulled - page 679's "SPMASKed
+     * instructions from program memory execute like a NOP" - while its four
+     * cycles of PROT expansion (printed page 93) still lengthen the loop.
+     * Expected length is counted off the manual, not measured: loading cycle 0
+     * is the SPMASK/LDW packet, cycles 1-4 are the PROT expansion, cycle 5 is
+     * the ADD packet and cycle 6 the SPKERNEL, so dynlen is 7 against 3 for
+     * the same program without PROT. Encodings from asm6x -mv6740, as recorded
+     * at test_protected_loop_body_expands_once.
+     * SPMASK D1 || -> 00430001   LDW .D1 *A4,A5 -> 02900264
+     * ADD .L1 A5,A5,A6 -> 0314A078   SPKERNEL 0,0 -> 00034000 */
+    for (unsigned prot = 0; prot < 2; ++prot) {
+        memset(memory, 0, sizeof(memory)); cdj_c674x_reset(&c, 0x1000);
+        c.control[26] = 1u << 14;           /* returning: ITSR.SPLX was 1 */
+        c.control[13] = 12;
+        memory[0] = 0x00038000u;            /* returned SPLOOP 1 */
+        memory[1] = 0x00430001u;            /* SPMASK D1 || */
+        memory[2] = 0x02900264u;            /* LDW .D1 *A4,A5 */
+        memory[3] = 0x0314A078u;            /* ADD .L1 A5,A5,A6 */
+        memory[4] = 0x00034000u;            /* SPKERNEL 0,0 */
+        memory[7] = 0xe0000000u | (prot ? (1u << 20) : 0u);
+        memory[16] = 0x00000101;            /* 0x1040 */
+        c.r[0][4] = 0x1040;
+        assert(cdj_c674x_step(&c, read_word, write_memory, NULL));
+        unsigned loading = 0;
+        while (!c.loop.sealed) {
+            assert(cdj_c674x_step(&c, read_word, write_memory, NULL));
+            assert(++loading < 16);
+        }
+        assert(loading == (prot ? 7u : 3u) && c.loop.length == loading);
+        /* The annulled load never reaches A5 and never enters the buffer. */
+        assert(!c.r[0][5] && !c.load_count && c.loop_tags == 1);
+    }
 
     /* In-flight results retire during entry, before handler instructions. */
     memset(memory, 0, sizeof(memory)); cdj_c674x_reset(&c, 0x1000);
@@ -2665,9 +3247,13 @@ int main(void)
     assert(!cdj_c674x_interrupt(&c, 1u << 4));
     assert(c.control[2] == (1u << 4));
 
-    /* Interrupt return reverses SPMASK program/buffer selection. Until that
-     * retained provenance exists, an otherwise eligible loop fails closed. */
+    /* A loop that contains an SPMASK is still interruptible: SPRUFE8B 7.13.1
+     * (printed page 697) enumerates every condition that blocks interrupt
+     * draining and the presence of an SPMASK is not one of them. The loop
+     * therefore drains its epilog, IRP names the SPLOOP execute packet and
+     * ITSR records SPLX (7.13, 7.13.4), in strict timing as in breadth. */
     memset(memory, 0, sizeof(memory)); cdj_c674x_reset(&c, 0x1000);
+    c.control[5] = 0x1000;
     c.control[1] |= 1; c.control[4] = (1u << 4) | 3u;
     c.control[13] = 12;
     memory[0] = 0x38000; memory[1] = 0x130001; /* SPLOOP; SPMASK S1. */
@@ -2677,8 +3263,16 @@ int main(void)
         assert(cdj_c674x_step(&c, read_word, NULL, NULL));
     while (c.loop.cycle < 3)
         assert(cdj_c674x_step(&c, read_word, NULL, NULL));
-    assert(!cdj_c674x_interrupt(&c, 1u << 4));
-    assert(!strcmp(c.fault, "SPLOOP interrupt SPMASK resume not implemented"));
+    assert(cdj_c674x_interrupt(&c, 1u << 4) && !c.fault);
+    assert(c.loop_active && c.control[2] == (1u << 4));
+    unsigned spmask_drain = 0;
+    while (c.loop_active) {
+        assert(cdj_c674x_step(&c, read_word, NULL, NULL));
+        assert(++spmask_drain < 32);
+    }
+    assert(cdj_c674x_interrupt(&c, 0) && !c.fault);
+    assert(c.pc == 0x1080 && c.control[6] == 0x1000 &&
+           (c.control[27] & (1u << 14)) && !(c.control[26] & (1u << 14)));
 
     /* A maskable interrupt detected on a legal SPLOOP boundary executes that
      * boundary, freezes ILC, drains only the buffered epilog and vectors only
@@ -2990,6 +3584,123 @@ int main(void)
     memory[0] = (5u << 13) | 0x2ef; memory[7] = 0xe0280000;
     assert(cdj_c674x_step(&c, read_word, NULL, NULL));
     assert(c.pc == 0x1040 && c.cycles == 6);
+    /* SPRUFE8B Figure F-32 Sx1b (printed page 756) register BNOP with s = 0 is
+     * an OPEN QUESTION and stays fail-closed.  The manual contradicts itself:
+     * Figure F-32 draws s as an unconstrained field with no "(s = 1)"
+     * parenthetical - contrast Figure F-31 op 110 on the same page - and
+     * Table B-1 (printed page 715) footnotes ADDKPC, "B register", "B IRP" and
+     * "B NRP" as S2-only while pointedly not footnoting "BNOP register"; but
+     * the BNOP-register entry on printed page 168 is headed "unit = .S2", its
+     * 32-bit figure hardwires bit 1 = 1, and cl6x refuses "BNOP .S1 B4,3" with
+     * W0005 "Branch to register requires .S2 unit".  dis6x does decode 0xa2ee
+     * as "BNOP.S1 B5,5", but dis6x is not authoritative on s-bit legality - it
+     * also decodes 0xda6e as MVC.S1 where Figure F-31 says (s = 1).  Until the
+     * question is settled, refusing an encoding hardware may reject is the
+     * lesser error, so 0xa2ee must still fault. */
+    cdj_c674x_reset(&c, 0x1000);
+    c.r[1][5] = 0x1040;
+    memory[0] = 0xa2ee; memory[7] = 0xe0200000;
+    assert(!cdj_c674x_step(&c, read_word, NULL, NULL));
+    assert(c.fault && c.pc == 0x1000 && c.cycles == 0);
+    /* The s = 1 twin of the same word is unaffected and still branches. */
+    cdj_c674x_reset(&c, 0x1000);
+    c.r[1][5] = 0x1040;
+    memory[0] = 0xa2ef; memory[7] = 0xe0200000;
+    assert(cdj_c674x_step(&c, read_word, NULL, NULL));
+    assert(c.pc == 0x1040 && c.cycles == 6);
+
+    /* SPRUFE8B Figure F-29 Sx2op (printed page 755): compact in-place .S ADD
+     * and SUB, "src1 = dst" and "dst = src1 - src2", src2 of type xsint.  The
+     * words come from TI's dis6x -mv6740, which names 0x622e "ADD.S1
+     * A3,A4,A3", 0x6a2e "SUB.S1 A3,A4,A3", 0x622f "ADD.S2 B3,B4,B3", 0xb32e
+     * "ADD.S1X A5,B6,A5" and, under an RS=1 header, 0x622e
+     * "ADD.S1 A19,A20,A19"; the results below are hand-computed from those. */
+    memset(memory, 0, sizeof(memory)); cdj_c674x_reset(&c, 0x1000);
+    c.r[0][3] = 0x00001000; c.r[0][4] = 0x00000234;
+    memory[0] = 0x622e; memory[7] = 0xe0200000;
+    assert(cdj_c674x_step(&c, read_word, NULL, NULL));
+    assert(c.r[0][3] == 0x00001234 && c.r[0][4] == 0x00000234);
+    cdj_c674x_reset(&c, 0x1000);
+    c.r[0][3] = 0x00001000; c.r[0][4] = 0x00000234;
+    memory[0] = 0x6a2e;
+    assert(cdj_c674x_step(&c, read_word, NULL, NULL));
+    assert(c.r[0][3] == 0x00000dcc && c.r[0][4] == 0x00000234);
+    cdj_c674x_reset(&c, 0x1000);
+    c.r[1][3] = 0x00000010; c.r[1][4] = 0x00000007;
+    memory[0] = 0x622f;
+    assert(cdj_c674x_step(&c, read_word, NULL, NULL));
+    assert(c.r[1][3] == 0x00000017 && c.r[0][3] == 0);
+    /* Bit 12 crosses src2 only; src1/dst stays on the s side. */
+    cdj_c674x_reset(&c, 0x1000);
+    c.r[0][5] = 0x00000100; c.r[1][6] = 0x00000020; c.r[0][6] = 0x0badf00d;
+    memory[0] = 0xb32e;
+    assert(cdj_c674x_step(&c, read_word, NULL, NULL));
+    assert(c.r[0][5] == 0x00000120);
+    /* Both three-bit register fields observe header RS. */
+    cdj_c674x_reset(&c, 0x1000);
+    c.r[0][19] = 0x00001000; c.r[0][20] = 0x00000234;
+    c.r[0][3] = 0x0badf00d; c.r[0][4] = 0x0badf00d;
+    memory[0] = 0x622e; memory[7] = 0xe0280000;
+    assert(cdj_c674x_step(&c, read_word, NULL, NULL));
+    assert(c.r[0][19] == 0x00001234 && c.r[0][3] == 0x0badf00d);
+    /* Figure F-29's mnemonic table carries neither a BR nor a SAT column,
+     * unlike Figures F-22 and F-25, so a saturating fetch packet leaves this
+     * ADD alone: 0x7fffffff + 1 wraps instead of clamping, and no CSR.SAT
+     * update is queued.  TI's compressor agrees - compiling "SADD .S1 A3,A4,A5"
+     * next to "ADD .S1 A3,A4,A3" emits header SAT=1 with 0x622e for the ADD,
+     * and dis6x reads that word back as ADD, not SADD. */
+    cdj_c674x_reset(&c, 0x1000);
+    c.r[0][3] = 0x7fffffff; c.r[0][4] = 1;
+    memory[0] = 0x622e; memory[7] = 0xe0204000;
+    assert(cdj_c674x_step(&c, read_word, NULL, NULL));
+    assert(c.r[0][3] == 0x80000000 && !c.load_count && !(c.control[1] & 0x200));
+
+    /* The two neighbours of the newly opened space are unmoved.  Figure F-30
+     * Sx5 differs from Sx2op only in bit 10: dis6x names 0xa5ae "ADDK.S1 5,A3"
+     * and 0xfdae "ADDK.S1 31,A3", the top of the five-bit constant. */
+    cdj_c674x_reset(&c, 0x1000);
+    c.r[0][3] = 0x00000100;
+    memory[0] = 0xa5ae; memory[7] = 0xe0200000;
+    assert(cdj_c674x_step(&c, read_word, NULL, NULL));
+    assert(c.r[0][3] == 0x00000105);
+    cdj_c674x_reset(&c, 0x1000);
+    c.r[0][3] = 0x00000100;
+    memory[0] = 0xfdae;
+    assert(cdj_c674x_step(&c, read_word, NULL, NULL));
+    assert(c.r[0][3] == 0x0000011f);
+    /* Figure F-31 op 110 keeps its "(s = 1)" requirement: 0xda6f writes ILC
+     * and its s = 0 twin 0xda6e is still refused.  Sx1b cannot claim 0xda6e
+     * because Figure F-32 fixes bits 12-11 to 00 and this word has them set. */
+    cdj_c674x_reset(&c, 0x1000);
+    c.r[1][4] = 0x0000002a;
+    memory[0] = 0xda6f;
+    assert(cdj_c674x_step(&c, read_word, NULL, NULL));
+    assert(c.control[13] == 0x0000002a);
+    cdj_c674x_reset(&c, 0x1000);
+    memory[0] = 0xda6e;
+    assert(!cdj_c674x_step(&c, read_word, NULL, NULL));
+    assert(c.fault && !strcmp(c.fault, "compact instruction not implemented") &&
+           c.fault_word == 0xda6e);
+    c.fault = NULL;
+    /* The same holds across the whole src field, which is the other end of the
+     * eight words the sweep used to count as a gap: Figure F-31 leaves bits 9-7
+     * free and the s = 0 restriction is independent of them.  cl6x refuses
+     * "MVC .S1 B0,ILC" with W0005 "Operation requires .S2 unit"; GNU names
+     * 0xd86e "mvc .S1 b0,ilc" anyway, a B-file read on an A-side unit with no
+     * cross path in the format.  src = 0 reads B0, so ILC takes 0x0000002a. */
+    cdj_c674x_reset(&c, 0x1000);
+    c.r[1][0] = 0x0000002a;
+    memory[0] = 0xd86f;
+    assert(cdj_c674x_step(&c, read_word, NULL, NULL));
+    assert(c.control[13] == 0x0000002a);
+    cdj_c674x_reset(&c, 0x1000);
+    c.r[1][0] = 0x0000002a;
+    memory[0] = 0xd86e;
+    assert(!cdj_c674x_step(&c, read_word, NULL, NULL));
+    assert(c.fault && !strcmp(c.fault, "compact instruction not implemented") &&
+           c.fault_word == 0xd86e && c.control[13] == 0 && c.cycles == 0);
+    c.fault = NULL;
+
     /* CALLP writes the next execute-packet address and takes six cycles.
      * A parallel operation observes the old link register. */
     memset(memory, 0, sizeof(memory)); cdj_c674x_reset(&c, 0x1000);
@@ -3057,5 +3768,74 @@ int main(void)
     assert(cdj_c674x_step(&c, read_word, NULL, NULL));
     assert(!cdj_c674x_step(&c, read_word, NULL, NULL));
     assert(c.cycles == 1 && c.r[1][3] == 0 && c.branch_target == 0x1040);
-    puts("C674x sign extension, parallel reads, branch delay, NOP and atomic fault passed");
+    /* TSCL/TSCH, SPRUFE8B 2.9.14: reset-disabled, a write to TSCL starts
+     * counting on the following cycle, TSCL reads latch the high half, and
+     * the counter includes idle CPU clocks. */
+    cdj_c674x_reset(&c, 0x1000);
+    assert(cdj_c674x_control_read(&c, 10) == 0 &&
+           cdj_c674x_control_read(&c, 11) == 0);
+    c.r[1][0] = 0xdeadbeef;
+    CdjC674xPacket tsc = {.count = 1, .next_pc = 0x1004,
+        .instructions = {{.pc = 0x1000,
+            .word = (10u << 23) | 0x3a2u}}}; /* MVC B0,TSCL */
+    assert(cdj_c674x_execute(&c, &tsc, read_word, NULL, NULL));
+    assert(c.cycles == 1 && c.control_ready[16] == 1);
+    tsc.next_pc += 4; tsc.instructions[0].pc += 4;
+    tsc.instructions[0].word = (10u << 18) | 0x3e2u; /* MVC TSCL,B0 */
+    assert(cdj_c674x_execute(&c, &tsc, read_word, NULL, NULL));
+    assert(c.r[1][0] == 0 && c.cycles == 2 && c.control[16] == 0);
+    tsc.next_pc += 4; tsc.instructions[0].pc += 4;
+    tsc.instructions[0].word = (1u << 23) | (10u << 18) | 0x3e2u;
+    assert(cdj_c674x_execute(&c, &tsc, read_word, NULL, NULL));
+    assert(c.r[1][1] == 1 && c.cycles == 3);
+    /* A later TSCL write cannot reset or disable an enabled counter. */
+    uint64_t origin = c.control_ready[16];
+    tsc.instructions[0].word = (10u << 23) | 0x3a2u;
+    assert(cdj_c674x_execute(&c, &tsc, read_word, NULL, NULL));
+    assert(c.control_ready[16] == origin && cdj_c674x_timestamp(&c) == 3);
+    /* Force a low-half rollover and prove TSCH is the TSCL-time snapshot,
+     * not a live view observed by the following MVC. */
+    c.cycles = origin + (UINT64_C(1) << 32) + 7u;
+    tsc.instructions[0].word = (2u << 23) | (10u << 18) | 0x3e2u;
+    assert(cdj_c674x_execute(&c, &tsc, read_word, NULL, NULL));
+    assert(c.r[1][2] == 7u && c.control[16] == 1u);
+    c.cycles += UINT64_C(1) << 32;
+    tsc.instructions[0].word = (3u << 23) | (11u << 18) | 0x3e2u;
+    assert(cdj_c674x_execute(&c, &tsc, read_word, NULL, NULL));
+    assert(c.r[1][3] == 1u);
+    c.idle_cycles = 1;
+    uint64_t before_idle = cdj_c674x_timestamp(&c);
+    assert(cdj_c674x_step(&c, read_word, NULL, NULL));
+    assert(cdj_c674x_timestamp(&c) == before_idle + 1u);
+    /* False predicates and rejected packets cannot start or snapshot TSC. */
+    cdj_c674x_reset(&c, 0x1000);
+    tsc.instructions[0].word = (1u << 29) | (10u << 23) | 0x3a2u;
+    assert(cdj_c674x_execute(&c, &tsc, read_word, NULL, NULL));
+    assert(c.control_ready[16] == 0);
+    c.control_ready[16] = 1; c.cycles = UINT64_C(1) << 33;
+    c.control[16] = 0x55aa55aa; c.r[1][4] = 0x12345678;
+    tsc.instructions[0].word = (1u << 29) | (4u << 23) |
+                                (10u << 18) | 0x3e2u;
+    assert(cdj_c674x_execute(&c, &tsc, read_word, NULL, NULL));
+    assert(c.control[16] == 0x55aa55aa && c.r[1][4] == 0x12345678);
+    /* A conflicting packet cannot enable TSCL partially. */
+    cdj_c674x_reset(&c, 0x1000);
+    CdjC674xPacket rejected_enable = {.count = 2, .next_pc = 0x1010,
+        .instructions = {
+            {.pc = 0x1008, .word = (10u << 23) | 0x3a2u},
+            {.pc = 0x100c, .word = (10u << 23) | 0x3a2u}}};
+    assert(!cdj_c674x_execute(&c, &rejected_enable, read_word, NULL, NULL));
+    assert(c.control_ready[16] == 0 && c.cycles == 0);
+    c.fault = NULL;
+    c.control_ready[16] = 1; c.cycles = UINT64_C(1) << 33;
+    c.control[16] = 0x55aa55aa;
+    CdjC674xPacket rejected = {.count = 2, .next_pc = 0x1010,
+        .instructions = {
+            {.pc = 0x1008, .word = (10u << 18) | 0x3e2u},
+            {.pc = 0x100c, .word = (10u << 18) | 0x3e2u}}};
+    assert(!cdj_c674x_execute(&c, &rejected, read_word, NULL, NULL));
+    assert(c.control[16] == 0x55aa55aa &&
+           c.cycles == (UINT64_C(1) << 33));
+
+    puts("C674x sign extension, parallel reads, branch delay, NOP, TSC and atomic fault passed");
 }

@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 import os
+import shlex
 import socket
 from pathlib import Path
 import struct
@@ -18,6 +19,8 @@ import sys
 import time
 
 from tools.cdj_dsp.tx_capture import tx_capture_metadata
+from tools.cdj_main.run_state import write_json
+from tools.cdj_main.nxs_panel import neutral_frame
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -25,7 +28,7 @@ CHECKPOINT_HEADER = struct.Struct('<8sIIII9I5IQQ')
 CHECKPOINT_MAGIC = {1: b'CDJDSP1\0', 2: b'CDJDSP2\0', 3: b'CDJDSP3\0',
                     4: b'CDJDSP4\0', 5: b'CDJDSP5\0', 6: b'CDJDSP6\0',
                     7: b'CDJDSP7\0', 8: b'CDJDSP8\0', 9: b'CDJDSP9\0',
-                    10: b'CDJDSP10', 11: b'CDJDSP11'}
+                    10: b'CDJDSP10', 11: b'CDJDSP11', 12: b'CDJDSP12'}
 SCHEDULER_STATE = struct.Struct('<QQIIBBBB')
 SHARED_RAM_SIZE = 0x20000
 MAX_FRAME_BYTES = 16 * 1024 * 1024
@@ -122,6 +125,17 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+# The NXS source contacts are shifted from the original CDJ-2000.  Keep this
+# map limited to the source selector keys documented by --source-key; other
+# panel buttons are valid contacts, but are not media-source shortcuts.
+from tools.cdj_main.nxs_panel import BUTTON_NAMES as _NXS_BUTTON_NAMES
+
+NXS_SOURCE_KEYS = {
+    name: _NXS_BUTTON_NAMES[name]
+    for name in ('sd', 'usb', 'link', 'disc', 'rekordbox')
+}
+
+
 def input_metadata(path: Path) -> dict:
     """Hash the resolved artifact before launch, rejecting concurrent rewrites."""
     path = path.resolve()
@@ -135,6 +149,92 @@ def input_metadata(path: Path) -> dict:
 
 def file_signature(stat) -> tuple:
     return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
+
+def source_schedule(at: float, contact: tuple[int, int], retries: int = 0,
+                    interval: float = 120.0) -> str:
+    """Encode an insertion-time source press and optional readiness retries."""
+    if retries < 0 or retries > 15:
+        raise ValueError('source retries must be 0..15')
+    if not math.isfinite(interval) or interval <= 0:
+        raise ValueError('source retry interval must be finite and positive')
+    byte, mask = contact
+    return ';'.join('%g:%d:%02x' % (at + index * interval, byte, mask)
+                    for index in range(retries + 1))
+
+
+def launch_ports(base: int, debug: bool) -> tuple[int, ...]:
+    """Return every localhost port this launcher will bind before launch."""
+    ports = (base, base + 2, base + 4)
+    return ports + ((base + 3,) if debug else ())
+
+
+def occupied_local_ports(base: int, debug: bool) -> list[int]:
+    """Probe launcher-owned TCP ports without contacting other sessions."""
+    occupied = []
+    for port in launch_ports(base, debug):
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            probe.settimeout(0.25)
+            probe.bind(('127.0.0.1', port))
+        except PermissionError as error:
+            raise PermissionError(
+                f'permission denied while probing localhost port {port}') from error
+        except OSError:
+            occupied.append(port)
+        finally:
+            probe.close()
+    return occupied
+
+
+def automatic_run_path() -> Path:
+    """Choose a readable timestamped run directory without overwriting one."""
+    stamp = time.strftime('%Y%m%d-%H%M%S', time.localtime())
+    base = ROOT / 'runs' / f'nxs-{stamp}'
+    candidate = base
+    suffix = 1
+    while candidate.exists():
+        candidate = ROOT / 'runs' / f'nxs-{stamp}-{suffix}'
+        suffix += 1
+    return candidate
+
+
+def run_command_path(run: Path) -> str:
+    """Render a run path that can be pasted from the repository root."""
+    try:
+        return str(run.relative_to(ROOT))
+    except ValueError:
+        return str(run)
+
+
+def print_agent_commands(run: Path, port: int, debug: bool) -> None:
+    """Print bounded, copyable follow-up commands for humans and agents."""
+    name = shlex.quote(run_command_path(run))
+    print(f'run: {name}', flush=True)
+    print(f'status: python -m tools.cdj_main.run_state {name}', flush=True)
+    print(f'report: python -m tools.cdj_main.run_report {name}', flush=True)
+    print(f'agent: python -m tools.cdj_main.dev {name} status --json', flush=True)
+    print(f'agent press: python -m tools.cdj_main.dev {name} press sd --hold-ms 100', flush=True)
+    print(f'panel: python -m tools.cdj_main.panel_control --port {port + 4} state',
+          flush=True)
+    if debug:
+        print(f'agent qmp: python -m tools.cdj_main.dev {name} qmp status', flush=True)
+        print(f'gdb: target remote 127.0.0.1:{port + 3}', flush=True)
+        print(f'qmp: {shlex.quote(str(run / "qmp.sock"))}', flush=True)
+
+
+def write_gui_board_override(template: Path, flash: Path, output: Path) -> Path:
+    """Write a run-local NXS board file pointing at the selected GUI flash."""
+    lines = template.read_text().splitlines(keepends=True)
+    marker = '/core/bfin_ebiu_amc/cfi@0/file '
+    matches = [index for index, line in enumerate(lines)
+               if line.lstrip().startswith(marker)]
+    if len(matches) != 1:
+        raise ValueError(f'GUI board template must contain one CFI flash file line: {template}')
+    newline = '\n' if lines[matches[0]].endswith('\n') else ''
+    lines[matches[0]] = marker + json.dumps(str(flash.resolve())) + newline
+    output.write_text(''.join(lines))
+    return output
 
 
 def complete_ppm_dimensions(raw: bytes) -> tuple[int, int] | None:
@@ -246,10 +346,25 @@ def checkpoint_metadata(path: Path) -> dict:
     if (CHECKPOINT_MAGIC.get(schema) != magic or endian != 0x01020304 or
             header_size != CHECKPOINT_HEADER.size or
             len(raw) != header_size + payload_size or
+            not state_size or not all(component_sizes) or
+            l2_size != 0x40000 or sdram_size != 0x2000000 or
+            page_size != 4096 or page_count != sdram_size // page_size or
+            present_pages > page_count or
             fnv1a(memoryview(raw)[header_size:]) != payload_checksum):
         raise RuntimeError(f'incompatible or incomplete DSP checkpoint: {path}')
     shared_size = SHARED_RAM_SIZE if schema >= 2 else 0
     shared_start = header_size + state_size + l2_size
+    bitmap_size = (page_count + 7) // 8
+    l1d_size = 0x8000 if schema >= 12 else 0
+    expected_payload = (state_size + l2_size + shared_size + l1d_size + bitmap_size +
+                        present_pages * page_size)
+    if payload_size != expected_payload:
+        raise RuntimeError(f'incompatible or incomplete DSP checkpoint: {path}')
+    l1d_start = header_size + state_size + l2_size + shared_size
+    bitmap_start = l1d_start + l1d_size
+    bitmap = raw[bitmap_start:bitmap_start + bitmap_size]
+    if sum(byte.bit_count() for byte in bitmap) != present_pages:
+        raise RuntimeError(f'incompatible or incomplete DSP checkpoint: {path}')
     shared = raw[shared_start:shared_start + shared_size]
     return dict(file=path.name, sha256=hashlib.sha256(raw).hexdigest(),
                 size=len(raw), schema=schema, endian='little', state_size=state_size,
@@ -260,17 +375,39 @@ def checkpoint_metadata(path: Path) -> dict:
                 shared_ram_size=shared_size,
                 shared_ram_sha256=(hashlib.sha256(shared).hexdigest()
                                    if shared_size else None),
+                l1d_size=l1d_size,
+                l1d_sha256=(hashlib.sha256(
+                    raw[l1d_start:l1d_start + l1d_size]).hexdigest()
+                    if l1d_size else None),
                 sdram_size=sdram_size, page_size=page_size,
                 page_count=page_count, present_pages=present_pages,
                 payload_checksum=f'{payload_checksum:016x}')
 
 
+def dsp_source_hashes() -> dict[str, str]:
+    sources = sorted((ROOT / 'emulator/qemu').glob('cdj_c674*.c')) + \
+              sorted((ROOT / 'emulator/qemu').glob('cdj_c674*.h')) + \
+              [ROOT / 'emulator/qemu' / name for name in (
+                  'cdj_dsp_checkpoint.c', 'cdj_dsp_checkpoint.h',
+                  'cdj_dsp_scheduler.c', 'cdj_dsp_scheduler.h', 'cdj2000_nxs_hpi.c')]
+    return {str(path.relative_to(ROOT)): sha256(path) for path in sources if path.is_file()}
+
+
 def finalize_dsp_artifacts(run: Path, firmware: Path, functional_dsp_timing: bool,
                            functional_dsp_audio: bool,
                            capture_dsp_tx: bool,
-                           dsp_scheduler_mode: str) -> None:
+                           dsp_scheduler_mode: str,
+                           main_firmware: Path | None = None,
+                           *, dsp_checkpoint_policy: str = 'all',
+                           source_sha256_at_launch: dict[str, str] | None = None) -> None:
+    if dsp_checkpoint_policy not in {'all', 'fault'}:
+        raise ValueError('DSP checkpoint policy must be all or fault')
     checkpoint_dir = run / 'dsp-checkpoints'
     checkpoints = [checkpoint_metadata(path) for path in sorted(checkpoint_dir.glob('*.cdjdsp'))]
+    # Every checkpoint has been structurally and checksum validated above.  In
+    # lightweight mode this is still useful diagnostic evidence even though
+    # the connected event transcript is intentionally absent.
+    checkpoint_capture_complete = bool(checkpoints)
     events = run / 'dsp-events.jsonl'
     event_counts = Counter()
     last_sequence = 0
@@ -289,49 +426,72 @@ def finalize_dsp_artifacts(run: Path, firmware: Path, functional_dsp_timing: boo
     if capture_dsp_tx and not tx_path.is_file():
         raise RuntimeError('requested DSP transmit capture is missing')
     tx_capture = tx_capture_metadata(tx_path) if capture_dsp_tx else None
-    sources = sorted((ROOT / 'emulator/qemu').glob('cdj_c674*.c')) + \
-              sorted((ROOT / 'emulator/qemu').glob('cdj_c674*.h')) + \
-              [ROOT / 'emulator/qemu/cdj_dsp_checkpoint.c',
-               ROOT / 'emulator/qemu/cdj_dsp_checkpoint.h',
-               ROOT / 'emulator/qemu/cdj_dsp_scheduler.c',
-               ROOT / 'emulator/qemu/cdj_dsp_scheduler.h',
-               ROOT / 'emulator/qemu/cdj2000_nxs_hpi.c']
+    source_at_exit = dsp_source_hashes()
+    source_hashes = source_at_exit if source_sha256_at_launch is None else source_sha256_at_launch
+    source_changed = source_at_exit != source_hashes
+    # Eligibility is a claim about a capture that produced checkpoints and a
+    # transcript, so it cannot outrank `complete`.  Three recorded capture
+    # manifests still claim it while complete is false: nxs-browse-blocker-
+    # control-1, nxs-dsp-batch-strict-2 and optimization-11-profile.
+    capture_complete = bool(checkpoint_capture_complete and events.is_file() and
+                            (not capture_dsp_tx or tx_capture is not None))
     manifest = dict(schema=11, format=('ABI-bound native state including C6747 INTC/Timer64P/SPI/cache/McASP TX, EDMA, SYSCFG priority, WM8740 control, timed SPI1 transfer and declared DSP activation-scheduler state, '
                                      'L2 and shared RAM plus sparse zero-default SDRAM pages'),
         dsp_timing_mode=('functional-runahead' if functional_dsp_timing else 'strict'),
         dsp_audio_mode=('coarse-packet-slots' if functional_dsp_audio else 'stopped-clock'),
         dsp_scheduler_mode=dsp_scheduler_mode,
-        architectural_validation_eligible=not (
+        dsp_checkpoint_policy=dsp_checkpoint_policy,
+        checkpoint_capture_complete=checkpoint_capture_complete,
+        architectural_validation_eligible=capture_complete and not source_changed and not (
             functional_dsp_timing or functional_dsp_audio or
             dsp_scheduler_mode != 'legacy'),
         byte_order=sys.byteorder,
-        complete=bool(checkpoints and events.is_file() and
-                      (not capture_dsp_tx or tx_capture is not None)),
+        complete=capture_complete,
         checkpoints=checkpoints, latest=checkpoints[-1]['file'] if checkpoints else None,
         event_transcript=dict(file=events.name, sha256=sha256(events) if events.is_file() else None,
                               events=last_sequence, counts=dict(sorted(event_counts.items())),
                               boot_phases=boot_phases),
         dsp_tx_capture=tx_capture,
-        firmware_sha256={path.name: sha256(path) for path in
-            (firmware / 'main-firmware.bin', firmware / 'gui-boot-memory.elf',
-             firmware / 'gui-flash-image.bin')},
-        source_sha256={str(path.relative_to(ROOT)): sha256(path) for path in sources},
+        firmware_sha256={
+            'main-firmware.bin': sha256(main_firmware or firmware / 'main-firmware.bin'),
+            'gui-boot-memory.elf': sha256(firmware / 'gui-boot-memory.elf'),
+            'gui-flash-image.bin': sha256(firmware / 'gui-flash-image.bin')},
+        main_firmware_path=str((main_firmware or firmware / 'main-firmware.bin').resolve()),
+        source_sha256=source_hashes,
+        source_sha256_observed_at_exit=source_at_exit,
+        sources_changed_during_run=source_changed,
+        source_provenance_note=('Source hashes observed at launch and exit; these do not prove '
+                                'which sources built the executable. run.json identifies the binary.'
+                                if source_sha256_at_launch is not None else
+                                'Source hashes observed only at finalization; run.json identifies the binary.'),
         approximations=[
             'DSP boot ROM is not executed; its documented HPI-ready handoff is modeled',
             'checkpoint schema 11 is ABI-bound and rejects structure-size or endianness changes',
             '128 KiB C6747 shared RAM is captured losslessly',
             'sparse SDRAM pages are lossless because omitted pages restore as zero',
             'SDRAM command timing, arbitration and retention are not modeled',
+            'EMIFB mirrors populated 32 MiB SDRAM through the C0000000-DFFFFFFF aperture; upper D-window decoding is inferred from MPU2 coverage and unused SDRAM address pins (SPRUH91D 5.2.2 and 19.2.6.10), not hardware-validated; MPU protection and geometry reconfiguration are not modeled',
+            'EDMA ICR is write-only (SPRUH91D 16.4.2.6.5); read-zero is a firmware compatibility choice, not a hardware-validated read value',
             'PSC transition ticks and PLL divider GO latency remain deterministic approximations',
             'physical HPI pins, FIFO/HRDY timing and DSP interrupt delivery are not modeled',
+            'the reciprocal approximations RCPSP/RCPDP/RSQRSP/RSQRDP deliver a correct exponent and a mantissa within the 2^-8 the manual specifies, but their bits below the eighth mantissa position are not hardware-exact; firmware that refines the seed (the documented Newton-Raphson use) converges regardless, firmware that consumes it directly may diverge',
+            # Unconditional: the Timer64P counter advances from the CPU's
+            # cycle_tick in every mode, strict and functional alike, so this
+            # board asserts the same step-to-tick fiction the replay manifest
+            # declares. SPRUH91D 28.1.5.2.1 binds the count unit to the
+            # PLL-derived internal clock, so substituting an emulated issue
+            # cycle diverges from a documented relation rather than filling a
+            # gap the manual leaves open - which is why it is declared here and
+            # not only in tools/cdj_dsp/replay.py.
+            'Timer64P counts one input clock per emulated CPU cycle (SPRUH91D chapter 28 register order, not rate); the step-to-tick ratio is unrelated to AUXCLK, so no elapsed-time, frequency or audio-rate conclusion may be drawn from a timer period expiring',
             *(['functional run-ahead adds two SPLOOPD epilog cycles; not cycle-validation evidence']
               if functional_dsp_timing else []),
             *(['functional run-ahead collapses each evidence-backed SPI1/WM8740 transfer to its committing write; not SPI timing evidence']
               if functional_dsp_timing else []),
-            *(['interrupt-return SPMASK pipe-up is reconstructed from the stable program image; retained-buffer timing is not modeled']
-              if functional_dsp_timing else []),
-            *(['an ISR SPLOOP may replace retained loop validation state; a later SPLX return is reconstructed from the current program image and self-modifying loop bodies are unsupported']
-              if functional_dsp_timing else []),
+            # SPRUFE8B 7.7.3.1 resumes an interrupted loop by re-executing
+            # its prolog from program memory, so this is not a timing mode and
+            # the caveat applies in strict timing too.
+            'an interrupted SPLOOP resumes by rebuilding the loop buffer from program memory (SPRUFE8B 7.7.3.1); a loop body changed between the interrupt and the return is undetected once an ISR software loop has replaced the retained cross-check',
             *(['interrupt entry retires already-issued results with minimum empty cycles; exact interrupt pipeline latency is not modeled']
               if functional_dsp_timing else []),
             *(['functional McASP scheduling advances one slot every 1024 executed DSP packets; '
@@ -344,9 +504,22 @@ def finalize_dsp_artifacts(run: Path, firmware: Path, functional_dsp_timing: boo
     (checkpoint_dir / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
 
 
+def run_succeeded(result: dict) -> bool:
+    """A stop request must not hide a concurrent board or finalization failure."""
+    return bool(not result.get('error') and not result.get('finalization_error')
+                and not result.get('timed_out')
+                and result.get('main_exit_before_teardown') is None
+                and result.get('gui_exit') in (None, 0)
+                and (result.get('stop_requested') or result.get('viewer_closed')
+                     or (result.get('gui_exit') == 0 and result.get('frame_exists'))))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('run', type=Path, help='new run directory, relative to repository')
+    parser.add_argument('run', nargs='?', type=Path,
+                        help='new run directory, relative to repository; defaults to a timestamped path under runs/')
+    parser.add_argument('--timestamp-run', action='store_true',
+                        help='force a timestamped run directory (useful when a positional name is not desired)')
     parser.add_argument('--seconds', type=float, default=60)
     parser.add_argument('--frame-interval', type=float, default=0,
                         help='save complete framebuffer observations every N seconds (0 disables)')
@@ -354,10 +527,20 @@ def main():
                         help='profile QEMU lock waits; observer overhead changes host timing')
     parser.add_argument('--ui', action='store_true',
                         help='open the interactive deck; closing it stops this run')
+    parser.add_argument('--debug', action='store_true',
+                        help='enable run-local QMP and localhost GDB on --port + 3')
+    parser.add_argument('--debug-paused', action='store_true',
+                        help='with --debug, hold MAIN at reset until debugger/resume; GUI time still runs')
+    parser.add_argument('--lightweight', action='store_true',
+                        help='capture DSP checkpoints only on faults; omit the event transcript')
     parser.add_argument('--sd', type=Path,
                         help='raw FAT32 SD image; writes go to a temporary overlay')
+    parser.add_argument('--test-track', action='store_true',
+                        help='create a disposable FAT32 TESTTONE.WAV fixture inside the run and attach it as SD')
     parser.add_argument('--usb', type=Path,
                         help='raw FAT32 USB image; writes go to a temporary overlay')
+    parser.add_argument('--gui-firmware', type=Path,
+                        help='directory containing development gui-boot-memory.elf and gui-flash-image.bin')
     parser.add_argument('--trace-media', action='store_true',
                         help='log SD/USB host activity for media diagnosis (changes host timing)')
     parser.add_argument('--fresh-link', action='store_true',
@@ -366,8 +549,47 @@ def main():
                         help='record actual GUI SPORT transmit frames for loss/queue diagnosis')
     parser.add_argument('--sd-insert-seconds', type=int,
                         help='SD insertion time after reset in virtual seconds (0 keeps slot empty)')
+    parser.add_argument('--source-key', default=None,
+                        help="SOURCE key to press on the panel schedule: 'sd', "
+                             "'usb', 'link', 'disc', 'rekordbox', 'none', or "
+                             "a raw BYTE:MASK such as 19:08. "
+                             "Defaults to 'sd' when --sd or --test-track is given")
+    parser.add_argument('--source-key-at', type=float,
+                        help='virtual seconds at which to press it; defaults to '
+                             'two seconds after insertion. This schedule does '
+                             'not wait for NXS media-manager readiness')
+    parser.add_argument('--source-key-retries', type=int, default=0,
+                        help='repeat the source press this many times while '
+                             'media manager settles (0 keeps one press)')
+    parser.add_argument('--source-key-retry-interval', type=float, default=120,
+                        help='virtual seconds between source retries')
+    parser.add_argument('--gui-link', metavar='HOST:PORT',
+                        help='point the GUI at this address instead of MAIN. Use '
+                             'it to put tools.cdj_main.link_inject between the '
+                             'boards for transport diagnostics. Native NXS '
+                             'ENTER and LOAD are verified through panel input '
+                             '(NXS_LINK_LOADING.md). MAIN still listens on --port')
+    parser.add_argument('--browse-aids', action='store_true',
+                        help="opt into the legacy CDJ-2000 board-side aids "
+                             "described in RUNNING.md (not a verified NXS "
+                             "browse fix): the status repeat is rewritten into the "
+                             "fresh shape and MAIN's browse replies are "
+                             "re-stamped with the cursor being answered. This "
+                             "changes link bytes, so a run using it is media "
+                             "evidence and not link-fidelity evidence")
+    parser.add_argument('--panel-hold-ms', type=int, default=3300,
+                        help='how long each scheduled key stays down. MAIN builds '
+                             'a status record every 3.05 s when nothing else '
+                             'changes and a press only lands if one falls inside '
+                             'it, so the default is deliberately longer than that')
     parser.add_argument('--port', type=int, default=5980)
     parser.add_argument('--qemu', type=Path, default=ROOT / 'build/qemu/build/qemu-system-sh4')
+    parser.add_argument('--main-firmware', type=Path,
+                        help='isolated address-zero MAIN flash image; leaves stock firmware untouched')
+    parser.add_argument('--trace-bus', action='store_true',
+                        help='log unmodeled external-bus accesses; does not implement the missing devices')
+    parser.add_argument('--ethernet-peer-port', type=int,
+                        help='connect modeled Ethernet to a framed test peer on 127.0.0.1 only')
     parser.add_argument('--functional-dsp-timing', action='store_true',
                         help='run past the unresolved SPLOOPD epilog with a labeled two-cycle approximation')
     parser.add_argument('--functional-dsp-audio', action='store_true',
@@ -377,47 +599,133 @@ def main():
     parser.add_argument('--deferred-dsp-scheduling', action='store_true',
                         help='opt into diagnostic 4096-step deferred DSP scheduling (not timing evidence)')
     args = parser.parse_args()
-    if args.sd_insert_seconds is not None and (not args.sd or
+    if args.sd_insert_seconds is not None and (not (args.sd or args.test_track) or
                                              not 0 <= args.sd_insert_seconds <= 86400):
-        parser.error('--sd-insert-seconds requires --sd and a value from 0 to 86400')
+        parser.error('--sd-insert-seconds requires --sd or --test-track and a value from 0 to 86400')
+    if args.test_track and args.sd:
+        parser.error('--test-track cannot be combined with --sd')
+    if args.timestamp_run and args.run is not None:
+        parser.error('--timestamp-run cannot be combined with a positional run directory')
     if args.capture_dsp_tx and not args.functional_dsp_audio:
         parser.error('--capture-dsp-tx requires --functional-dsp-audio')
-    if args.seconds <= 0 or not 1024 <= args.port <= 65531:
+    if args.gui_link is not None:
+        host, _, port = args.gui_link.partition(':')
+        if not host or not port.isdigit() or not 1024 <= int(port) <= 65535:
+            parser.error('--gui-link must be HOST:PORT with port 1024..65535')
+    if not 0 <= args.panel_hold_ms <= 60000:
+        parser.error('--panel-hold-ms must be 0..60000')
+    if args.source_key_at is not None and not 0 <= args.source_key_at <= 86400:
+        parser.error('--source-key-at must be 0..86400 virtual seconds')
+    if not 0 <= args.source_key_retries <= 15:
+        parser.error('--source-key-retries must be 0..15')
+    if (not math.isfinite(args.source_key_retry_interval) or
+            args.source_key_retry_interval <= 0):
+        parser.error('--source-key-retry-interval must be finite and positive')
+    if args.ethernet_peer_port is not None and not 1024 <= args.ethernet_peer_port <= 65535:
+        parser.error('--ethernet-peer-port must be 1024..65535')
+    if not math.isfinite(args.seconds) or args.seconds <= 0 or not 1024 <= args.port <= 65531:
         parser.error('positive duration and port 1024..65531 required')
+    if args.debug_paused and not args.debug:
+        parser.error('--debug-paused requires --debug')
     if not math.isfinite(args.frame_interval) or args.frame_interval < 0:
         parser.error('--frame-interval must be finite and nonnegative')
-    run = (ROOT / args.run).resolve()
+    run = automatic_run_path() if args.timestamp_run or args.run is None else (ROOT / args.run).resolve()
+    if run.exists():
+        parser.error(f'run directory already exists: {run}')
+    try:
+        occupied = occupied_local_ports(args.port, args.debug)
+    except PermissionError as error:
+        parser.error(f'localhost port preflight unavailable: {error}; grant socket probe permission or choose a permitted environment')
+    except OSError as error:
+        parser.error(f'cannot probe localhost ports: {error}')
+    if occupied:
+        ports = ', '.join(str(port) for port in occupied)
+        parser.error(f'localhost port(s) already in use: {ports}; choose another --port')
+    qmp_path = os.path.relpath(run / 'qmp.sock', ROOT)
+    if args.debug and (',' in qmp_path or len(os.fsencode(qmp_path)) >= 104):
+        parser.error('debugging requires a shorter run path without commas')
+    monitor_path = os.path.relpath(run / 'qemu-monitor.sock', ROOT)
+    if args.qemu_sync_profile and (',' in monitor_path or
+                                   len(os.fsencode(monitor_path)) >= 104):
+        parser.error('sync profiling requires a shorter run path without commas')
     firmware = ROOT / 'firmware/nxs'
+    main_firmware = (args.main_firmware or firmware / 'main-firmware.bin').resolve()
+    gui_firmware = (args.gui_firmware or firmware).resolve()
+    if args.gui_firmware and not gui_firmware.is_dir():
+        parser.error(f'GUI firmware directory does not exist: {gui_firmware}')
     simulator = ROOT / 'bin/cdj-run'
-    for path in (args.qemu, simulator, firmware / 'main-firmware.bin', firmware / 'gui-boot-memory.elf', firmware / 'gui-flash-image.bin'):
+    for path in (args.qemu, simulator, main_firmware,
+                 gui_firmware / 'gui-boot-memory.elf',
+                 gui_firmware / 'gui-flash-image.bin'):
         if not path.is_file(): parser.error(f'missing input: {path}')
     inputs = dict(qemu=args.qemu, simulator=simulator,
-                  main_firmware=firmware / 'main-firmware.bin',
-                  gui_boot=firmware / 'gui-boot-memory.elf',
-                  gui_flash=firmware / 'gui-flash-image.bin')
-    from tools.cdj_main.test_media import media_drives
+                  main_firmware=main_firmware,
+                  gui_boot=gui_firmware / 'gui-boot-memory.elf',
+                  gui_flash=gui_firmware / 'gui-flash-image.bin')
+    from tools.cdj_main.test_media import create as create_test_media, media_drives
+    test_track_manifest = None
     try:
-        media_command, media_inputs = media_drives(args.sd, args.usb)
+        # Validate an explicitly supplied USB before creating the run.  The
+        # generated fixture is created below, inside the new run directory.
+        if args.test_track:
+            media_drives(None, args.usb)
+            run.mkdir(parents=True, exist_ok=False)
+            test_track_directory = run / 'test-media'
+            test_track_manifest = create_test_media(test_track_directory)
+            sd_image = test_track_directory / test_track_manifest['image']
+        else:
+            sd_image = args.sd
+        media_command, media_inputs = media_drives(sd_image, args.usb)
     except (OSError, ValueError) as error:
         parser.error(str(error))
+    if not run.exists():
+        try:
+            run.mkdir(parents=True, exist_ok=False)
+        except FileExistsError:
+            parser.error(f'run directory already exists: {run}')
+    gui_board = ROOT / 'emulator/cdj2000-gui-nxs.hw'
+    if args.gui_firmware:
+        gui_board = run / 'gui-board.hw'
+        try:
+            write_gui_board_override(
+                ROOT / 'emulator/cdj2000-gui-nxs.hw',
+                gui_firmware / 'gui-flash-image.bin', gui_board)
+        except (OSError, ValueError) as error:
+            parser.error(f'cannot create GUI board override: {error}')
+    # The stock board is a repository input already represented by the
+    # command line.  Hash the generated board only when an override creates a
+    # new run-local artifact.
+    if args.gui_firmware:
+        inputs['gui_board'] = gui_board
     inputs.update(media_inputs)
     input_artifacts = {name: input_metadata(path) for name, path in inputs.items()}
-    run.mkdir(parents=True, exist_ok=False)
-    main_command = [str(args.qemu.resolve()), '-M', 'cdj2000nxs-main', '-bios', str(firmware / 'main-firmware.bin'),
+    main_command = [str(args.qemu.resolve()), '-M', 'cdj2000nxs-main', '-bios', str(main_firmware),
         '-display', 'none', '-no-reboot', '-d', 'unimp,guest_errors', '-D', str(run / 'main.log'),
         '-serial', f'tcp:127.0.0.1:{args.port},server,nowait',
         '-serial', f'tcp:127.0.0.1:{args.port + 2},server,nowait', '-serial', 'null']
     main_command += media_command
+    if args.debug:
+        main_command += ['-qmp', f'unix:{qmp_path},server=on,wait=off',
+                         '-gdb', f'tcp:127.0.0.1:{args.port + 3}']
+        if args.debug_paused:
+            main_command += ['-S']
+    if args.ethernet_peer_port is None:
+        main_command += ['-nic', 'none']
+    else:
+        # No bridge, physical interface, DNS or arbitrary host selection.
+        # Guest services (including modified firmware's debug console) stay
+        # on this raw-Ethernet test connection, not the host's real network.
+        main_command += ['-nic', 'socket,model=cdj-nxs-ethernet,id=nxsnet,'
+                         f'connect=127.0.0.1:{args.ethernet_peer_port}']
     if args.qemu_sync_profile:
-        monitor_path = os.path.relpath(run / 'qemu-monitor.sock', ROOT)
-        if ',' in monitor_path or len(os.fsencode(monitor_path)) >= 104:
-            parser.error('sync profiling requires a shorter run path without commas')
         main_command += ['-enable-sync-profile', '-monitor',
                          f'unix:{monitor_path},server=on,wait=off']
     gui_command = [str(simulator), '--model', 'bf531', '--environment', 'operating', '--memory-region', '0,64M',
-        '--hw-board-file', 'emulator/cdj2000-gui-nxs.hw', str(firmware / 'gui-boot-memory.elf')]
+        '--hw-board-file', str(gui_board) if args.gui_firmware else 'emulator/cdj2000-gui-nxs.hw',
+        str(gui_firmware / 'gui-boot-memory.elf')]
     overrides = dict(BFIN_PARALLEL_WRITEBACK='1', BFIN_GUI_COLOR='rgb555le',
-        BFIN_GUI_OUTPUT=str(run / 'screen.ppm'), BFIN_MAIN_LINK=f'127.0.0.1:{args.port}',
+        BFIN_GUI_OUTPUT=str(run / 'screen.ppm'),
+        BFIN_MAIN_LINK=args.gui_link or f'127.0.0.1:{args.port}',
         BFIN_MAIN_LINK_DUMP=str(run / 'main-link.bin'), BFIN_GPIO5_READY_TOGGLE='1',
         BFIN_STATS='5', BFIN_EXCEPTION_TRACE='1', BFIN_EXIT_AFTER_WALL=str(args.seconds))
     if args.fresh_link:
@@ -429,15 +737,45 @@ def main():
     gui_env.update(overrides)
     main_env = {k:v for k,v in os.environ.items() if not k.startswith('CDJ_')}
     main_env['CDJ_INPUT_PORT'] = str(args.port + 4)
+    main_env['CDJ_PANEL_FRAME'] = neutral_frame().hex()
     main_env['CDJ_NXS_SD_LID'] = 'closed'
+    if args.trace_bus:
+        main_env['CDJ_BUS_TRACE'] = '1'
     if args.sd_insert_seconds is not None:
         main_env['CDJ_SD_INSERT'] = str(args.sd_insert_seconds)
+    # Preserve the existing insertion-relative key schedule. It does not wait
+    # for NXS media-manager readiness: the filesystem can be mounted while
+    # the browser still answers NO CARD. See NXS_BROWSE_BLOCKER.md. Explicit
+    # options are necessary because inherited CDJ_ variables are sanitized.
+    source_key = args.source_key or ('sd' if (args.sd or args.test_track) else 'none')
+    if source_key != 'none':
+        contact = NXS_SOURCE_KEYS.get(source_key)
+        if contact is None:
+            byte, _, mask = source_key.partition(':')
+            try:
+                contact = (int(byte, 10), int(mask, 16))
+            except ValueError:
+                contact = None
+            if contact is None or not (0 <= contact[0] <= 21) or not (1 <= contact[1] <= 255):
+                parser.error("--source-key must be sd, usb, link, disc, "
+                             "rekordbox, none or BYTE:MASK")
+        insert_at = args.sd_insert_seconds if args.sd_insert_seconds is not None else 20
+        at = args.source_key_at if args.source_key_at is not None else insert_at + 2.0
+        main_env['CDJ_PANEL_KEYS'] = source_schedule(
+            at, contact, args.source_key_retries,
+            args.source_key_retry_interval)
+        main_env['CDJ_PANEL_HOLD_MS'] = str(args.panel_hold_ms)
     if args.trace_media:
         main_env['CDJ_SDHI_TRACE'] = '1'
         main_env['CDJ_USBH_TRACE'] = '1'
     main_env['CDJ_NXS_HPI_DUMP'] = str(run / 'dsp-l2.bin')
-    main_env['CDJ_NXS_DSP_EVENTS'] = str(run / 'dsp-events.jsonl')
     main_env['CDJ_NXS_DSP_CHECKPOINT_DIR'] = str(run / 'dsp-checkpoints')
+    main_env['CDJ_NXS_DSP_CHECKPOINT_POLICY'] = 'fault' if args.lightweight else 'all'
+    main_env['CDJ_NXS_DSP_CHECKPOINT_REQUEST'] = str(run / 'dsp-checkpoint-request.json')
+    if not args.lightweight:
+        main_env['CDJ_NXS_DSP_EVENTS'] = str(run / 'dsp-events.jsonl')
+    else:
+        main_env.pop('CDJ_NXS_DSP_EVENTS', None)
     dsp_scheduler_mode = ('deferred-v1' if args.deferred_dsp_scheduling else
                           'legacy')
     # Always override any inherited policy. Deferred scheduling changes the
@@ -449,11 +787,31 @@ def main():
         main_env['CDJ_NXS_DSP_FUNCTIONAL_AUDIO'] = '1'
     if args.capture_dsp_tx:
         main_env['CDJ_NXS_DSP_TX_CAPTURE'] = str(run / 'dsp-tx.jsonl')
-    main_env['CDJ_REQ_STATUS_FRESH'] = '0'
-    # The legacy board defaults to rewriting browse reply commands. Genuine
-    # NXS validation must transport the firmware's bytes unchanged.
-    main_env['CDJ_LINK_LINK_ROWS'] = 'off'
+    # Genuine NXS validation must transport the firmware's bytes unchanged, so
+    # both board-side aids stay off by default. They are not optional for one
+    # job, though: RUNNING.md measures the card's library reaching the screen in
+    # 0.6-2.6 s of the SOURCE key with them and the key being lost more often
+    # than not without them, because MAIN's status records collapse and the
+    # GUI's browse loop for the empty boot source never ends. Hardcoding them
+    # off left that path unreachable from this launcher.
+    main_env['CDJ_REQ_STATUS_FRESH'] = '1' if args.browse_aids else '0'
+    main_env['CDJ_LINK_LINK_ROWS'] = 'match' if args.browse_aids else 'off'
     run_manifest = dict(main=main_command, gui=gui_command,
+        dsp_source_sha256_at_launch=dsp_source_hashes(),
+        endpoints=dict(panel_host='127.0.0.1', panel_port=args.port + 4,
+                       qmp='qmp.sock' if args.debug else None,
+                       gdb_host='127.0.0.1' if args.debug else None,
+                       gdb_port=args.port + 3 if args.debug else None),
+        debug=dict(enabled=args.debug, main_starts_paused=args.debug_paused,
+                   pause_scope='MAIN only; GUI and host deadlines continue'),
+        # Fault-only mode still captures diagnostic checkpoints when a DSP
+        # fault occurs; the separate event transcript is what lightweight
+        # mode omits.  Keep the compatibility flag true and make both modes
+        # explicit for agents consuming run.json.
+        dsp_capture_enabled=True,
+        dsp_capture_mode=('fault-only' if args.lightweight else 'full'),
+        dsp_event_capture_enabled=not args.lightweight,
+        dsp_checkpoint_policy='fault' if args.lightweight else 'all',
         gui_environment=overrides, main_environment={k:v for k,v in main_env.items() if k.startswith('CDJ_')},
         dsp='NXS UHPI plus partial C674x interpreter; incomplete ISA, ROM handoff abstraction', profile='experimental NXS',
         iic_model=dict(endpoint='Apple 2.0C identity registers 0/1 only; no cryptographic authentication',
@@ -461,30 +819,65 @@ def main():
                        limitations='START/STOP and pin timing approximate; 53.930MHz board reference discrepancy; '
                                    'no IRQ, arbitration, double buffering, repeated START or certificates'),
         input_artifacts=input_artifacts, frame_interval_seconds=args.frame_interval,
+        firmware=dict(main=str(main_firmware), gui=str(gui_firmware),
+                      gui_board_file=str(gui_board),
+                      gui_board_mode=('run-local override' if args.gui_firmware else 'stock'),
+                      test_track=test_track_manifest),
         link_delivery='fresh-only diagnostic' if args.fresh_link else 'legacy cached repeats',
+        gui_link_target=args.gui_link or f'127.0.0.1:{args.port} (MAIN directly)',
+        link_fidelity=('board-side browse aids ENABLED: status repeats rewritten '
+                       'fresh and browse replies re-stamped; media evidence only, '
+                       'not link-fidelity evidence'
+                       if args.browse_aids else
+                       'firmware link bytes transported unchanged'),
         media=dict(images={name: str(path) for name, path in media_inputs.items()},
+                   test_track=test_track_manifest,
                    sd_lid_initial='closed; persistent physical panel contact 17/04',
+                   panel_key_schedule=main_env.get('CDJ_PANEL_KEYS'),
+                   panel_key_retries=args.source_key_retries,
+                   panel_key_retry_interval_seconds=args.source_key_retry_interval,
+                   panel_key_hold_ms=main_env.get('CDJ_PANEL_HOLD_MS'),
                    writes='temporary QEMU snapshot overlays; discarded at exit',
                    firmware_load_verified=False, audio_verified=False),
         dsp_scheduler_mode=dsp_scheduler_mode,
+        dsp_sdram=dict(physical_bytes=0x02000000,
+            aperture='0xc0000000-0xdfffffff',
+            addressing='physical 32 MiB mirror',
+            hardware_validated=False,
+            limitation='D-window decode inferred from MPU2 coverage and SDRAM pin mapping; MPU protection and geometry reconfiguration unmodeled'),
         qemu_sync_profile=dict(enabled=args.qemu_sync_profile,
             commands=list(SYNC_PROFILE_COMMANDS) if args.qemu_sync_profile else [],
             monitor='qemu-monitor.sock' if args.qemu_sync_profile else None,
             observer_overhead='Lock profiling and monitor collection add host overhead; '
                               'timings are diagnostic observations, not uninstrumented performance'),
         architectural_validation_eligible=not (
-            args.functional_dsp_timing or args.functional_dsp_audio or
-            args.deferred_dsp_scheduling),
+            args.lightweight or args.functional_dsp_timing or
+            args.functional_dsp_audio or args.deferred_dsp_scheduling),
         scheduling_provenance=(
             'deferred-v1 is an explicit 4096-step QEMU timer-slice host scheduling approximation; '
             'it is not a DSP timing fix, frequency model, or hardware proof'
             if args.deferred_dsp_scheduling else
             'legacy synchronous bounded DSP activation'))
+    run_manifest['ethernet'] = dict(
+        controller='SH7764 EtherC/E-DMAC', phy='RTL8201FL-VB-CG',
+        peer=(f'127.0.0.1:{args.ethernet_peer_port}' if args.ethernet_peer_port else None),
+        mode='isolated framed Ethernet' if args.ethernet_peer_port else 'disconnected',
+        hardware_timing_validated=False,
+        approximations=['atomic descriptor DMA; unified coherent RAM; no bus arbitration or wire timing',
+                        'PHY negotiation uses an explicit virtual peer and modeled delay, not analog signaling',
+                        'PHY MACR write-only register 13 reads zero for firmware RMW; hardware readback unverified',
+                        'PHY external reset GPIO and LED activity pulses are not modeled',
+                        'only EtherC interrupt masking is modeled in INT2MSKR1',
+                        'network and MAIN state are not included in DSP-only checkpoints'])
     if args.frame_interval:
         run_manifest['frame_snapshots_manifest'] = 'frames/manifest.json'
-    (run / 'run.json').write_text(json.dumps(run_manifest, indent=2) + '\n')
+    write_json(run / 'run.json', run_manifest)
+    session = dict(schema=1, state='starting', started_unix=time.time(),
+                   launcher_pid=os.getpid(), processes={})
+    write_json(run / 'session.json', session)
     processes = []
     result = {}
+    stop_requested = False
     viewer = None
     snapshots = None
     main_process = None
@@ -492,21 +885,32 @@ def main():
         try:
             main_process = subprocess.Popen(main_command, cwd=ROOT, env=main_env, stdin=subprocess.DEVNULL, stdout=mainlog, stderr=mainlog)
             processes.append(main_process)
+            session['processes']['main'] = main_process.pid
+            write_json(run / 'session.json', session)
             time.sleep(1)
             if main_process.poll() is not None: raise RuntimeError('MAIN exited; see main-stderr.log')
             gui = subprocess.Popen(gui_command, cwd=ROOT, env=gui_env, stdin=subprocess.DEVNULL, stdout=guilog, stderr=guilog)
             processes.append(gui)
+            session['processes']['gui'] = gui.pid
             if args.frame_interval:
                 snapshots = FrameSnapshots(run, args.frame_interval, time.monotonic())
             if args.ui:
                 viewer = subprocess.Popen([sys.executable, '-m', 'tools.cdj_gui.view_ui',
                     '--attach', '--device-name', 'CDJ-2000NXS', '--nxs-panel',
+                    '--run', str(run),
                     '--output', str(run / 'screen.ppm'),
                     '--control-port', str(args.port + 4)], cwd=ROOT)
                 processes.append(viewer)
+                session['processes']['viewer'] = viewer.pid
+            session['state'] = 'running'
+            write_json(run / 'session.json', session)
             print(f'MAIN {main_process.pid}, GUI {gui.pid}; logs: {run}', flush=True)
+            print_agent_commands(run, args.port, args.debug)
             deadline = time.monotonic() + args.seconds + 5
             while gui.poll() is None and time.monotonic() < deadline:
+                if (run / 'stop-request.json').is_file():
+                    stop_requested = True
+                    break
                 if snapshots is not None:
                     snapshots.poll(time.monotonic())
                 if main_process.poll() is not None: raise RuntimeError('MAIN exited during run')
@@ -514,12 +918,23 @@ def main():
                     if viewer.returncode != 0: raise RuntimeError('Deck viewer exited with an error')
                     break
                 time.sleep(.1)
+            if (run / 'stop-request.json').is_file():
+                stop_requested = True
             closed = viewer is not None and viewer.poll() == 0
             result = dict(gui_exit=gui.poll(), viewer_closed=closed,
-                          timed_out=gui.poll() is None and not closed,
+                          main_exit_before_teardown=main_process.poll(),
+                          stop_requested=stop_requested,
+                          timed_out=gui.poll() is None and not closed and
+                          not stop_requested,
                           frame_exists=(run / 'screen.ppm').exists())
             print(json.dumps(result), flush=True)
+        except (Exception, KeyboardInterrupt) as error:
+            result.update(error=str(error) or type(error).__name__,
+                          main_exit_before_teardown=main_process.poll() if main_process else None)
+            print(f'nxs_vm: {result["error"]}; diagnostics: {run}', file=sys.stderr)
         finally:
+            session['state'] = 'stopping'
+            write_json(run / 'session.json', session)
             if args.qemu_sync_profile:
                 run_manifest['qemu_sync_profile']['collection'] = capture_sync_profile(
                     run, main_process)
@@ -540,13 +955,25 @@ def main():
             run_manifest['inputs_differ_at_exit'] = [name for name in inputs
                 if input_artifacts[name] != final_inputs[name]]
             run_manifest['input_provenance_notes'] = ('Hashes observed before launch and after exit; '
-                                                       'not continuous file-mutation monitoring')
-            (run / 'run.json').write_text(json.dumps(run_manifest, indent=2) + '\n')
-            finalize_dsp_artifacts(run, firmware, args.functional_dsp_timing,
-                                   args.functional_dsp_audio, args.capture_dsp_tx,
-                                   dsp_scheduler_mode)
-            (run / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
-    return 0 if result.get('viewer_closed') or (result.get('gui_exit') == 0 and result.get('frame_exists')) else 1
+                                                       'not continuous file-mutation monitoring' +
+                                                       ('. GUI board is a run-local copy with its CFI file '
+                                                        'bound to the selected GUI flash image.'
+                                                        if args.gui_firmware else ''))
+            write_json(run / 'run.json', run_manifest)
+            try:
+                if not args.lightweight or any((run / 'dsp-checkpoints').glob('*.cdjdsp')):
+                    finalize_dsp_artifacts(run, gui_firmware, args.functional_dsp_timing,
+                                           args.functional_dsp_audio, args.capture_dsp_tx,
+                                           dsp_scheduler_mode, main_firmware,
+                                           dsp_checkpoint_policy=('fault' if args.lightweight else 'all'),
+                                           source_sha256_at_launch=run_manifest['dsp_source_sha256_at_launch'])
+            except (OSError, ValueError, RuntimeError) as error:
+                result['finalization_error'] = str(error)
+            write_json(run / 'result.json', result)
+            session.update(state='stopped' if run_succeeded(result) else 'failed',
+                           ended_unix=time.time(), result='result.json')
+            write_json(run / 'session.json', session)
+    return 0 if run_succeeded(result) else 1
 
 
 if __name__ == '__main__':

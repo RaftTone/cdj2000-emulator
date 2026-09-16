@@ -12,6 +12,9 @@ from tools.cdj_gui import faceplate, view_ui
 
 def test_sources_and_time_are_shifted_only_in_nxs():
     assert panel_control.button_mask("usb") == (19, 2)
+    assert nxs_panel.button_mask("sd") == (19, 0x08)
+    assert nxs_panel.button_mask("usb") == (19, 0x04)
+    assert nxs_panel.button_mask("enter") == (17, 0x01)
     assert [nxs_panel.deck_input(f"19.{i}") for i in range(5)] == [
         "19.1", "19.2", "19.3", "19.4", "19.5"]
     for source, expected in zip(("LINK", "USB", "SD", "DISC"), range(1, 5)):
@@ -67,6 +70,33 @@ def test_changed_contacts_match_nxs_firmware_service_names():
             table += 8
     for contact, status in decoded.items():
         assert nxs_panel.KEY_NAMES[contact] == names[status]
+
+
+def test_nxs_rev_polarity_is_backed_by_decoder_instructions():
+    """The NXS decoder's two observed active-low contacts are image-backed."""
+    image = Path(__file__).resolve().parents[1] / "firmware/nxs/main-unpacked.bin"
+    if not image.exists():
+        pytest.skip("NXS firmware is not supplied")
+    data = image.read_bytes()
+
+    # Runtime 0x042f5810 is at offset 0x002f5810 in this address-zero image.
+    # 042f58b8 loads byte 15, then 042f58d4 tests bit 1.  The short branch's
+    # annulled slot clears status bit 6 when the input is zero; the fallthrough
+    # OR sets it when the input is one.
+    assert data[0x2f58b8:0x2f58ba] == bytes.fromhex("7f84")  # mov.b @(15,r7),r0
+    words = [struct.unpack_from("<H", data, address)[0]
+             for address in (0x2f58d4, 0x2f58d8, 0x2f58da, 0x2f58dc)]
+    assert words == [0xC802, 0x8D01, 0xC9BF, 0xCB40]
+
+    assert nxs_panel.contact_level(15, 0x02, active=False)
+    assert not nxs_panel.contact_level(15, 0x02, active=True)
+    assert nxs_panel.neutral_frame()[15] & 0x02
+
+    # The same decoder inverts the SD OPEN contact at 042f59e4..59f2:
+    # raw bit 2 clear sets status bit 1, while raw bit 2 set clears it.
+    words = [struct.unpack_from("<H", data, address)[0]
+             for address in (0x2f59e6, 0x2f59ec, 0x2f59ee, 0x2f59f0)]
+    assert words == [0xC804, 0x8D01, 0xCB02, 0xC9FD]
 
 
 @pytest.mark.skipif(os.environ.get('CDJ_TEST_TK') != '1', reason='opt-in native Tk smoke test')

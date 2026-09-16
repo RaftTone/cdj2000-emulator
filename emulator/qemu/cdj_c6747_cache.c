@@ -14,6 +14,27 @@ static bool mar_supported(unsigned index)
            (index >= 192 && index <= 223);
 }
 
+bool cdj_c6747_l1d_sram_span(const CdjC6747Cache *cache, uint32_t address,
+                             size_t size, uint32_t *offset)
+{
+    static const uint32_t bytes[8] = {
+        0x8000, 0x7000, 0x6000, 0x4000, 0, 0, 0, 0
+    };
+    uint32_t base, at, available;
+    if (!cache || !offset || !size) return false;
+    if (address >= 0x00f00000u && address < 0x00f08000u)
+        base = 0x00f00000u;
+    else if (address >= 0x11f00000u && address < 0x11f08000u)
+        base = 0x11f00000u;
+    else
+        return false;
+    at = address - base;
+    available = bytes[cache->l1dcfg & 7u];
+    if (at > available || size > available - at) return false;
+    *offset = at;
+    return true;
+}
+
 void cdj_c6747_cache_reset(CdjC6747Cache *cache)
 {
     memset(cache, 0, sizeof(*cache));

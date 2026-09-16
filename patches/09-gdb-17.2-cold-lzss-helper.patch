@@ -1,0 +1,363 @@
+--- a/sim/bfin/bfin-sim.c
++++ b/sim/bfin/bfin-sim.c
+@@ -9108,103 +9108,92 @@
+ 
+ }
+ 
+-bu32
+-interp_insn_bfin (SIM_CPU *cpu, bu32 pc)
+-{
+-  int i;
+-  bu32 insn_len;
+-
+-  if (__builtin_expect (bfin_probes_active < 0, 0))
+-    bfin_probes_init ();
+-
+-
+-  /* The CDJ-2000 GUI expands ten large, already-verified resource banks with
+-     the routine at 0x00b832cc.  Interpreting that byte loop costs several
+-     minutes on the host.  Keep firmware ordering intact, but optionally run
+-     the identical 4 KiB-window LZSS operation natively at the call boundary.  */
+-  if (pc == 0x00b832cc && getenv ("BFIN_FAST_LZSS"))
+-    {
+-      SIM_DESC sd = CPU_STATE (cpu);
+-      const char *flash_path = getenv ("BFIN_FAST_LZSS");
+-      static unsigned char *flash_image;
+-      static size_t flash_size;
+-      bu32 source = DREG (0);
+-      bu32 destination = DREG (1);
+-      bu32 output_size = DREG (2);
+-      bu32 packed_size = 0;
+-      unsigned char *packed;
+-      unsigned char *output;
+-      unsigned char window[4096];
+-      unsigned source_position = 0;
+-      unsigned output_position = 0;
+-      unsigned write_position = 4096 - 18;
+-      unsigned flags = 0;
+-      static const struct { bu32 source, packed, output; } banks[] =
++/* Keep the optional decompressor's 4 KiB window off the per-instruction
++   stack. No inlining: its cold path must not enlarge the dispatcher frame. */
++static int __attribute__ ((noinline))
++bfin_fast_lzss (SIM_CPU *cpu)
++{
++  const char *flash_path = getenv ("BFIN_FAST_LZSS");
++  SIM_DESC sd = CPU_STATE (cpu);
++  static unsigned char *flash_image;
++  static size_t flash_size;
++  bu32 source = DREG (0);
++  bu32 destination = DREG (1);
++  bu32 output_size = DREG (2);
++  bu32 packed_size = 0;
++  unsigned char *packed;
++  unsigned char *output;
++  unsigned char window[4096];
++  unsigned source_position = 0;
++  unsigned output_position = 0;
++  unsigned write_position = 4096 - 18;
++  unsigned flags = 0;
++  static const struct { bu32 source, packed, output; } banks[] =
++    {
++      { 0x200ebba0, 0x39d55, 0xf8853 },
++      { 0x201258f5, 0x12a4d, 0x6a692 },
++      { 0x20138342, 0x007b4, 0x02000 },
++      { 0x20138af6, 0x00749, 0x02000 },
++      { 0x2013923f, 0x0078a, 0x02000 },
++      { 0x201399c9, 0x0077f, 0x02000 },
++      { 0x2013a148, 0x007b2, 0x02000 },
++      { 0x2013a8fa, 0x23d23, 0x36400 },
++      { 0x2015e61d, 0x06b12, 0x1d600 },
++      { 0x2016512f, 0x73ed8, 0xa7700 },
++    };
++  unsigned bank;
++
++  /* The table above is the STOCK image's bank layout.  A patched image that
++     inserts anything ahead of the resource tail moves every one of these
++     sources, nothing matches, the accelerator declines, and the guest's own
++     decompressor then reads flash the ELF never maps -- so every bank
++     unpacks out of the still-empty 0x20-filled window and the font becomes
++     vertical bars.  That is a property of this shortcut, not of the image.
++     BFIN_FAST_LZSS_SHIFT=<bytes> moves the table with the image.  */
++  {
++    const char *shift_env = getenv ("BFIN_FAST_LZSS_SHIFT");
++    bu32 shift = shift_env && *shift_env
++                 ? (bu32) strtoul (shift_env, NULL, 0) : 0;
++
++    for (bank = 0; bank < ARRAY_SIZE (banks); ++bank)
++      if (banks[bank].source + shift == source
++          && banks[bank].output == output_size)
+         {
+-          { 0x200ebba0, 0x39d55, 0xf8853 },
+-          { 0x201258f5, 0x12a4d, 0x6a692 },
+-          { 0x20138342, 0x007b4, 0x02000 },
+-          { 0x20138af6, 0x00749, 0x02000 },
+-          { 0x2013923f, 0x0078a, 0x02000 },
+-          { 0x201399c9, 0x0077f, 0x02000 },
+-          { 0x2013a148, 0x007b2, 0x02000 },
+-          { 0x2013a8fa, 0x23d23, 0x36400 },
+-          { 0x2015e61d, 0x06b12, 0x1d600 },
+-          { 0x2016512f, 0x73ed8, 0xa7700 },
+-        };
+-      unsigned bank;
+-
+-      /* The table above is the STOCK image's bank layout.  A patched image that
+-         inserts anything ahead of the resource tail moves every one of these
+-         sources, nothing matches, the accelerator declines, and the guest's own
+-         decompressor then reads flash the ELF never maps -- so every bank
+-         unpacks out of the still-empty 0x20-filled window and the font becomes
+-         vertical bars.  That is a property of this shortcut, not of the image.
+-         BFIN_FAST_LZSS_SHIFT=<bytes> moves the table with the image.  */
+-      {
+-        const char *shift_env = getenv ("BFIN_FAST_LZSS_SHIFT");
+-        bu32 shift = shift_env && *shift_env
+-                     ? (bu32) strtoul (shift_env, NULL, 0) : 0;
+-
+-        for (bank = 0; bank < ARRAY_SIZE (banks); ++bank)
+-          if (banks[bank].source + shift == source
+-              && banks[bank].output == output_size)
+-            {
+-              packed_size = banks[bank].packed;
+-              break;
+-            }
+-      }
+-      if (packed_size == 0)
+-        goto normal_interpretation;
+-
+-      if (!flash_image)
++          packed_size = banks[bank].packed;
++          break;
++        }
++  }
++  if (packed_size == 0)
++    return 0;
++
++  if (!flash_image)
++    {
++      FILE *flash = fopen (flash_path, "rb");
++      long size;
++      if (!flash || fseek (flash, 0, SEEK_END) != 0
++          || (size = ftell (flash)) < 0 || fseek (flash, 0, SEEK_SET) != 0)
+         {
+-          FILE *flash = fopen (flash_path, "rb");
+-          long size;
+-          if (!flash || fseek (flash, 0, SEEK_END) != 0
+-              || (size = ftell (flash)) < 0 || fseek (flash, 0, SEEK_SET) != 0)
+-            {
+-              if (flash)
+-                fclose (flash);
+-              goto normal_interpretation;
+-            }
+-          flash_image = xmalloc ((size_t) size);
+-          flash_size = (size_t) size;
+-          if (fread (flash_image, 1, flash_size, flash) != flash_size)
+-            {
+-              fclose (flash);
+-              free (flash_image);
+-              flash_image = NULL;
+-              flash_size = 0;
+-              goto normal_interpretation;
+-            }
++          if (flash)
++            fclose (flash);
++          return 0;
++        }
++      flash_image = xmalloc ((size_t) size);
++      flash_size = (size_t) size;
++      if (fread (flash_image, 1, flash_size, flash) != flash_size)
++        {
+           fclose (flash);
++          free (flash_image);
++          flash_image = NULL;
++          flash_size = 0;
++          return 0;
+         }
+-      if ((source & 0x1fffff) + packed_size > flash_size)
+-        goto normal_interpretation;
+-      packed = xmalloc (packed_size);
+-      output = xmalloc (output_size);
+-      /* Match the firmware's window exactly.  FUN_00b832cc fills its buffer at
++      fclose (flash);
++    }
++  if ((source & 0x1fffff) + packed_size > flash_size)
++    return 0;
++  packed = xmalloc (packed_size);
++  output = xmalloc (output_size);
++  /* Match the firmware's window exactly.  FUN_00b832cc fills its buffer at
+ 	 0x58ae68 with 0x20 for 1019 words plus one halfword -- 4078 bytes, not
+ 	 4096 -- while its indices still wrap at 4096, so the last 18 bytes are
+ 	 whatever the RAM held (zero here).  Filling all 4096 with spaces makes
+@@ -9212,87 +9201,105 @@
+ 	 which corrupts small, scattered regions of an otherwise correct bank:
+ 	 the TRACK/REMAIN/BPM label bitmaps came out as garbage while their
+ 	 immediate neighbours were pixel-perfect.  */
+-      memset (window, ' ', 4096 - 18);
+-      memset (window + 4096 - 18, 0, 18);
+-      memcpy (packed, flash_image + (source & 0x1fffff), packed_size);
+-
+-      while (source_position < packed_size && output_position < output_size)
++  memset (window, ' ', 4096 - 18);
++  memset (window + 4096 - 18, 0, 18);
++  memcpy (packed, flash_image + (source & 0x1fffff), packed_size);
++
++  while (source_position < packed_size && output_position < output_size)
++    {
++      flags >>= 1;
++      if (!(flags & 0x100))
++        flags = packed[source_position++] | 0xff00;
++      if (flags & 1)
+         {
+-          flags >>= 1;
+-          if (!(flags & 0x100))
+-            flags = packed[source_position++] | 0xff00;
+-          if (flags & 1)
++          unsigned char value;
++          if (source_position >= packed_size)
++            break;
++          value = packed[source_position++];
++          output[output_position++] = value;
++          window[write_position] = value;
++          write_position = (write_position + 1) & 4095;
++        }
++      else
++        {
++          unsigned read_position;
++          unsigned count;
++          unsigned offset;
++          if (source_position + 1 >= packed_size)
++            break;
++          read_position = (packed[source_position]
++                           | ((packed[source_position + 1] & 0xf0) << 4));
++          count = (packed[source_position + 1] & 0x0f) + 3;
++          source_position += 2;
++          for (offset = 0; offset < count && output_position < output_size;
++               ++offset)
+             {
+-              unsigned char value;
+-              if (source_position >= packed_size)
+-                break;
+-              value = packed[source_position++];
++              unsigned char value = window[(read_position + offset) & 4095];
+               output[output_position++] = value;
+               window[write_position] = value;
+               write_position = (write_position + 1) & 4095;
+             }
+-          else
+-            {
+-              unsigned read_position;
+-              unsigned count;
+-              unsigned offset;
+-              if (source_position + 1 >= packed_size)
+-                break;
+-              read_position = (packed[source_position]
+-                               | ((packed[source_position + 1] & 0xf0) << 4));
+-              count = (packed[source_position + 1] & 0x0f) + 3;
+-              source_position += 2;
+-              for (offset = 0; offset < count && output_position < output_size;
+-                   ++offset)
+-                {
+-                  unsigned char value = window[(read_position + offset) & 4095];
+-                  output[output_position++] = value;
+-                  window[write_position] = value;
+-                  write_position = (write_position + 1) & 4095;
+-                }
+-            }
+         }
+-      if (output_position != output_size)
++    }
++  if (output_position != output_size)
++    {
++      fprintf (stderr,
++               "fast LZSS decode mismatch source=%#x got=%#x expected=%#x\n",
++               source, output_position, output_size);
++      free (output);
++      free (packed);
++      return 0;
++    }
++  for (output_position = 0; output_position < output_size;
++       output_position += 4096)
++    {
++      unsigned amount = min (4096, output_size - output_position);
++      if (sim_write (sd, destination + output_position,
++                     output + output_position, amount) != amount)
+         {
+           fprintf (stderr,
+-                   "fast LZSS decode mismatch source=%#x got=%#x expected=%#x\n",
+-                   source, output_position, output_size);
++                   "fast LZSS write mismatch destination=%#x offset=%#x\n",
++                   destination, output_position);
+           free (output);
+           free (packed);
+-          goto normal_interpretation;
++          return 0;
+         }
+-      for (output_position = 0; output_position < output_size;
+-           output_position += 4096)
+-        {
+-          unsigned amount = min (4096, output_size - output_position);
+-          if (sim_write (sd, destination + output_position,
+-                         output + output_position, amount) != amount)
+-            {
+-              fprintf (stderr,
+-                       "fast LZSS write mismatch destination=%#x offset=%#x\n",
+-                       destination, output_position);
+-              free (output);
+-              free (packed);
+-              goto normal_interpretation;
+-            }
+-        }
+-      if (getenv ("BFIN_FAST_LZSS_TRACE"))
+-        {
+-          /* run_headless stops the simulator with a hard terminate, and a
+-             redirected stderr is fully buffered on Windows, so an unflushed
+-             line is simply lost.  A silent trace then reads exactly like
+-             "this code never ran" -- a wrong conclusion this already cost
+-             one session.  BFIN_CALL_WATCH flushes for the same reason.  */
+-          fprintf (stderr,
+-                   "fast LZSS source=%#x destination=%#x output=%#x\n",
+-                   source, destination, output_size);
+-          fflush (stderr);
+-        }
+-      free (output);
+-      free (packed);
+-      BFIN_CPU_STATE.did_jump = true;
+-      SET_PCREG (RETSREG);
+-      return 2;
++    }
++  if (getenv ("BFIN_FAST_LZSS_TRACE"))
++    {
++      /* run_headless stops the simulator with a hard terminate, and a
++         redirected stderr is fully buffered on Windows, so an unflushed
++         line is simply lost.  A silent trace then reads exactly like
++         "this code never ran" -- a wrong conclusion this already cost
++         one session.  BFIN_CALL_WATCH flushes for the same reason.  */
++      fprintf (stderr,
++               "fast LZSS source=%#x destination=%#x output=%#x\n",
++               source, destination, output_size);
++      fflush (stderr);
++    }
++  free (output);
++  free (packed);
++  BFIN_CPU_STATE.did_jump = true;
++  SET_PCREG (RETSREG);
++  return 2;
++}
++
++bu32
++interp_insn_bfin (SIM_CPU *cpu, bu32 pc)
++{
++  int i;
++  bu32 insn_len;
++
++  if (__builtin_expect (bfin_probes_active < 0, 0))
++    bfin_probes_init ();
++
++
++  if (pc == 0x00b832cc && getenv ("BFIN_FAST_LZSS"))
++    {
++      if (bfin_fast_lzss (cpu))
++        return 2;
++      /* A declined accelerator skipped the pre-probe in the original path. */
++      goto normal_interpretation;
+     }
+ 
+   /* The GUI composites nine window objects (base 0x588224, stride 0x180)

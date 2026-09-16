@@ -22,7 +22,8 @@
 #include "cdj_c6747_edma.h"
 #include "cdj_dsp_scheduler.h"
 
-#define CDJ_DSP_CHECKPOINT_SCHEMA 11u
+#define CDJ_DSP_CHECKPOINT_SCHEMA 12u
+#define CDJ_DSP_L1D_SIZE 0x8000u
 #define CDJ_DSP_L2_SIZE 0x40000u
 #define CDJ_DSP_SHARED_RAM_SIZE 0x20000u
 #define CDJ_DSP_SDRAM_SIZE 0x02000000u
@@ -47,7 +48,9 @@
  * SYSCFG master-priority state. Schema 9 appends the board's write-only
  * WM8740 DAC control state. Schema 10 appends the timed SPI1 transfer-engine
  * state. Schema 11 appends the declared DSP activation scheduler state;
- * older inputs initialize any absent peripheral state. */
+ * older inputs initialize any absent peripheral state. Schema 12 appends the
+ * complete 32 KiB physical L1D image after shared RAM. The interpreter models
+ * cache-partition SRAM visibility, but not cache contents or timing. */
 typedef struct {
     uint32_t hpi_address, boot_phase;
     uint64_t words, event_sequence, checkpoint_sequence;
@@ -84,11 +87,25 @@ bool cdj_dsp_checkpoint_write(const char *path,
                               const uint8_t *shared_ram, size_t shared_ram_size,
                               const uint8_t *sdram, size_t sdram_size,
                               char *error, size_t error_size);
+bool cdj_dsp_checkpoint_write_with_l1d(
+    const char *path, const CdjDspCheckpointState *state,
+    const uint8_t *l2, size_t l2_size,
+    const uint8_t *shared_ram, size_t shared_ram_size,
+    const uint8_t *l1d, size_t l1d_size,
+    const uint8_t *sdram, size_t sdram_size,
+    char *error, size_t error_size);
 bool cdj_dsp_checkpoint_read(const char *path,
                              CdjDspCheckpointState *state,
                              uint8_t *l2, size_t l2_size,
                              uint8_t *shared_ram, size_t shared_ram_size,
                              uint8_t *sdram, size_t sdram_size,
                              char *error, size_t error_size);
+bool cdj_dsp_checkpoint_read_with_l1d(
+    const char *path, CdjDspCheckpointState *state,
+    uint8_t *l2, size_t l2_size,
+    uint8_t *shared_ram, size_t shared_ram_size,
+    uint8_t *l1d, size_t l1d_size,
+    uint8_t *sdram, size_t sdram_size,
+    char *error, size_t error_size);
 
 #endif

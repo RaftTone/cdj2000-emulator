@@ -1,0 +1,121 @@
+--- a/sim/bfin/dv-bfin_ppi.c
++++ b/sim/bfin/dv-bfin_ppi.c
+@@ -2705,6 +2705,84 @@
+   scratch[nr_bytes - 2] = sum & 0xff;
+   scratch[nr_bytes - 1] = (sum >> 8) & 0xff;
+   return scratch;
++}
++
++static unsigned
++bfin_sport_tx_dump_stream_close (FILE **stream)
++{
++  unsigned result = 0;
++
++  if (*stream)
++    {
++      result = fclose (*stream) == 0;
++      *stream = NULL;
++    }
++  return result;
++}
++
++static FILE *bfin_sport_tx_dump_stream;
++static int bfin_sport_tx_dump_registered;
++static int bfin_sport_tx_dump_path_initialized;
++static const char *bfin_sport_tx_dump_path_value;
++
++static const char *
++bfin_sport_tx_dump_path (void)
++{
++  if (!bfin_sport_tx_dump_path_initialized)
++    {
++      bfin_sport_tx_dump_path_value = getenv ("BFIN_SPORT_TX_OUTPUT");
++      bfin_sport_tx_dump_path_initialized = 1;
++    }
++  return bfin_sport_tx_dump_path_value;
++}
++
++static void
++bfin_sport_tx_dump_close (void)
++{
++  if (bfin_sport_tx_dump_stream
++      && !bfin_sport_tx_dump_stream_close (&bfin_sport_tx_dump_stream))
++    fprintf (stderr, "bfin: SPORT TX capture close failed\n");
++}
++
++static void
++bfin_sport_tx_dump (const char *path, bu32 base, const void *source,
++			unsigned nr_bytes)
++{
++  unsigned char header[12];
++
++  if (path == NULL || *path == 0)
++    return;
++  header[0] = 'S';
++  header[1] = 'P';
++  header[2] = 'T';
++  header[3] = 'X';
++  header[4] = base;
++  header[5] = base >> 8;
++  header[6] = base >> 16;
++  header[7] = base >> 24;
++  header[8] = nr_bytes;
++  header[9] = nr_bytes >> 8;
++  header[10] = nr_bytes >> 16;
++  header[11] = nr_bytes >> 24;
++  if (!bfin_sport_tx_dump_stream)
++    {
++      bfin_sport_tx_dump_stream = fopen (path, "ab");
++      if (!bfin_sport_tx_dump_stream)
++	return;
++      if (!bfin_sport_tx_dump_registered)
++	{
++	  atexit (bfin_sport_tx_dump_close);
++	  bfin_sport_tx_dump_registered = 1;
++	}
++    }
++  if (fwrite (header, 1, sizeof (header), bfin_sport_tx_dump_stream)
++	      != sizeof (header)
++      || fwrite (source, 1, nr_bytes, bfin_sport_tx_dump_stream) != nr_bytes
++      || fflush (bfin_sport_tx_dump_stream) != 0)
++    {
++      fprintf (stderr, "bfin: SPORT TX capture write failed\n");
++      bfin_sport_tx_dump_close ();
++    }
+ }
+ 
+ static unsigned
+@@ -2713,7 +2791,6 @@
+ 			     int violate_read_only_section)
+ {
+   struct bfin_sport *sport = hw_data (me);
+-  const char *path = getenv ("BFIN_SPORT_TX_OUTPUT");
+   unsigned char scratch[48];
+ 
+   /* Everything below -- the wire, the peer's request tracking and the TX dump
+@@ -2766,23 +2843,8 @@
+ 
+   /* Preserve packet boundaries and the SPORT instance for protocol analysis.
+      Each little-endian record is: "SPTX", SPORT base, payload length, bytes.  */
+-  if (path && *path)
+-    {
+-      FILE *stream = fopen (path, "ab");
+-      if (stream)
+-	{
+-	  unsigned char header[12] =
+-	  {
+-	    'S', 'P', 'T', 'X',
+-	    sport->base, sport->base >> 8, sport->base >> 16,
+-	    sport->base >> 24,
+-	    nr_bytes, nr_bytes >> 8, nr_bytes >> 16, nr_bytes >> 24,
+-	  };
+-	  fwrite (header, 1, sizeof (header), stream);
+-	  fwrite (source, 1, nr_bytes, stream);
+-	  fclose (stream);
+-	}
+-    }
++  bfin_sport_tx_dump (bfin_sport_tx_dump_path (), sport->base, source,
++			      nr_bytes);
+ 
+   return nr_bytes;
+ }

@@ -81,6 +81,7 @@ def environment() -> dict[str, str]:
     settings["PATH"] = str(bindir) + os.pathsep + settings.get("PATH", "")
     settings.pop("CDJ_INPUT_PORT", None)
     settings.pop("CDJ_NXS_SD_LID", None)
+    settings.pop("CDJ_TEST_PANEL_BASE", None)
     return settings
 
 
@@ -146,7 +147,8 @@ class Segment(NamedTuple):
 
 def script(harness: Path, steps: list[tuple[str, int]],
            where: Path | None = None, *,
-           defer_replies: bool = False) -> list[Segment]:
+           defer_replies: bool = False,
+           base_payload: bytes | None = None) -> list[Segment]:
     """Drive a list of (command, exchanges-afterwards) and cut the trace up.
 
     The harness echoes `# command` before sending and `# reply` for everything
@@ -162,6 +164,9 @@ def script(harness: Path, steps: list[tuple[str, int]],
 
     settings = environment()
     settings["CDJ_INPUT_PORT"] = str(free_port())
+    if base_payload is not None:
+        assert len(base_payload) == PAYLOAD_LEN
+        settings['CDJ_TEST_PANEL_BASE'] = base_payload.hex()
     scenario = 'script-deferred-replies' if defer_replies else 'script'
     finished = subprocess.run([str(harness), scenario, str(path)],
                               capture_output=True, text=True, timeout=300,
@@ -181,6 +186,48 @@ def script(harness: Path, steps: list[tuple[str, int]],
     assert [segment.command for segment in segments] == \
         [command for command, _ in steps], "the harness lost a command"
     return segments
+
+
+def test_literal_levels_override_base_holds_pulses_and_analog(harness, tmp_path):
+    base = bytearray(PAYLOAD_LEN)
+    base[15] = 0x82  # Neutral REV plus an unrelated static contact.
+    steps = [('level 15 02 0', 3), ('down 15 06', 3),
+             ('press 15 02 1', 8), ('level 15 06 1', 3),
+             ('up 15 06', 3), ('level 15 04 0', 3),
+             ('analog 0 255', 3), ('level 2 81 0', 3),
+             ('state', 2), ('clear', 3), ('state', 2)]
+    segments = script(harness, steps, tmp_path, base_payload=bytes(base))
+    for segment, expected in zip(segments[:6], [0x80, 0x84, 0x84,
+                                               0x86, 0x86, 0x82]):
+        assert all(frame[15] == expected for frame in segment.frames)
+    assert all(frame[2] == 0xff for frame in segments[6].frames)
+    assert all(frame[2] == 0x7e for frame in segments[7].frames)
+    state = next(r for r in segments[8].replies if r.startswith('ok state '))
+    fields = dict(token.split('=', 1) for token in state.split()[2:])
+    mask = bytes.fromhex(fields['level_mask'])
+    value = bytes.fromhex(fields['level_value'])
+    assert len(mask) == len(value) == PAYLOAD_LEN
+    assert mask[15] == 6 and value[15] == 2
+    assert mask[2] == 0x81 and value[2] == 0
+    assert all(frame == bytes(base) for frame in segments[9].frames)
+    assert f'level_mask={"00" * PAYLOAD_LEN}' in segments[10].replies[0]
+    assert f'level_value={"00" * PAYLOAD_LEN}' in segments[10].replies[0]
+
+
+def test_literal_level_validation_and_sd_lid_priority(harness, tmp_path):
+    invalid = ['level', 'level 15 02', 'level -1 02 0', 'level 22 02 0',
+               'level bad 02 0', 'level 15 00 0', 'level 15 100 0',
+               'level 15 gg 0', 'level 15 02 -1', 'level 15 02 2',
+               'level 15 02 yes', 'level 15 02 1 extra']
+    steps = [('level 15 02 1', 2), *[(command, 2) for command in invalid],
+             ('sd-lid closed', 2), ('level 17 04 0', 2),
+             ('sd-lid open', 2), ('level 17 04 1', 2)]
+    segments = script(harness, steps, tmp_path)
+    for segment in segments[1:1 + len(invalid)]:
+        assert any(reply.startswith('err level ') for reply in segment.replies)
+        assert all(frame[15] == 2 for frame in segment.frames)
+    for segment, closed in zip(segments[-4:], [True, True, False, False]):
+        assert all(bool(frame[17] & 4) == closed for frame in segment.frames)
 
 
 def test_sd_lid_is_persistent_and_overrides_raw_button_commands(harness, tmp_path):

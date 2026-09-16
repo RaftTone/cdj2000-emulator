@@ -46,6 +46,8 @@ while all of them disagreed with the board.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import Future, ThreadPoolExecutor
+import json
 import os
 import re
 import subprocess
@@ -236,18 +238,19 @@ def firmware_name(byte: int, bit: int) -> str:
     return panel_control.FIRMWARE_KEY_NAMES.get((byte, bit), "")
 
 
-# How long a click holds a key down.  MAIN copies the key level into the
-# status record it builds next, and it builds one every 3.05 s when nothing
-# else changes (measured on the link, menu2: 42.59, 45.61, 48.66 ...), so a
-# press lands only if it spans one of those.  The plan hold of 2 800 ms
+# How long a legacy click holds a key down.  MAIN copies the key level into
+# the status record it builds next, and it builds one every 3.05 s when
+# nothing else changes (measured on the link, menu2: 42.59, 45.61, 48.66 ...),
+# so a press lands only if it spans one of those.  The plan hold of 2 800 ms
 # (panel_control.PLAN_HOLD_MS) was chosen against a measurement plan's 10 s
-# attribution window and covers a 3.05 s cadence 92 times in 100; a click
-# has no such constraint, and 3 300 ms covers it every time.  The screen
-# follows the record: measured, the UTILITY menu (hold MENU) is drawn about
-# five seconds after the click, the Wait platter after a SOURCE key about
-# four.  Every press is therefore a long press as far as MAIN can tell; a
-# short one cannot be delivered on this link at all.
+# attribution window and covers a 3.05 s cadence 92 times in 100; 3 300 ms
+# covers it every time.  These timing notes describe the legacy panel path.
 WINDOW_HOLD_MS = 3300
+
+# NXS accepts ordinary encoder/button pulses through its live panel contact.
+# Keep interactive clicks short; callers can still request a deliberate long
+# hold through Shift-click or an explicit control command.
+NXS_CLICK_HOLD_MS = 300
 
 
 def publication_age_note(mtime_ns: int, now: float) -> str | None:
@@ -257,6 +260,106 @@ def publication_age_note(mtime_ns: int, now: float) -> str | None:
         return None
     return (f"Last framebuffer publication {int(age)}s ago — "
             "display may be static; emulator liveness unverified")
+
+
+def run_diagnostics_text(snapshot: dict, manifest: dict | None = None) -> str:
+    """Format one bounded run observation for a person at the keyboard.
+
+    This deliberately reports observations and their limits.  In particular,
+    a frame age is not presented as a CPU liveness test and link records are
+    not promoted to proof that the GUI consumed a reply or that audio played.
+    Keeping this formatter outside Tk also gives agents and tests one stable
+    vocabulary for the human diagnostics window.
+    """
+    session = snapshot.get("session") or {}
+    frame = snapshot.get("frame") or {}
+    link = snapshot.get("link") or {}
+    lines = ["RUN  %s" % snapshot.get("run", "(unknown)"),
+             "session: %s" % session.get("state", "unknown")]
+    if session.get("processes"):
+        processes = ", ".join("%s=%s" % item
+                               for item in sorted(session["processes"].items()))
+        lines.append("processes: " + processes)
+
+    frame_status = frame.get("status", "missing")
+    if frame.get("age_seconds") is not None:
+        lines.append("frame: %s, %.1fs old (%sx%s)" % (
+            frame_status, max(0.0, float(frame["age_seconds"])),
+            frame.get("width", "?"), frame.get("height", "?")))
+    else:
+        lines.append("frame: " + frame_status)
+
+    lines.append("link: %s; %s records; %s" % (
+        link.get("status", "missing"), link.get("records", 0),
+        "caught up" if link.get("caught_up", True) else "reader is catching up"))
+    lines.append("browser: " + str(snapshot.get(
+        "progress", "Waiting for a browser reply from firmware.")))
+    transport = link.get("transport")
+    if isinstance(transport, dict):
+        state = "playing" if transport.get("play_requested") else "paused/stopped"
+        remaining = transport.get("remaining_seconds")
+        duration = transport.get("duration_seconds")
+        if isinstance(remaining, (int, float)) and isinstance(duration, (int, float)):
+            lines.append("transport: %s; %.3fs remaining / %.3fs duration"
+                         % (state, remaining, duration))
+        else:
+            lines.append("transport: %s; native counter sample" % state)
+        lines.append("transport evidence: compare newer records for counter "
+                     "movement; this sample does not test audio output")
+    media = snapshot.get("media") or ((manifest or {}).get("media") or {})
+    configured = media.get("images") if isinstance(media, dict) else None
+    if configured:
+        lines.append("media: " + ", ".join("%s=%s" % item
+                                            for item in sorted(configured.items())))
+    if snapshot.get("gui_stats"):
+        lines.append("GUI: " + str(snapshot["gui_stats"]))
+    actions = snapshot.get("recent_actions") or []
+    if actions:
+        lines.append("recent UI/agent actions:")
+        for action in actions[-5:]:
+            outcome_name = action.get("outcome")
+            if "ok" in action:
+                succeeded = bool(action["ok"])
+            else:
+                succeeded = outcome_name not in ("error", "failed", "failure")
+            outcome = "ok" if succeeded else "FAILED"
+            detail = action.get("reply") or action.get("error") or ""
+            name = action.get("command") or action.get("action") or "action"
+            label = ("%s [%s]" % (name, outcome_name)
+                     if outcome_name else name)
+            lines.append("  %s %s → %s" % (outcome, label, detail))
+
+    endpoints = snapshot.get("endpoints") or ((manifest or {}).get("endpoints") or {})
+    if endpoints:
+        gdb_host, gdb_port = endpoints.get("gdb_host"), endpoints.get("gdb_port")
+        if gdb_host and gdb_port:
+            lines.append("GDB: %s:%s (MAIN only; GUI and host deadlines continue)" %
+                         (gdb_host, gdb_port))
+        elif (snapshot.get("debug") or (manifest or {}).get("debug") or {}).get("enabled"):
+            lines.append("GDB: enabled, endpoint not published")
+    debug = snapshot.get("debug") or ((manifest or {}).get("debug") or {})
+    if debug.get("main_starts_paused"):
+        lines.append("debug pause: MAIN only; GUI and host deadlines continue")
+
+    faults = snapshot.get("recent_fault_lines") or []
+    if faults:
+        lines.append("faults (bounded log tails):")
+        for item in faults[-5:]:
+            lines.append("  %s: %s" % (item.get("file", "log"),
+                                       item.get("line", item.get("error", ""))))
+    else:
+        lines.append("faults: none found in bounded log tails (absence is not proof)")
+    return "\n".join(lines)
+
+
+def observe_run(run: Path, observer=None) -> dict:
+    """Read one bounded run snapshot without touching Tk or blocking it."""
+    from tools.cdj_main import run_state
+
+    # run_state.observe includes the bounded manifest fields needed by the
+    # viewer (endpoints, debug scope and media).  Keep the snapshot compact so
+    # the clipboard handoff does not duplicate the full run.json.
+    return run_state.observe(run, observer)
 
 # A long press.  The firmware tells a short MENU from a held one by whether
 # the key is still down in the *next* status record, so on this link "held"
@@ -471,6 +574,14 @@ def refusal(control: Control, control_port: int) -> str | None:
     return None
 
 
+def protocol_ok(reply: object) -> bool:
+    """Whether a control-channel reply is an explicit success response."""
+    if not isinstance(reply, str):
+        return False
+    tokens = reply.strip().split(None, 1)
+    return bool(tokens) and tokens[0].lower() == "ok"
+
+
 def simulator_path(path: Path) -> str:
     """Return a Windows path that GNU sim's hardware parser will not unescape."""
 
@@ -493,6 +604,14 @@ class UiViewer:
         self.has_firmware_picture = False
         self.log_stream = None
         self.process: subprocess.Popen[bytes] | None = None
+        self.run_path: Path | None = (args.run.resolve()
+                                       if getattr(args, "run", None) else None)
+        self.run_observer = None
+        self.run_snapshot: dict | None = None
+        self.diagnostics_future: Future | None = None
+        self.diagnostics_executor: ThreadPoolExecutor | None = None
+        self.diagnostics_text: tk.Text | None = None
+        self.diagnostics_error = ""
 
         # `deck` is the device skin's canvas and None for the lab skin; the
         # picture path branches on it rather than on the argument, so a skin
@@ -505,7 +624,9 @@ class UiViewer:
         self.stopped = False
 
         self.panel: panel_control.PanelControl | None = None
+        self.last_control_error: str | None = None
         self.control_note = tk.StringVar(value="")
+        self.run_progress = tk.StringVar(value="")
         self.status = tk.StringVar(value="Starting Blackfin firmware…")
         self.held: dict[tuple[int, int], Control] = {}
         self.momentary: dict[tuple[int, int], Control] = {}
@@ -527,11 +648,16 @@ class UiViewer:
 
         self.configure_theme()
         self.build_layout()
+        self.build_diagnostics_window()
         self.status.trace_add("write", self.status_changed)
         self.status_changed()
         self.show_boot_panel()
         self.start_simulator()
         self.root.after(self.args.refresh_ms, self.refresh)
+        if self.run_path is not None:
+            self.diagnostics_executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="cdj-run-observer")
+            self.root.after(0, self.poll_run_diagnostics)
 
     # ------------------------------------------------------------- layout --
     def configure_theme(self) -> None:
@@ -598,6 +724,96 @@ class UiViewer:
         else:
             self.build_lab()
 
+    def build_diagnostics_window(self) -> None:
+        """Create the run observer window; reads happen on a worker thread."""
+        self.diagnostics_window = tk.Toplevel(self.root)
+        self.diagnostics_window.title("CDJ-2000 · Run diagnostics")
+        self.diagnostics_window.withdraw()
+        self.diagnostics_window.protocol("WM_DELETE_WINDOW",
+                                         self.diagnostics_window.withdraw)
+        self.diagnostics_window.geometry("760x520")
+        self.diagnostics_window.columnconfigure(0, weight=1)
+        self.diagnostics_window.rowconfigure(0, weight=1)
+        self.diagnostics_text = tk.Text(
+            self.diagnostics_window, background="#0e1013", foreground="#d7dce5",
+            insertbackground="#eef1f5", relief="flat", wrap="word",
+            padx=12, pady=10, state="disabled")
+        self.diagnostics_text.grid(row=0, column=0, sticky="nsew")
+        actions = ttk.Frame(self.diagnostics_window, padding=(10, 7))
+        actions.grid(row=1, column=0, sticky="ew")
+        ttk.Button(actions, text="Refresh now",
+                   command=self.request_run_diagnostics).pack(side="left")
+        ttk.Button(actions, text="Copy snapshot",
+                   command=self.copy_run_snapshot).pack(side="left", padx=7)
+        ttk.Button(actions, text="Close",
+                   command=self.diagnostics_window.withdraw).pack(side="right")
+        self._set_diagnostics_text(
+            "Run diagnostics are available when launched with --run.\n"
+            "The framebuffer remains the firmware's unmodified 480×234 image.")
+
+    def show_diagnostics(self) -> None:
+        self.diagnostics_window.deiconify()
+        self.diagnostics_window.lift()
+        self.request_run_diagnostics()
+
+    def _set_diagnostics_text(self, text: str) -> None:
+        if self.diagnostics_text is None or not self.diagnostics_text.winfo_exists():
+            return
+        self.diagnostics_text.configure(state="normal")
+        self.diagnostics_text.delete("1.0", "end")
+        self.diagnostics_text.insert("1.0", text)
+        self.diagnostics_text.configure(state="disabled")
+
+    def request_run_diagnostics(self) -> None:
+        """Start at most one bounded observer read; never read files in Tk."""
+        if self.run_path is None:
+            self._set_diagnostics_text(
+                "No run directory was supplied.\n\n"
+                "Start nxs_vm with --ui (it passes --run automatically), or "
+                "launch view_ui with --run RUN_DIR.")
+            return
+        if self.diagnostics_executor is None or self.diagnostics_future is not None:
+            return
+        if self.run_observer is None:
+            from tools.cdj_main import run_state
+            self.run_observer = run_state.LinkObserver()
+        self.diagnostics_future = self.diagnostics_executor.submit(
+            observe_run, self.run_path, self.run_observer)
+
+    def poll_run_diagnostics(self) -> None:
+        """Apply completed observer work on Tk's thread and schedule another poll."""
+        future = self.diagnostics_future
+        if future is not None and future.done():
+            self.diagnostics_future = None
+            try:
+                self.run_snapshot = future.result()
+                self.diagnostics_error = ""
+                self.run_progress.set(self.run_snapshot.get(
+                    "progress", "Run observation available"))
+                self._set_diagnostics_text(run_diagnostics_text(
+                    self.run_snapshot, self.run_snapshot.get("manifest")))
+            except Exception as error:  # diagnostic UI must not kill the deck
+                self.diagnostics_error = str(error)
+                self.run_progress.set("Run diagnostics unavailable: %s" % error)
+                self._set_diagnostics_text(
+                    "Run diagnostics unavailable: %s\n\n"
+                    "The framebuffer viewer is still running." % error)
+        self.request_run_diagnostics()
+        self.root.after(1000, self.poll_run_diagnostics)
+
+    def copy_run_snapshot(self) -> None:
+        """Put a machine-readable bounded snapshot on the clipboard for an agent."""
+        value = self.run_snapshot
+        text = (json.dumps(value, indent=2, sort_keys=True)
+                if value is not None else self.diagnostics_error or
+                "No run snapshot has completed yet.")
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+            self.control_note.set("Copied bounded run diagnostics to clipboard")
+        except tk.TclError as error:
+            self.control_note.set("Could not copy diagnostics: %s" % error)
+
     # ------------------------------------------------------------- deck --
     def build_deck(self) -> None:
         """The front panel as a deck: chassis, backlit keys, LCD in the middle.
@@ -633,10 +849,12 @@ class UiViewer:
             row=0, column=0, padx=(0, 10))
         ttk.Button(badges, text="Inspector", command=self.show_inspector).grid(
             row=0, column=1, padx=4)
+        ttk.Button(badges, text="Diagnostics",
+                   command=self.show_diagnostics).grid(row=0, column=2, padx=4)
         ttk.Button(badges, text="Controls ?", command=self.show_help).grid(
-            row=0, column=2, padx=4)
-        ttk.Button(badges, text="Full screen", command=self.toggle_fullscreen).grid(
             row=0, column=3, padx=4)
+        ttk.Button(badges, text="Full screen", command=self.toggle_fullscreen).grid(
+            row=0, column=4, padx=4)
         if self.args.nxs_panel:
             self.sd_lid_text = tk.StringVar(value="SD lid: unknown")
             ttk.Button(badges, textvariable=self.sd_lid_text,
@@ -707,6 +925,9 @@ class UiViewer:
                   wraplength=650,
                   justify="left").grid(row=2, column=0, columnspan=3,
                                        sticky="w")
+        ttk.Label(footer, textvariable=self.run_progress, style="Muted.TLabel",
+                  wraplength=900, justify="left").grid(
+                      row=3, column=0, columnspan=3, sticky="w", pady=(5, 0))
         self.announce_channel(built)
 
     def queue_resize(self, _event=None) -> None:
@@ -841,6 +1062,9 @@ class UiViewer:
             ttk.Button(channel, text=control.label, width=12,
                        command=lambda c=control: self.send(c, c.lines[0])
                        ).grid(row=0, column=index, padx=(0, 6))
+        ttk.Button(channel, text="Diagnostics", width=12,
+                   command=self.show_diagnostics).grid(
+                       row=0, column=len(by_group["channel"]), padx=(12, 0))
 
         ttk.Label(outer, textvariable=self.status).grid(
             row=LAYOUT["status"][0], column=LAYOUT["status"][1], columnspan=3,
@@ -849,6 +1073,10 @@ class UiViewer:
                   foreground="#804000").grid(row=LAYOUT["note"][0],
                                              column=LAYOUT["note"][1],
                                              columnspan=3, sticky="w")
+        ttk.Label(outer, textvariable=self.run_progress,
+                  foreground="#5c78a2", wraplength=980, justify="left").grid(
+                      row=LAYOUT["note"][0] + 1, column=LAYOUT["note"][1],
+                      columnspan=3, sticky="w", pady=(5, 0))
         # The window's own coverage, on the window.  If a control is ever lost
         # again, this line is where it shows up rather than in a report six
         # weeks later.
@@ -1033,6 +1261,26 @@ class UiViewer:
                 row=row, column=7, sticky="w", padx=(6, 0))
 
     # ------------------------------------------------------------ control --
+    def record_ui_action(self, control: Control, line: str, *, ok: bool,
+                         reply: str | None = None,
+                         error: object | None = None) -> None:
+        """Append one command outcome to the run transcript for agents."""
+        run_path = getattr(self, "run_path", None)
+        if run_path is None:
+            return
+        try:
+            from tools.cdj_main.run_state import record_action
+            action = dict(source="view_ui", label=control.label,
+                          input_id=control.input_id, command=line.strip(), ok=ok)
+            if reply is not None:
+                action["reply"] = reply
+            if error is not None:
+                action["error"] = str(error)
+            record_action(run_path, action)
+        except (OSError, ImportError, TypeError, ValueError):
+            # Logging is best effort; the command result remains authoritative.
+            return
+
     def control(self) -> panel_control.PanelControl | None:
         """The control channel, opened on first use and reopened after a drop.
 
@@ -1040,17 +1288,21 @@ class UiViewer:
         not listening yet when the layout is built.
         """
         if not self.args.control_port:
+            self.last_control_error = "no control channel"
             return None
         if self.panel is not None:
+            self.last_control_error = None
             return self.panel
         try:
             panel = panel_control.PanelControl(port=self.args.control_port,
                                                timeout=0.5)
             greeting = panel.open()
         except OSError as error:
+            self.last_control_error = str(error)
             self.control_note.set("control channel not up yet: %s" % error)
             return None
         self.panel = panel
+        self.last_control_error = None
         self.control_note.set("control channel: %s" % greeting)
         return panel
 
@@ -1059,6 +1311,7 @@ class UiViewer:
             self.panel.close()
             self.panel = None
         self.control_note.set("control channel lost: %s" % error)
+        self.last_control_error = str(error)
 
     def send(self, control: Control, line: str) -> str | None:
         """One protocol line, or a spoken reason why not.
@@ -1069,6 +1322,7 @@ class UiViewer:
         reason = refusal(control, self.args.control_port)
         if reason:
             self.control_note.set("refused — " + reason)
+            self.record_ui_action(control, line, ok=False, error=reason)
             return None
         if not line.strip():
             # Unreachable by construction -- the only controls with no line are
@@ -1077,18 +1331,31 @@ class UiViewer:
             # empty line and looks like it worked".
             self.control_note.set("refused — %s has nothing to send"
                                   % control.label)
+            self.record_ui_action(control, line, ok=False,
+                                  error="control has no command line")
             return None
         panel = self.control()
         if panel is None:
+            note = getattr(self, "control_note", None)
+            note_text = (note.get() if note is not None and hasattr(note, "get")
+                         else "channel unavailable")
+            self.record_ui_action(
+                control, line, ok=False,
+                error=getattr(self, "last_control_error", None) or
+                note_text)
             return None
         try:
             reply = panel.send(line)
         except (OSError, ValueError) as error:
             self.forget_control(error)
+            self.record_ui_action(control, line, ok=False, error=error)
             return None
+        ok = protocol_ok(reply)
+        self.record_ui_action(control, line, ok=ok, reply=reply,
+                              error=None if ok else reply)
         self.control_note.set("%s: %s -> %s"
                               % (control.label, line.strip(), reply))
-        if line.strip() == "clear" and not reply.startswith("err"):
+        if line.strip() == "clear" and ok:
             self.held.clear()
             self.momentary.clear()
             self.contact_sources.clear()
@@ -1096,7 +1363,52 @@ class UiViewer:
             if self.deck is not None:
                 for name in list(self.deck.latched):
                     self.deck.set_latched(name, False)
-        return None if reply.startswith("err") else reply
+        return reply if ok else None
+
+    def contact_line(self, control: Control, active: bool) -> str:
+        """Encode one logical contact level for this board profile.
+
+        NXS REV is an active-low physical switch.  Its raw panel bit must be
+        high at rest and low while active, so it cannot use the ordinary
+        OR-only ``down``/``up`` protocol.  Keep this translation at the GUI
+        boundary: the bit inspector sends literal electrical levels.
+        """
+        bit_id = control.input_id.split("-")[0]
+        byte, mask = panel_control.button_mask(bit_id)
+        if self.is_nxs_reverse(control):
+            raw_high = nxs_panel.contact_level(byte, mask, active)
+            return panel_control.encode_level(byte, mask, raw_high)
+        if self.is_nxs_reverse_raw(control):
+            # The inspector deliberately exposes the electrical level: its
+            # down/up verbs mean high/low, with no active-low interpretation.
+            return panel_control.encode_level(byte, mask, active)
+        return panel_control.encode_hold(byte, mask, active)
+
+    def is_nxs_reverse(self, control: Control) -> bool:
+        """Whether a control is the NXS active-low REV switch."""
+        return (getattr(getattr(self, "args", None), "nxs_panel", False) and
+                control.input_id is not None and
+                control.input_id.split("-")[0] == "15.1" and
+                # The bit grid is a raw inspector.  It must retain the
+                # literal electrical level so it can diagnose the inversion.
+                control.group != "bits")
+
+    def is_nxs_reverse_raw(self, control: Control) -> bool:
+        """Whether an NXS REV control belongs to the literal bit inspector."""
+        return (getattr(getattr(self, "args", None), "nxs_panel", False) and
+                control.input_id is not None and
+                control.input_id.split("-")[0] == "15.1" and
+                control.group == "bits")
+
+    def neutral_line(self, control: Control) -> str:
+        """Release a contact to the board profile's electrical neutral."""
+        bit_id = control.input_id.split("-")[0]
+        byte, mask = panel_control.button_mask(bit_id)
+        if (getattr(getattr(self, "args", None), "nxs_panel", False) and
+                bit_id == "15.1"):
+            return panel_control.encode_level(
+                byte, mask, nxs_panel.contact_level(byte, mask, False))
+        return panel_control.encode_hold(byte, mask, False)
 
     def contact(self, control: Control, down: bool, *, source: object = "deck-pointer") -> bool:
         """Combine pointer/keyboard/widget ownership, independently of latches."""
@@ -1122,7 +1434,7 @@ class UiViewer:
         next_owners = owners | {source} if down else owners - {source}
         # A release must not undo another active contact or an explicit latch.
         if key not in self.held and bool(owners) != bool(next_owners):
-            if self.send(control, panel_control.encode_hold(byte, mask, down)) is None:
+            if self.send(control, self.contact_line(control, down)) is None:
                 return False
         if next_owners:
             self.contact_sources[key] = next_owners
@@ -1150,8 +1462,12 @@ class UiViewer:
             self.long_press(control)
             return
         if control.kind == "button" and control.input_id is not None:
-            self.press(control, WINDOW_HOLD_MS,
-                       "the screen follows about 5 s after the click")
+            if getattr(self.args, "nxs_panel", False):
+                self.press(control, NXS_CLICK_HOLD_MS,
+                           "observe browser status and the framebuffer")
+            else:
+                self.press(control, WINDOW_HOLD_MS,
+                           "the screen follows about 5 s after the click")
             return
         if control.lines:
             self.send(control, control.lines[0])
@@ -1159,17 +1475,21 @@ class UiViewer:
             self.send(control, "")
 
     def long_press(self, control: Control) -> None:
-        """Shift-click, or the UTILITY key: down across two status records."""
+        """Shift-click, or the UTILITY key, using an explicit long pulse."""
         if self.is_sd_lid(control):
             self.sd_lid_command("toggle")
             return
         if control.kind not in ("button", "hold") or control.input_id is None:
             self.click(control)
             return
-        self.press(control, WINDOW_LONG_HOLD_MS,
-                   "a long press, held across two of MAIN's 3 s status "
-                   "records; UTILITY on MENU follows a few seconds after "
-                   "release")
+        if getattr(self.args, "nxs_panel", False):
+            self.press(control, WINDOW_LONG_HOLD_MS,
+                       "an explicit long pulse; observe browser feedback")
+        else:
+            self.press(control, WINDOW_LONG_HOLD_MS,
+                       "a long press, held across two of MAIN's 3 s status "
+                       "records; UTILITY on MENU follows a few seconds after "
+                       "release")
 
     def press(self, control: Control, hold_ms: int, then: str) -> None:
         """One press of `hold_ms`, refused while the previous one is down."""
@@ -1179,19 +1499,56 @@ class UiViewer:
         bit_id = control.input_id.split("-")[0]
         over = self.in_flight.get(bit_id, 0.0)
         if now < over:
-            self.control_note.set(
-                "%s: press still down for %.1f s -- MAIN samples it into "
-                "its next status record and the screen follows a few "
-                "seconds later; a second press would undo a toggle like "
-                "MENU" % (control.label, over - now))
+            if getattr(self.args, "nxs_panel", False):
+                self.control_note.set(
+                    "%s: previous pulse still in flight for %.1f s; "
+                    "observe browser status before sending another"
+                    % (control.label, over - now))
+            else:
+                self.control_note.set(
+                    "%s: press still down for %.1f s -- MAIN samples it into "
+                    "its next status record and the screen follows a few "
+                    "seconds later; a second press would undo a toggle like "
+                    "MENU" % (control.label, over - now))
             return
         byte, mask = panel_control.button_mask(bit_id)
+        if (self.is_nxs_reverse(control) or
+                self.is_nxs_reverse_raw(control)):
+            # ``press`` is implemented as a timed level for REV; the generic
+            # panel ``press`` command can only assert bits.
+            if self.send(control, self.contact_line(control, True)) is None:
+                return
+            key = (byte, mask)
+            # Keep a pending pulse in the same ownership set used by close().
+            # Otherwise closing the viewer before the timer fires would leave
+            # the active-low contact asserted in MAIN.
+            self.momentary[key] = control
+            self.in_flight[bit_id] = now + hold_ms / 1000.0
+
+            def release() -> None:
+                if key in self.held or key in self.contact_sources:
+                    return
+                if self.send(control, self.contact_line(control, False)) is not None:
+                    self.momentary.pop(key, None)
+
+            self.root.after(hold_ms, release)
+            if getattr(self.args, "nxs_panel", False):
+                self.control_note.set("%s: queued %.0f ms pulse; %s"
+                                      % (control.label, hold_ms, then))
+            else:
+                self.control_note.set("%s: held %.1f s; %s"
+                                      % (control.label, hold_ms / 1000.0, then))
+            return
         if self.send(control, panel_control.encode_press(byte, mask,
                                                          hold_ms)) is not None:
             self.in_flight[bit_id] = (
                 now + panel_control.press_period_s(hold_ms))
-            self.control_note.set("%s: held %.1f s; %s"
-                                  % (control.label, hold_ms / 1000.0, then))
+            if getattr(self.args, "nxs_panel", False):
+                self.control_note.set("%s: queued %.0f ms pulse; %s"
+                                      % (control.label, hold_ms, then))
+            else:
+                self.control_note.set("%s: held %.1f s; %s"
+                                      % (control.label, hold_ms / 1000.0, then))
 
     def toggle_hold(self, control: Control) -> None:
         """Right-click: hold the bit down, right-click again to release it."""
@@ -1206,7 +1563,7 @@ class UiViewer:
         key = (byte, mask)
         down = key not in self.held
         if (key in self.momentary or
-                self.send(control, panel_control.encode_hold(byte, mask, down)) is not None):
+                self.send(control, self.contact_line(control, down)) is not None):
             if down:
                 self.held[key] = control
             else:
@@ -1223,21 +1580,54 @@ class UiViewer:
         return (getattr(getattr(self, "args", None), "nxs_panel", False) and
                 control.input_id == "17.2")
 
-    def sd_lid_command(self, action: str) -> bool:
+    def sd_lid_command(self, action: str, *, background: bool = False) -> bool:
         control = Control("SD lid", "17.2", "switch", "bits", (),
                           "Persistent physical SD lid contact; click to toggle")
+        logged = False
+        probe_ok = False
         if action == "state":
+            # Keep the state probe separate from the input-send path: tests and
+            # callers may provide a lightweight PanelControl mock, while the
+            # command still belongs in the shared action transcript.  A
+            # background poll records its first good value and changes, while
+            # explicit user requests are always retained.
             panel = self.control()
-            try:
-                reply = panel.send("sd-lid state\n") if panel else None
-            except (OSError, ValueError) as error:
-                self.forget_control(error)
+            if panel is None:
                 reply = None
+                self.record_ui_action(
+                    control, "sd-lid state\n", ok=False,
+                    error=getattr(self, "last_control_error", None) or
+                    getattr(self, "control_note", "channel unavailable"))
+                logged = True
+            else:
+                try:
+                    reply = panel.send("sd-lid state\n")
+                except (OSError, ValueError) as error:
+                    self.forget_control(error)
+                    self.record_ui_action(control, "sd-lid state\n", ok=False,
+                                          error=error)
+                    reply = None
+                    logged = True
+                else:
+                    probe_ok = protocol_ok(reply)
         else:
             reply = self.send(control, "sd-lid " + action + "\n")
-        state = reply.strip().removeprefix("ok sd-lid ") if reply else "unknown"
+        state = "unknown"
+        if protocol_ok(reply):
+            tokens = reply.strip().split()
+            if len(tokens) == 3 and tokens[1].lower() == "sd-lid":
+                state = tokens[2].lower()
         if state not in ("open", "closed"):
             state = "unknown"
+        if action == "state" and not logged:
+            valid = probe_ok and state in ("open", "closed")
+            previous = getattr(self, "_last_sd_lid_poll_state", None)
+            if not background or not valid or previous != state:
+                self.record_ui_action(
+                    control, "sd-lid state\n", ok=valid,
+                    reply=reply, error=None if valid else reply)
+            if background and valid:
+                self._last_sd_lid_poll_state = state
         if hasattr(self, "sd_lid_text"):
             self.sd_lid_text.set("SD lid: " + state)
         if reply and action != "state":
@@ -1245,7 +1635,7 @@ class UiViewer:
         return state in ("open", "closed")
 
     def poll_sd_lid(self) -> None:
-        self.sd_lid_command("state")
+        self.sd_lid_command("state", background=True)
         self.root.after(2000, self.poll_sd_lid)
 
     def field_value(self, entry: panel_control.AnalogControl) -> int | None:
@@ -1485,7 +1875,7 @@ class UiViewer:
         # In attach mode the machine outlives this window. Release only our
         # contacts, not analog values or queued input from another controller.
         for (byte, mask), control in (self.held | self.momentary).items():
-            self.send(control, panel_control.encode_hold(byte, mask, False))
+            self.send(control, self.neutral_line(control))
         # Destroy/FocusOut callbacks must not reconnect after transport close.
         self.held.clear()
         self.momentary.clear()
@@ -1502,6 +1892,10 @@ class UiViewer:
                 self.process.wait()
         if self.log_stream is not None:
             self.log_stream.close()
+        diagnostics_executor = getattr(self, "diagnostics_executor", None)
+        if diagnostics_executor is not None:
+            diagnostics_executor.shutdown(wait=False, cancel_futures=True)
+            self.diagnostics_executor = None
         self.root.destroy()
 
     def run(self) -> None:
@@ -1535,6 +1929,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="integer LCD scale in lab view; device view fits the window")
     parser.add_argument("--attach", action="store_true",
                         help="watch --output without starting or stopping a simulator")
+    parser.add_argument("--run", type=Path, default=None,
+                        help="run directory to observe and record UI actions; "
+                             "nxs_vm --ui supplies this automatically")
     parser.add_argument("--device-name", default="CDJ-2000",
                         help="device label in the window header")
     parser.add_argument("--nxs-panel", action="store_true",
@@ -1566,7 +1963,37 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--coverage", action="store_true",
                         help="print which of the board's inputs this window "
                              "can reach, and exit without opening it")
-    args = parser.parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(raw_argv)
+
+    # A run directory is the handoff between nxs_vm and its viewer.  Make the
+    # short form safe: it observes the existing run instead of starting a
+    # second simulator over the run's framebuffer, and it reuses the endpoint
+    # and profile recorded by the launcher.  Explicit command-line values win.
+    if args.run is not None:
+        args.run = args.run.resolve()
+        manifest = {}
+        try:
+            value = json.loads((args.run / "run.json").read_text())
+            if isinstance(value, dict):
+                manifest = value
+        except (OSError, ValueError):
+            pass
+        has_option = lambda name: any(
+            token == name or token.startswith(name + "=") for token in raw_argv)
+        if not has_option("--output"):
+            args.output = args.run / "screen.ppm"
+        if not has_option("--control-port"):
+            try:
+                endpoint = (manifest.get("endpoints") or {}).get("panel_port")
+                if endpoint is not None:
+                    args.control_port = int(endpoint)
+            except (TypeError, ValueError):
+                pass
+        if not has_option("--nxs-panel"):
+            args.nxs_panel = "nxs" in str(manifest.get("profile", "")).lower()
+        if not has_option("--attach"):
+            args.attach = True
 
     if args.coverage:
         return args
@@ -1582,16 +2009,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
-def print_coverage() -> int:
+def print_coverage(nxs: bool = False) -> int:
     """`--coverage`: the window's own answer to "can I click everything?".
 
     No Tk, no simulator, no run.  It exists because the honest version of that
     question is a number, and because a number nobody can print is a number
     nobody checks.
     """
-    built = controls()
-    reached, missing, stray = coverage(built)
-    print(coverage_line(built))
+    built = controls(nxs)
+    reached, missing, stray = coverage(built, nxs)
+    print(coverage_line(built, nxs))
     for control in built:
         print("  %-34s %-14s %-8s %s"
               % (control.label, control.input_id or "-", control.kind,
@@ -1602,7 +2029,7 @@ def print_coverage() -> int:
 def main() -> int:
     args = parse_args()
     if args.coverage:
-        return print_coverage()
+        return print_coverage(args.nxs_panel)
     UiViewer(args).run()
     return 0
 

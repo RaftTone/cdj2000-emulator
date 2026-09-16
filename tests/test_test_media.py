@@ -93,3 +93,43 @@ def test_missing_or_directory_images_are_rejected(tmp_path):
         test_media.media_drives(None, tmp_path / 'absent.img')
     with pytest.raises(ValueError):
         test_media.media_drives(None, tmp_path)
+
+
+def test_fsinfo_records_the_real_free_count(tmp_path):
+    """An unknown free count makes a driver read every FAT sector to count it,
+    which on these images is 1,023 sectors before any file is touched."""
+    from tools.cdj_main import make_sd_image
+
+    source = tmp_path / 'tracks'
+    source.mkdir()
+    (source / 'TRACK.WAV').write_bytes(b'\0' * 100000)
+    image = tmp_path / 'card.img'
+    monkeypatch = None
+    import sys
+    argv = sys.argv
+    sys.argv = ['make_sd_image', str(source), str(image), '--size', '64M']
+    try:
+        assert make_sd_image.main() == 0
+    finally:
+        sys.argv = argv
+
+    data = image.read_bytes()
+    lba = struct.unpack_from('<I', data, 446 + 8)[0]
+    boot = lba * 512
+    sectors_per_cluster = data[boot + 13]
+    reserved = struct.unpack_from('<H', data, boot + 14)[0]
+    fat_sectors = struct.unpack_from('<I', data, boot + 36)[0]
+    total = struct.unpack_from('<I', data, boot + 32)[0]
+    clusters = (total - reserved - 2 * fat_sectors) // sectors_per_cluster
+
+    fsinfo = boot + 512
+    assert data[fsinfo:fsinfo + 4] == b'RRaA'
+    assert data[fsinfo + 484:fsinfo + 488] == b'rrAa'
+    free, next_free = struct.unpack_from('<II', data, fsinfo + 488)
+    assert free != 0xFFFFFFFF
+
+    fat = boot + reserved * 512
+    used = sum(1 for c in range(2, clusters + 2)
+               if struct.unpack_from('<I', data, fat + 4 * c)[0])
+    assert free == clusters - used
+    assert next_free == used + 2

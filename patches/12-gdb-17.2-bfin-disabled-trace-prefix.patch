@@ -1,0 +1,14 @@
+--- a/sim/bfin/bfin-sim.c
++++ b/sim/bfin/bfin-sim.c
+@@ -7108,8 +7108,9 @@
+   if ((iw0 & BIT_MULTI_INS) && (iw0 & 0xe800) != 0xe800 /* not linkage  */)
+     {
+       SIM_DESC sd = CPU_STATE (cpu);
+-      trace_prefix (sd, cpu, NULL_CIA, pc, TRACE_LINENUM_P (cpu),
+-			NULL, 0, "|| %#"PRIx64, sim_events_time (sd));
++      if (TRACE_ANY_P (cpu))
++	trace_prefix (sd, cpu, NULL_CIA, pc, TRACE_LINENUM_P (cpu),
++		      NULL, 0, "|| %#"PRIx64, sim_events_time (sd));
+       insn_len = 8;
+       PARALLEL_GROUP = BFIN_PARALLEL_GROUP0;
+     }

@@ -295,6 +295,28 @@ int main(void)
     }
     assert(s.bytes_transferred == 2352 && s.transfer_requests == 1);
 
+    /* Firmware C004E1C0 polls one TCC, then reads/ORs/writes ICR. Two
+     * completed transfers must remain independently acknowledgeable. */
+    cdj_c6747_edma_reset(&s); memset(&memory, 0, sizeof(memory));
+    memory.memory[0] = 0x39; memory.memory[1] = 0xa7;
+    param(&s, &bus, 0, 0x00108000, 0x1000, 0x00010001, 0x1100,
+          0, 0xffff, 0, 1);
+    param(&s, &bus, 1, 0x00109000, 0x1001, 0x00010001, 0x1101,
+          0, 0xffff, 0, 1);
+    assert(wr(&s, &bus, EDMA + 0x1010, 3));
+    assert(memory.memory[0x100] == 0x39 && memory.memory[0x101] == 0xa7);
+    assert(s.ipr == 0x300 && s.transfer_requests == 2);
+    assert(cdj_c6747_edma_read(&s, EDMA + 0x1070, &v) && v == 0);
+    assert(s.ipr == 0x300); /* Reading the clear alias has no side effects. */
+    assert(wr(&s, &bus, EDMA + 0x1070, v | 0x100));
+    assert(cdj_c6747_edma_read(&s, EDMA + 0x1068, &v) && v == 0x200);
+    assert(wr(&s, &bus, EDMA + 0x348, 0x300));
+    assert(cdj_c6747_edma_read(&s, EDMA + 0x2270, &v) && v == 0);
+    assert(wr(&s, &bus, EDMA + 0x2270, v | 0x100));
+    assert(s.ipr == 0x200);
+    assert(wr(&s, &bus, EDMA + 0x2270, 0x200));
+    assert(s.ipr == 0);
+
     /* Constant-address modes
      * is rejected before bus or architectural state can change. */
     for (uint32_t unsupported = 1; unsupported <= 2; unsupported <<= 1) {

@@ -14,6 +14,9 @@
  * The board calls cdj_input_apply() once per panel reply, after the scheduled
  * keys have been merged and before the checksum is taken, so an implementation
  * may set any of the 22 payload bytes and the frame still validates.
+ * Persistent `level BYTE MASK 0|1` commands replace selected bits after held
+ * buttons, pulses and analogue fields. `clear` removes these overrides so
+ * the board's base frame applies again. The configured SD lid takes priority.
  *
  * Behind the seam sits a line-oriented TCP server on 127.0.0.1, opened only
  * when CDJ_INPUT_PORT names a port.  Without that variable this file is inert
@@ -67,7 +70,8 @@ void cdj_input_apply(uint8_t *payload, unsigned len);
  * only ever have returned zeros: the encoder was never in the range the channel
  * could reach.  Bytes 15..17 carry further switch bits (spread into the status
  * block at 0x04fe29f4 + 74/75/79/86 by the same function) and are deliberately
- * left out here -- they are buttons, not levels, and belong to a bit table.
+ * left out of the analogue table. Momentary buttons use pulse/hold commands;
+ * persistent switch contacts can use literal `level` commands.
  */
 #define CDJ_INPUT_ANALOG_FIELDS 8
 

@@ -21,6 +21,13 @@ _start:
     DBGAL (R3, 7);
     DBGAL (R2, 11);
     DBGAL (R0, 99);
+    /* Packed ALU case fixed by patch 01 must also defer its store. */
+    P5 = 0x2020 (Z);
+    R0 = 7;
+    R0 = R0 -|- R0 || [P5] = R0 || NOP;
+    R3 = [P5];
+    DBGAL (R3, 7);
+    DBGAL (R0, 0);
     R0 = 0;
     P0 = 1;
     EXCPT 0;

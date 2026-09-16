@@ -13,6 +13,21 @@ from tools.cdj_main import nxs_vm
 FRAME = b'P6\n2 1\n255\n' + b'\n# \x00\xff\x80'
 
 
+def test_source_schedule_can_retry_after_media_manager_settles():
+    assert nxs_vm.source_schedule(22, (19, 0x08), retries=2,
+                                  interval=120) == \
+        '22:19:08;142:19:08;262:19:08'
+
+
+def test_source_key_names_are_limited_to_media_source_contacts():
+    assert set(nxs_vm.NXS_SOURCE_KEYS) == {
+        'sd', 'usb', 'link', 'disc', 'rekordbox'}
+    assert 'play' not in nxs_vm.NXS_SOURCE_KEYS
+    assert 'rev' not in nxs_vm.NXS_SOURCE_KEYS
+    assert nxs_vm.NXS_SOURCE_KEYS['sd'] == (19, 0x08)
+    assert nxs_vm.NXS_SOURCE_KEYS['rekordbox'] == (19, 0x01)
+
+
 def test_sync_profile_collects_commands_before_teardown(tmp_path, monkeypatch):
     monitor = Mock()
     monitor.__enter__ = Mock(return_value=monitor)
@@ -149,12 +164,70 @@ def test_dsp_artifact_manifest_records_scheduler_validation_scope(
         run, firmware, False, False, False, mode)
     manifest = json.loads((run / 'dsp-checkpoints/manifest.json').read_text())
     assert manifest['dsp_scheduler_mode'] == mode
-    assert manifest['architectural_validation_eligible'] is eligible
+    # This fixture writes no checkpoint and no event transcript, so the capture
+    # is incomplete.  Eligibility is a claim about a capture that produced
+    # artifacts and cannot outrank `complete` in either scheduler mode; it used
+    # to be reported from the scheduler mode alone.
+    assert manifest['complete'] is False
+    assert manifest['dsp_checkpoint_policy'] == 'all'
+    assert manifest['checkpoint_capture_complete'] is False
+    assert manifest['architectural_validation_eligible'] is False
     scheduling = [item for item in manifest['approximations']
                   if 'deferred-v1' in item]
     assert bool(scheduling) is not eligible
     if scheduling:
         assert 'not a DSP timing fix' in scheduling[0]
+    # The Timer64P counter advances from the CPU's cycle_tick on this board in
+    # every mode, so the step-to-tick approximation must be declared here
+    # unconditionally - not only in the replay manifest.  Without this a
+    # consumer could see a timer period expire, find no timer entry in the
+    # approximations list, and infer the counter is clocked from the modelled
+    # clock tree.  SPRUH91D 28.1.5.2.1 binds the count unit to the PLL-derived
+    # internal clock, so the substitution is a divergence, not an open gap.
+    timer = [item for item in manifest['approximations']
+             if 'Timer64P counts one input clock per emulated CPU cycle' in item]
+    assert len(timer) == 1, manifest['approximations']
+    assert 'not rate' in timer[0]
+    assert 'unrelated to AUXCLK' in timer[0]
+    assert 'no elapsed-time, frequency or audio-rate conclusion' in timer[0]
+
+
+def test_modified_main_provenance_does_not_hash_stock_in_its_place(tmp_path):
+    firmware = tmp_path / 'firmware'
+    firmware.mkdir()
+    for name in ('main-firmware.bin', 'gui-boot-memory.elf', 'gui-flash-image.bin'):
+        (firmware / name).write_bytes(name.encode())
+    candidate = tmp_path / 'candidate.bin'
+    candidate.write_bytes(b'modified firmware')
+    run = tmp_path / 'run'
+    run.mkdir()
+    nxs_vm.finalize_dsp_artifacts(run, firmware, False, False, False, 'legacy', candidate)
+    manifest = json.loads((run / 'dsp-checkpoints/manifest.json').read_text())
+    assert manifest['firmware_sha256']['main-firmware.bin'] == nxs_vm.sha256(candidate)
+    assert manifest['main_firmware_path'] == str(candidate)
+    assert (firmware / 'main-firmware.bin').read_bytes() == b'main-firmware.bin'
+
+
+def test_dsp_capture_keeps_launch_source_hashes_when_sources_change(tmp_path, monkeypatch):
+    firmware = tmp_path / 'firmware'
+    firmware.mkdir()
+    for name in ('main-firmware.bin', 'gui-boot-memory.elf', 'gui-flash-image.bin'):
+        (firmware / name).write_bytes(name.encode())
+    run = tmp_path / 'run'
+    (run / 'dsp-checkpoints').mkdir(parents=True)
+    (run / 'dsp-checkpoints/one.cdjdsp').write_bytes(b'fixture')
+    (run / 'dsp-events.jsonl').write_text('')
+    monkeypatch.setattr(nxs_vm, 'checkpoint_metadata', lambda path: {'file': path.name})
+    monkeypatch.setattr(nxs_vm, 'dsp_source_hashes', lambda: {'source.c': 'edited'})
+    nxs_vm.finalize_dsp_artifacts(
+        run, firmware, False, False, False, 'legacy',
+        source_sha256_at_launch={'source.c': 'launched'})
+    manifest = json.loads((run / 'dsp-checkpoints/manifest.json').read_text())
+    assert manifest['source_sha256'] == {'source.c': 'launched'}
+    assert manifest['source_sha256_observed_at_exit'] == {'source.c': 'edited'}
+    assert manifest['sources_changed_during_run'] is True
+    assert manifest['complete'] is True
+    assert manifest['architectural_validation_eligible'] is False
 
 
 @pytest.mark.parametrize('interval', ['-1', 'nan', 'inf'])
@@ -169,8 +242,9 @@ def test_invalid_frame_interval_rejected_before_launch(monkeypatch, interval):
     (0, False, False), (0.5, False, False), (0, True, False), (0, True, True),
 ])
 @pytest.mark.parametrize('fresh_link,trace_link', [(False, False), (True, True)])
+@pytest.mark.parametrize('custom_main', [False, True])
 def test_run_manifest_records_launched_inputs_and_optional_observations(
-        tmp_path, monkeypatch, interval, deferred, profile, fresh_link, trace_link):
+        tmp_path, monkeypatch, interval, deferred, profile, fresh_link, trace_link, custom_main):
     paths = ('bin/cdj-run', 'build/qemu/build/qemu-system-sh4',
              'firmware/nxs/main-firmware.bin', 'firmware/nxs/gui-boot-memory.elf',
              'firmware/nxs/gui-flash-image.bin')
@@ -181,6 +255,11 @@ def test_run_manifest_records_launched_inputs_and_optional_observations(
     original_simulator = nxs_vm.sha256(tmp_path / paths[0])
     monkeypatch.setattr(nxs_vm, 'ROOT', tmp_path)
     argv = ['nxs_vm', 'run', '--seconds', '2', '--frame-interval', str(interval)]
+    selected_main = tmp_path / 'firmware/nxs/main-firmware.bin'
+    if custom_main:
+        selected_main = tmp_path / 'modified-main.bin'
+        selected_main.write_bytes(b'independent modified MAIN image')
+        argv += ['--main-firmware', str(selected_main), '--trace-bus', '--ethernet-peer-port', '6123']
     if deferred:
         argv.append('--deferred-dsp-scheduling')
     if profile:
@@ -215,6 +294,11 @@ def test_run_manifest_records_launched_inputs_and_optional_observations(
     def launch(command, **kwargs):
         gui = '--model' in command
         if not gui:
+            assert command[command.index('-nic') + 1] == (
+                'socket,model=cdj-nxs-ethernet,id=nxsnet,connect=127.0.0.1:6123'
+                if custom_main else 'none')
+            assert command[command.index('-bios') + 1] == str(selected_main)
+            assert kwargs['env'].get('CDJ_BUS_TRACE') == ('1' if custom_main else None)
             assert kwargs['env']['CDJ_REQ_STATUS_FRESH'] == '0'
             assert kwargs['env']['CDJ_LINK_LINK_ROWS'] == 'off'
             assert kwargs['env']['CDJ_NXS_DSP_SCHEDULER'] == (
@@ -229,7 +313,13 @@ def test_run_manifest_records_launched_inputs_and_optional_observations(
     monkeypatch.setattr(nxs_vm.subprocess, 'Popen', launch)
     assert nxs_vm.main() == 0
     manifest = json.loads((tmp_path / 'run/run.json').read_text())
+    assert manifest['ethernet']['peer'] == ('127.0.0.1:6123' if custom_main else None)
+    assert manifest['ethernet']['hardware_timing_validated'] is False
     assert manifest['main_environment']['CDJ_LINK_LINK_ROWS'] == 'off'
+    neutral = bytes.fromhex(manifest['main_environment']['CDJ_PANEL_FRAME'])
+    assert len(neutral) == 22
+    assert neutral[15] == 0x02  # REV is active low; zero is reverse, not idle.
+    assert not any(neutral[:15] + neutral[16:])
     assert manifest['link_delivery'] == ('fresh-only diagnostic' if fresh_link
                                          else 'legacy cached repeats')
     expected_scheduler = 'deferred-v1' if deferred else 'legacy'

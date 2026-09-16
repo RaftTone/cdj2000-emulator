@@ -1,0 +1,46 @@
+--- a/sim/bfin/gui.c
++++ b/sim/bfin/gui.c
+@@ -432,6 +432,7 @@
+      image -- and it was the host cost that swallowed the idle-skip's gain.  */
+   unsigned char *published;
+   int have_published;
++  int frame_changed;
+   char *output_path;
+   char *raw_output_path;
+   char *best_output_path;
+@@ -579,6 +580,7 @@
+ 		     (size_t) width * height * bytes_per_pixel);
+   gui->published = XNEWVEC (unsigned char, (size_t) width * height * 3);
+   gui->have_published = 0;
++  gui->frame_changed = 0;
+   memset (gui->rgb, 0, (size_t) width * height * 3);
+   memset (gui->raw, 0, (size_t) width * height * bytes_per_pixel);
+   gui->frame_score = 0;
+@@ -821,6 +823,7 @@
+       {
+ 	memcpy (raw_line, source, line_bytes);
+ 	bfin_gui_convert_line (gui, source);
++	gui->frame_changed = 1;
+       }
+   }
+   if (++gui->curr_line == gui->height)
+@@ -877,7 +880,8 @@
+ 	    always = env && *env;
+ 	  }
+ 	if (always || !gui->have_published
+-	    || memcmp (gui->rgb, gui->published, bytes) != 0)
++	    || (gui->frame_changed
++		&& memcmp (gui->rgb, gui->published, bytes) != 0))
+ 	  {
+ 	    memcpy (gui->published, gui->rgb, bytes);
+ 	    gui->have_published = 1;
+@@ -889,6 +893,9 @@
+ 	    bfin_gui_write_raw_frame (gui);
+ 	  }
+       }
++      /* No RGB writes occurred on an unchanged scan: avoid comparing the
++         entire published frame again. Scoring conversions still mark it. */
++      gui->frame_changed = 0;
+       if (gui->best_output_path && gui->frame_score > gui->best_score)
+ 	{
+ 	  gui->best_score = gui->frame_score;

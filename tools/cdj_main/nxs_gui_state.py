@@ -1,7 +1,7 @@
 """Inspect the known NXS GuiCom/DbCli layout in a stopped MAIN RAM dump.
 
 This is a firmware-specific diagnostic, not a boot-success oracle. Addresses
-come from the research NXS MAIN image.
+come from the research NXS MAIN image (see NXS_GUI_STALL.md).
 Capture with QMP stop, then HMP `pmemsave 0x04000000 0x08000000 ram.bin`.
 No guest memory is modified. A 64 MiB dump can inspect control structures but
 cannot inspect the DbCli response buffers above 0x08000000.

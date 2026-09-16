@@ -23,6 +23,9 @@
 #include "cdj_dsp_checkpoint.h"
 static uint8_t ram[0x40000];
 static uint8_t shared_ram[CDJ_DSP_SHARED_RAM_SIZE];
+/* Physical L1D storage. Partition visibility is modeled; cache contents and
+ * timing are not. */
+static uint8_t l1d[CDJ_DSP_L1D_SIZE];
 static uint8_t sdram[0x2000000];
 static CdjC6747Syscfg syscfg;
 static CdjC6747Psc psc;
@@ -120,16 +123,43 @@ static bool coverage_capture(const CdjC674x *before, CdjC674xPacket *packet)
     bool source_fetch = (!before->loop_active && !before->idle_cycles) ||
         coverage_loop_fetch(before);
     if (!source_fetch) return false;
-    CdjC674x scratch = *before;
+    /* Fetch reads only pc/fault and writes fault diagnostics on rejection.
+     * It does not inspect registers, pipelines, or retained loop state.
+     * Keep its diagnostics private without copying the complete CPU. */
+    CdjC674x scratch;
+    scratch.pc = before->pc;
+    scratch.fault = before->fault;
     return cdj_c674x_fetch(&scratch, read_bus, NULL, packet);
 }
 
-static void coverage_record(const CdjC674x *before,
+/* Coverage retains only pre-step classification and predicate values. */
+typedef struct {
+    uint32_t pc;
+    unsigned predicates;
+    bool loop_active, idle, loop_fetch, direct_fetch;
+} CoverageBefore;
+
+static CoverageBefore coverage_before(const CdjC674x *state)
+{
+    return (CoverageBefore){
+        .pc = state->pc,
+        .predicates = (state->r[1][0] != 0) |
+            (state->r[1][1] != 0) << 1 | (state->r[1][2] != 0) << 2 |
+            (state->r[0][1] != 0) << 3 | (state->r[0][2] != 0) << 4 |
+            (state->r[0][0] != 0) << 5,
+        .loop_active = state->loop_active,
+        .idle = !state->loop_active && state->idle_cycles,
+        .loop_fetch = coverage_loop_fetch(state),
+        .direct_fetch = !state->loop_active && !state->idle_cycles,
+    };
+}
+
+static void coverage_record(const CoverageBefore *before,
                             const CdjC674xPacket *packet)
 {
     uint32_t pc = before->pc;
-    bool loop_fetch = coverage_loop_fetch(before);
-    bool direct_fetch = !before->loop_active && !before->idle_cycles;
+    bool loop_fetch = before->loop_fetch;
+    bool direct_fetch = before->direct_fetch;
     bool source_fetch = packet != NULL;
     unsigned slot = coverage_mix(pc) & (COVERAGE_PC_SLOTS - 1);
     CoveragePc *matched = NULL;
@@ -143,7 +173,7 @@ static void coverage_record(const CdjC674x *before,
             if (direct_fetch) ++entry->direct_fetches;
             if (loop_fetch) ++entry->loop_fetches;
             if (before->loop_active) ++entry->scheduler_cycles;
-            if (!before->loop_active && before->idle_cycles) ++entry->idle_cycles;
+            if (before->idle) ++entry->idle_cycles;
             matched = entry;
             break;
         }
@@ -151,14 +181,10 @@ static void coverage_record(const CdjC674x *before,
         if (probes + 1 == COVERAGE_PC_SLOTS) coverage_overflow = true;
     }
     if (before->loop_active) ++coverage_scheduler_cycles;
-    if (!before->loop_active && before->idle_cycles) ++coverage_idle_cycles;
+    if (before->idle) ++coverage_idle_cycles;
     if (!source_fetch) return;
     if (matched) {
-        unsigned predicates = (before->r[1][0] != 0) |
-            (before->r[1][1] != 0) << 1 | (before->r[1][2] != 0) << 2 |
-            (before->r[0][1] != 0) << 3 | (before->r[0][2] != 0) << 4 |
-            (before->r[0][0] != 0) << 5;
-        matched->predicate_states |= UINT64_C(1) << predicates;
+        matched->predicate_states |= UINT64_C(1) << before->predicates;
     }
     if (matched && !matched->has_packet) {
         matched->packet = *packet;
@@ -306,16 +332,29 @@ static void cycle_tick(void *unused)
         printf("{\"event\":\"wm8740_latch\",\"word\":%u,\"transfers\":%" PRIu64 "}\n",
                wm8740.last_word, wm8740.transfers);
     cdj_c6747_pll_tick(&pll);
+    /* SPRUH91D chapter 28 counts on the timer input clock; this callback is
+     * the only per-cycle hook the core offers, so one call is one input clock
+     * period - an approximation of nothing measurable, declared in the replay
+     * manifest beside the other approximations.  The events themselves are
+     * Table 2-1's, mapped by cdj_c6747_timer_event(). */
+    uint32_t timer_outputs = cdj_c6747_timers_tick(timers);
+    for (unsigned bit = 0; timer_outputs >> bit; ++bit)
+        if (timer_outputs & (1u << bit))
+            cdj_c6747_intc_deliver_event(&intc, &intc_delivery,
+                                         cdj_c6747_timer_event(bit));
 }
 static uint32_t global(uint32_t a)
 { return a >= 0x00800000 && a < 0x00840000 ? a + 0x11000000 : a; }
 static uint8_t *host_memory(uint32_t a)
 {
+    uint32_t l1_offset;
+    if (cdj_c6747_l1d_sram_span(&cache, a, 4, &l1_offset))
+        return l1d + l1_offset;
     if (a >= 0x11800000 && a <= 0x1183fffc) return ram + a - 0x11800000;
     if (a >= 0x80000000 && a <= 0x8001fffc) return shared_ram + a - 0x80000000;
-    if (cdj_c6747_emifb_sdram_enabled(&emifb) &&
-        a >= 0xc0000000 && a <= 0xc1fffffc)
-        return sdram + a - 0xc0000000;
+    uint32_t offset;
+    if (cdj_c6747_emifb_sdram_offset(&emifb, a, 4, sizeof(sdram), &offset))
+        return sdram + offset;
     return NULL;
 }
 static bool read_bus(void *unused, uint32_t a, uint32_t *v)
@@ -346,14 +385,22 @@ static bool read_bus(void *unused, uint32_t a, uint32_t *v)
              (uint32_t)shared_ram[offset + 3] << 24;
         return true;
     }
-    if (cdj_c6747_emifb_sdram_enabled(&emifb) && !(a & 3) &&
-        a >= 0xc0000000 && a <= 0xc1fffffc) {
-        unsigned offset = a - 0xc0000000;
+    uint32_t offset;
+    if (!(a & 3) &&
+        cdj_c6747_emifb_sdram_offset(&emifb, a, 4, sizeof(sdram), &offset)) {
         *v = sdram[offset] | (uint32_t)sdram[offset + 1] << 8 |
              (uint32_t)sdram[offset + 2] << 16 | (uint32_t)sdram[offset + 3] << 24;
         return true;
     }
     a = global(a);
+    uint32_t l1_offset;
+    if (!(a & 3) && cdj_c6747_l1d_sram_span(
+            &cache, a, 4, &l1_offset)) {
+        *v = l1d[l1_offset] | (uint32_t)l1d[l1_offset+1] << 8 |
+             (uint32_t)l1d[l1_offset+2] << 16 |
+             (uint32_t)l1d[l1_offset+3] << 24;
+        return true;
+    }
     if ((a & 3) || a < 0x11800000 || a > 0x1183fffc) return false;
     a -= 0x11800000;
     *v = ram[a] | (uint32_t)ram[a+1] << 8 | (uint32_t)ram[a+2] << 16 | (uint32_t)ram[a+3] << 24;
@@ -366,13 +413,17 @@ static uint8_t *memory_span(uint32_t address, size_t size)
     address = global(address);
     end = (uint64_t)address + size;
     if (!size || end > UINT64_C(0x100000000)) return NULL;
+    uint32_t l1_offset;
+    if (cdj_c6747_l1d_sram_span(&cache, address, size, &l1_offset))
+        return l1d + l1_offset;
     if (address >= 0x11800000u && end <= UINT64_C(0x11840000))
         return ram + address - 0x11800000u;
     if (address >= 0x80000000u && end <= UINT64_C(0x80020000))
         return shared_ram + address - 0x80000000u;
-    if (cdj_c6747_emifb_sdram_enabled(&emifb) &&
-        address >= 0xc0000000u && end <= UINT64_C(0xc2000000))
-        return sdram + address - 0xc0000000u;
+    uint32_t offset;
+    if (cdj_c6747_emifb_sdram_offset(&emifb, address, size, sizeof(sdram),
+                                    &offset))
+        return sdram + offset;
     return NULL;
 }
 
@@ -543,6 +594,9 @@ static void deliver_edma_notifications(void)
 static bool edma_mcasp_transaction(bool edma_access, uint32_t address,
                                    uint64_t value, unsigned size, bool commit)
 {
+    if (!(edma_access ? cdj_c6747_edma_write_mapped(address, size) :
+                       cdj_c6747_mcasp_control_write_mapped(address, size)))
+        return false;
     CdjC6747Edma trial_edma = edma;
     CdjC6747McaspControl trial_mcasp = mcasp_control;
     EdmaBusContext trial_context = {.mcasp = &trial_mcasp};
@@ -704,14 +758,21 @@ static bool write_bus(void *unused, uint32_t a, uint64_t v, unsigned size, bool 
         if (commit) for (unsigned i = 0; i < size; ++i)
             shared_ram[a - 0x80000000 + i] = v >> (8 * i);
     }
-    if (!ok && cdj_c6747_emifb_sdram_enabled(&emifb) &&
-        (size == 1 || size == 2 || size == 4 || size == 8) &&
-        a >= 0xc0000000 && a <= 0xc2000000 - size) {
+    uint32_t offset;
+    if (!ok && (size == 1 || size == 2 || size == 4 || size == 8) &&
+        cdj_c6747_emifb_sdram_offset(&emifb, a, size, sizeof(sdram), &offset)) {
         ok = true;
         if (commit) for (unsigned i = 0; i < size; ++i)
-            sdram[a - 0xc0000000 + i] = v >> (8 * i);
+            sdram[offset + i] = v >> (8 * i);
     }
     uint32_t physical = global(a);
+    uint32_t l1_offset;
+    if (!ok && (size == 1 || size == 2 || size == 4 || size == 8) &&
+        cdj_c6747_l1d_sram_span(&cache, physical, size, &l1_offset)) {
+        ok = true;
+        if (commit) for (unsigned i = 0; i < size; ++i)
+            l1d[l1_offset + i] = v >> (8*i);
+    }
     if (!ok && (size == 1 || size == 2 || size == 4 || size == 8) &&
         physical >= 0x11800000 && physical <= 0x11840000 - size) {
         ok = true;
@@ -790,12 +851,15 @@ static const char *run_quota(ReplayLimits *limits, uint32_t breakpoint,
                 &cpu, cdj_c6747_intc_cpu_pending(&intc_delivery)))
             return cpu.fault ? cpu.fault : "CPU interrupt stopped";
         pcm_observe();
-        CdjC674x before = cpu;
+        CoverageBefore before = coverage_before(&cpu);
         CdjC674xPacket coverage_packet;
-        bool has_coverage_packet = coverage_capture(&before, &coverage_packet);
-        if (!cdj_c674x_step(&cpu, read_bus, write_bus, NULL))
+        bool has_coverage_packet = !before.direct_fetch &&
+            coverage_capture(&cpu, &coverage_packet);
+        if (!cdj_c674x_step_capture_direct(&cpu, read_bus, write_bus, NULL,
+                before.direct_fetch ? &coverage_packet : NULL))
             return cpu.fault ? cpu.fault : "CPU stopped";
-        coverage_record(&before, has_coverage_packet ? &coverage_packet : NULL);
+        coverage_record(&before, (before.direct_fetch || has_coverage_packet) ?
+                        &coverage_packet : NULL);
         --limits->steps_remaining;
         if (spi_transfer.fault) {
             cpu.fault = "unsupported SPI transfer clock or state";
@@ -1067,6 +1131,8 @@ mismatch:
 }
 int main(int argc, char **argv)
 {
+    const char *compact_trace = getenv("CDJ_DSP_COMPACT_TRACE");
+    bool trace_steps = !compact_trace || strcmp(compact_trace, "1");
     const char *timing = getenv("CDJ_NXS_DSP_FUNCTIONAL_TIMING");
     observe_pcm = getenv("CDJ_DSP_OBSERVE_PCM") != NULL;
     const char *stop_limit = getenv("CDJ_DSP_CONNECTED_STOPS");
@@ -1119,7 +1185,8 @@ int main(int argc, char **argv)
                        !memcmp(magic, "CDJDSP8\0", sizeof(magic)) ||
                        !memcmp(magic, "CDJDSP9\0", sizeof(magic)) ||
                        !memcmp(magic, "CDJDSP10", sizeof(magic)) ||
-                       !memcmp(magic, "CDJDSP11", sizeof(magic)));
+                       !memcmp(magic, "CDJDSP11", sizeof(magic)) ||
+                       !memcmp(magic, "CDJDSP12", sizeof(magic)));
     rewind(f);
     bool valid = false;
     if (!checkpoint)
@@ -1128,8 +1195,10 @@ int main(int argc, char **argv)
     fclose(f);
     if (checkpoint) {
         char error[160] = {0};
-        if (!cdj_dsp_checkpoint_read(argv[1], &checkpoint_state, ram, sizeof(ram),
-                                     shared_ram, sizeof(shared_ram), sdram,
+        if (!cdj_dsp_checkpoint_read_with_l1d(
+                                     argv[1], &checkpoint_state, ram, sizeof(ram),
+                                     shared_ram, sizeof(shared_ram), l1d,
+                                     sizeof(l1d), sdram,
                                      sizeof(sdram), error, sizeof(error))) {
             fprintf(stderr, "%s\n", error);
             return 2;
@@ -1221,15 +1290,18 @@ int main(int argc, char **argv)
                 reason = "fault";
                 break;
             }
-            printf("{\"event\":\"step\",\"pc\":%" PRIu32 ",\"cycles\":%" PRIu64
+            if (trace_steps) printf("{\"event\":\"step\",\"pc\":%" PRIu32 ",\"cycles\":%" PRIu64
                    ",\"loop_active\":%s,\"branch_due\":%" PRIu64 "}\n",
                    cpu.pc, cpu.cycles, cpu.loop_active ? "true" : "false", cpu.branch_due);
             pcm_observe();
-            CdjC674x before = cpu;
+            CoverageBefore before = coverage_before(&cpu);
             CdjC674xPacket coverage_packet;
-            bool has_coverage_packet = coverage_capture(&before, &coverage_packet);
-            if (!cdj_c674x_step(&cpu, read_bus, write_bus, NULL)) { reason = "fault"; break; }
-            coverage_record(&before, has_coverage_packet ? &coverage_packet : NULL);
+            bool has_coverage_packet = !before.direct_fetch &&
+                coverage_capture(&cpu, &coverage_packet);
+            if (!cdj_c674x_step_capture_direct(&cpu, read_bus, write_bus, NULL,
+                before.direct_fetch ? &coverage_packet : NULL)) { reason = "fault"; break; }
+            coverage_record(&before, (before.direct_fetch || has_coverage_packet) ?
+                        &coverage_packet : NULL);
             --limits.steps_remaining;
             if (spi_transfer.fault) {
                 cpu.fault = "unsupported SPI transfer clock or state";
@@ -1285,8 +1357,10 @@ int main(int argc, char **argv)
     if (argc >= 8) {
         char error[160] = {0};
         capture_devices(&checkpoint_state, reason);
-        if (!cdj_dsp_checkpoint_write(argv[7], &checkpoint_state, ram, sizeof(ram),
-                                      shared_ram, sizeof(shared_ram), sdram,
+        if (!cdj_dsp_checkpoint_write_with_l1d(
+                                      argv[7], &checkpoint_state, ram, sizeof(ram),
+                                      shared_ram, sizeof(shared_ram), l1d,
+                                      sizeof(l1d), sdram,
                                       sizeof(sdram), error, sizeof(error))) {
             fprintf(stderr, "%s\n", error);
             return 2;

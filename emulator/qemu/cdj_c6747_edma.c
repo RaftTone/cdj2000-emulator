@@ -31,6 +31,12 @@ static bool locate(uint32_t address, uint32_t *offset)
     return true;
 }
 
+bool cdj_c6747_edma_write_mapped(uint32_t address, unsigned size)
+{
+    uint32_t offset;
+    return (size == 4 || size == 8) && locate(address, &offset);
+}
+
 static bool legal_opt(uint32_t value)
 {
     unsigned tcc = (value >> 12) & 0x3fu;
@@ -323,7 +329,12 @@ bool cdj_c6747_edma_read(const CdjC6747Edma *s, uint32_t address,
     case 0x40: *value = s->ser & dmask; return true;
     case 0x50: case 0x58: case 0x60: *value = s->ier & dmask; return true;
     case 0x68: *value = s->ipr & dmask; return true;
-    case 0x70: *value = s->ipr & dmask; return true;
+    /* SPRUH91D 16.4.2.6.5 defines ICR as write-only (W-0), not an
+     * alias of IPR.  Use zero for the firmware's read/OR/write helper:
+     * reflecting IPR here would acknowledge unrelated completions too.
+     * Read-zero is our compatibility choice for this write-only register;
+     * the manual does not specify its read value. Applies to shadow ICRs. */
+    case 0x70: *value = 0; return true;
     case 0x80: *value = s->qer & qmask; return true;
     case 0x84: case 0x88: case 0x8c: *value = s->qeer & qmask; return true;
     case 0x90: *value = s->qser & qmask; return true;

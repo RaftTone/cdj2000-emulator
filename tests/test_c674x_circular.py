@@ -18,6 +18,10 @@ def test_c674x_circular_addressing(tmp_path):
         '-I', str(ROOT / 'emulator/qemu'),
         str(ROOT / 'tests/cstub/c674x-circular.c'),
         str(ROOT / 'emulator/qemu/cdj_c674x.c'),
+        str(ROOT / 'emulator/qemu/cdj_c674x_uncond.c'),
+        str(ROOT / 'emulator/qemu/cdj_c674x_mpy.c'), str(ROOT / 'emulator/qemu/cdj_c674x_dotp.c'), str(ROOT / 'emulator/qemu/cdj_c674x_packed8.c'), str(ROOT / 'emulator/qemu/cdj_c674x_packed16.c'), str(ROOT / 'emulator/qemu/cdj_c674x_packbits.c'), str(ROOT / 'emulator/qemu/cdj_c674x_mpy32.c'), str(ROOT / 'emulator/qemu/cdj_c674x_dp.c'), str(ROOT / 'emulator/qemu/cdj_c674x_approx.c'),
+        str(ROOT / 'emulator/qemu/cdj_c674x_sp.c'),
+        str(ROOT / 'emulator/qemu/cdj_c674x_control.c'),
         str(ROOT / 'emulator/qemu/cdj_c674x_loop.c'),
         '-o', str(binary),
     ], check=True)

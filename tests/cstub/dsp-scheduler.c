@@ -1,4 +1,16 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
+/* SELF-VALIDATING BY CONSTRUCTION, and it cannot be otherwise: the bounded
+ * deferred scheduler is a host-side policy for how many interpreter steps to
+ * run per QEMU timer callback (cdj_dsp_scheduler.h:13-15), not a model of any
+ * C6747 or C674x behaviour. No TI document describes it, so there is no
+ * external oracle and no printed page to cite; ACTIVATION_STEPS (1000000) and
+ * SLICE_STEPS (4096) are this repository's own choices. What follows is
+ * therefore a REGRESSION guard plus a checkpoint-ABI guard - the two
+ * _Static_asserts and the state-validity rules are what a schema-11
+ * checkpoint reader depends on - and must not be read as architectural
+ * validation. DSP_ARCHITECTURE_COVERAGE.md section 7 lists this test among
+ * the circular ones; this comment is the answer, not a fix, because the
+ * subject has no specification to be faithful to. */
 #include <assert.h>
 #include <stdint.h>
 #include <string.h>

@@ -25,6 +25,7 @@
 #include "hw/core/sysbus.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/ide/mmio.h"
+#include "system/blockdev.h"
 
 #include "cdj2000_ata.h"
 
@@ -145,6 +146,7 @@ void cdj_ata_init(MemoryRegion *system, qemu_irq irq)
     SysBusDevice *sbd;
     BusState *bus;
     CdjAtaChip *chip;
+    DriveInfo *drive;
 
     if (getenv("CDJ_ATAPI_ABSENT")) {
         qemu_log("cdj2000-ata: CDJ_ATAPI_ABSENT -- no drive on the bus, "
@@ -198,12 +200,31 @@ void cdj_ata_init(MemoryRegion *system, qemu_irq irq)
 
     cd = qdev_new("ide-cd");
     qdev_prop_set_uint32(cd, "unit", 0);
+
+    /*
+     * Keep the measured empty-drive default, but let a firmware developer
+     * attach a real disc image using QEMU's normal IDE drive syntax:
+     *
+     *   -drive if=ide,media=cdrom,bus=0,unit=0,file=disc.iso,format=raw
+     *
+     * drive_get() is deliberately used instead of opening a path from an
+     * environment variable.  QEMU owns the backend lifetime, locking and
+     * format probing, and this also makes the image visible to standard
+     * tooling.  With no matching -drive, ide-cd retains its anonymous empty
+     * backend and the existing NO DISC behavior is unchanged.
+     */
+    drive = drive_get(IF_IDE, 0, 0);
+    if (drive != NULL) {
+        qdev_prop_set_drive_err(cd, "drive", blk_by_legacy_dinfo(drive),
+                                &error_fatal);
+        qemu_log("cdj2000-ata: attached IDE CD backend from -drive bus=0,unit=0\n");
+    }
     qdev_realize_and_unref(cd, bus, &error_fatal);
 
     memory_region_init_io(&chip->iomem, NULL, &cdj_ata_chip_ops, chip,
                           "cdj2000.ata-chip", CDJ_ATA_CHIP_SIZE);
     memory_region_add_subregion(system, CDJ_ATA_CHIP_BASE, &chip->iomem);
 
-    qemu_log("cdj2000-ata: task file at %#x, drive present with no medium\n",
-             CDJ_ATA_BASE);
+    qemu_log("cdj2000-ata: task file at %#x, drive present with %s\n",
+             CDJ_ATA_BASE, drive ? "attached medium" : "no medium");
 }

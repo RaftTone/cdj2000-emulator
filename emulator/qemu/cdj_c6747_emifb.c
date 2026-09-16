@@ -107,3 +107,31 @@ bool cdj_c6747_emifb_sdram_enabled(const CdjC6747Emifb *s)
 {
     return (s->sdcfg & SDCFG_SDREN) != 0;
 }
+
+bool cdj_c6747_emifb_sdram_offset(const CdjC6747Emifb *s, uint32_t address,
+                                 size_t size, size_t populated_size,
+                                 uint32_t *offset)
+{
+    /* SPRUH91D Table 5-1 routes C0000000-DFFFFFFF through MPU2 to
+     * EMIFB; Table 5-2 resets MPU2 to assume-allowed. Section 5.2.2
+     * explicitly warns that unpopulated SDRAM aliases populated memory.
+     * Tables 19-14/15 map only row/column/bank bits to the SDRAM pins.
+     * The NXS's 16-bit, four-bank, 512-column, 13-row configuration has
+     * 25 physical address bits (32 MiB).
+     *
+     * The C6747 data sheet labels D0000000-DFFFFFFF reserved. Extending
+     * the pin alias there is a board-model inference from the documented
+     * MPU2 aperture, not a guarantee for arbitrary reserved chip addresses.
+     * Keep this restricted to EMIFB; never synthesize unmapped read data.
+     * MPU protection and geometry reconfiguration are not modeled here. */
+    if (!cdj_c6747_emifb_sdram_enabled(s) || !size || !populated_size ||
+        populated_size > 0x20000000u ||
+        (populated_size & (populated_size - 1)) ||
+        address < 0xc0000000u || address >= 0xe0000000u ||
+        size > (uint64_t)0xe0000000u - address)
+        return false;
+    uint32_t physical = (address - 0xc0000000u) & (populated_size - 1);
+    if (size > populated_size - physical) return false;
+    *offset = physical;
+    return true;
+}
