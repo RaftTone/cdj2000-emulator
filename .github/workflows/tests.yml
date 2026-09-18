@@ -37,5 +37,16 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
 
+      - name: Fetch the C6x instruction-format header
+        # tools.cdj_dsp.replay decodes DSP packets with GNU's
+        # tic6x-insn-formats.h and looks for it where BUILD.md builds gdb.  It is
+        # one GPL header out of the tarball the patches job already downloads;
+        # without it the replay tests fail with "C6x format header is required".
+        run: |
+          curl -fL -o gdb.tar.xz https://ftp.gnu.org/gnu/gdb/gdb-17.2.tar.xz
+          mkdir -p build
+          tar -xJf gdb.tar.xz -C build gdb-17.2/include/opcode/tic6x-insn-formats.h
+          rm gdb.tar.xz
+
       - name: Run the tests
         run: python -m pytest tests/ -q

@@ -22,7 +22,7 @@ def cache_harness(tmp_path_factory):
     (directory / 'bfin-link-take.inc').write_text(text[start:end])
     output = directory / 'cache-test'
     subprocess.run([cc, '-std=c99', '-Wall', '-Wextra', '-Werror', '-I', str(directory),
-                    str(ROOT / 'tests/cstub/bfin-link-cache.c'), '-o', str(output)], check=True)
+                    str(ROOT / 'tests/cstub/bfin-link-cache.c'), '-o', str(output), '-lm'], check=True)
     return output
 
 

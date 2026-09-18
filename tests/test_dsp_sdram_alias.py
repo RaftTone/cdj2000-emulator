@@ -78,5 +78,5 @@ int main(void)
     binary = tmp_path / 'alias'
     subprocess.run([cc, '-O2', '-std=c11', '-Wall', '-Wextra', '-Werror',
                     '-I', str(ROOT / 'emulator/qemu'), str(harness),
-                    *map(str, SOURCES[1:]), '-o', str(binary)], check=True)
+                    *map(str, SOURCES[1:]), '-o', str(binary), '-lm'], check=True)
     subprocess.run([str(binary)], check=True, timeout=5)

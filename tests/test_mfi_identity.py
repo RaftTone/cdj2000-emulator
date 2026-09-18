@@ -18,6 +18,6 @@ def test_mfi_identity(tmp_path):
         "-I", str(ROOT / "emulator/qemu"),
         str(ROOT / "tests/cstub/mfi-identity.c"),
         str(ROOT / "emulator/qemu/cdj_mfi_identity.c"),
-        "-o", str(binary),
+        "-o", str(binary), '-lm',
     ], check=True)
     subprocess.run([str(binary)], check=True, timeout=10)

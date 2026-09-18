@@ -112,6 +112,6 @@ int main(void)
         cc, "-std=c11", "-Wall", "-Wextra", "-Werror",
         "-I", str(ROOT / "emulator/qemu"), str(source),
         *(str(ROOT / "emulator/qemu" / name) for name in sources),
-        "-o", str(binary),
+        "-o", str(binary), '-lm',
     ], check=True)
     subprocess.run([str(binary)], check=True, timeout=10)

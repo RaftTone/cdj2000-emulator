@@ -65,5 +65,5 @@ int main(void) {
 ''')
     executable = tmp_path / 'mask-test'
     subprocess.run([compiler, '-std=c99', '-Wall', '-Wextra', '-Werror',
-                    str(c_source), '-o', str(executable)], check=True)
+                    str(c_source), '-o', str(executable), '-lm'], check=True)
     subprocess.run([str(executable)], check=True)
