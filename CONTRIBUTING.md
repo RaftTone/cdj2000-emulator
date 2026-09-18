@@ -2,8 +2,9 @@
 
 Thanks for looking. This project runs the CDJ-2000's own firmware on two
 emulated processors; see [README.md](README.md) for what it does and does not
-do, and [BUILD.md](BUILD.md) and [DEVELOPING.md](DEVELOPING.md) to get a
-working setup.
+do, and [BUILD.md](BUILD.md) and [FIRMWARE.md](FIRMWARE.md) to get a working
+setup. Once it runs, [DEVELOPING.md](DEVELOPING.md) describes how to drive a
+CDJ-2000NXS run, inspect it and hand its evidence to someone else.
 
 ## The one hard rule: no firmware
 
@@ -33,12 +34,15 @@ is the style to follow.
 * Run `python -m pytest tests/ -q`. CI runs it on Python 3.10 and 3.12, without
   firmware, and also checks that the GDB patches still apply to a pristine
   `gdb-17.2`.
-* Read [CHANGE_SCOPE.md](CHANGE_SCOPE.md) if you touch code shared between the
-  CDJ-2000 and CDJ-2000NXS profiles. `emulator/qemu/cdj2000_main.c` serves both,
-  so a change there must be tried against both.
+* Read [CHANGE_SCOPE.md](CHANGE_SCOPE.md): it says which code belongs to the
+  CDJ-2000 profile, which to NXS and which to both. `emulator/qemu/cdj2000_main.c`
+  serves both, so a change there must be tested against `cdj2000-main` and
+  `cdj2000nxs-main`, and a run is evidence for its own profile only.
 * Say what you measured. A claim that the board now does X is best backed by a
   run directory report or a test, and a verdict in `INPUT_MANIFEST.md` is a
-  measurement in a named world, not an intention.
+  measurement in a named world, not an intention. `DEVELOPING.md` names the
+  evidence levels for a track-load run (*listed*, *loaded*, *counter-moving*);
+  use them rather than claiming more than the run showed.
 * Keep changes focused. A large change is easier to review as a few pull
   requests.
 
