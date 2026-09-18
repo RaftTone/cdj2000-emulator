@@ -21,8 +21,12 @@ import time
 from tools.cdj_dsp.tx_capture import tx_capture_metadata
 from tools.cdj_main.run_state import write_json
 from tools.cdj_main.nxs_panel import neutral_frame
+from tools.cdj_main.qmp import connect_chardev
+from tools.paths import BFIN_SIM, QEMU, qemu_environment
 
 ROOT = Path(__file__).resolve().parents[2]
+# MinGW QEMU has no unix chardev; POSIX keeps the PR's AF_UNIX sockets.
+UNIX_CONTROL = os.name != 'nt'
 
 CHECKPOINT_HEADER = struct.Struct('<8sIIII9I5IQQ')
 CHECKPOINT_MAGIC = {1: b'CDJDSP1\0', 2: b'CDJDSP2\0', 3: b'CDJDSP3\0',
@@ -35,18 +39,56 @@ MAX_FRAME_BYTES = 16 * 1024 * 1024
 SYNC_PROFILE_COMMANDS = ('info sync-profile -n 30', 'info sync-profile -m -n 30')
 
 
-def capture_sync_profile(run: Path, process) -> dict:
+def existing_file(*candidates: Path) -> Path | None:
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
+
+
+def resolve_simulator() -> Path:
+    """Prefer the platform binary, but accept either spelling for tests and Mac."""
+    return existing_file(
+        ROOT / ('bin/cdj-run' + ('.exe' if os.name == 'nt' else '')),
+        ROOT / 'bin/cdj-run',
+        ROOT / 'bin/cdj-run.exe',
+        BFIN_SIM,
+    ) or ROOT / ('bin/cdj-run' + ('.exe' if os.name == 'nt' else ''))
+
+
+def resolve_qemu(explicit: Path) -> Path:
+    """Keep the in-tree Mac default when that file exists; honor CDJ_QEMU otherwise."""
+    default = ROOT / 'build/qemu/build/qemu-system-sh4'
+    if explicit != default:
+        return existing_file(explicit, Path(str(explicit) + '.exe')) or explicit
+    found = existing_file(default, Path(str(default) + '.exe'))
+    if found:
+        return found
+    env = os.environ.get('CDJ_QEMU')
+    if env:
+        path = Path(env)
+        return existing_file(path, Path(str(path) + '.exe')) or path
+    if Path(QEMU).is_file():
+        return Path(QEMU)
+    return default
+
+
+def connect_monitor(endpoint, timeout: float = 3) -> socket.socket:
+    """HMP: Unix socket on POSIX, TCP on Windows."""
+    return connect_chardev(endpoint, timeout)
+
+
+def capture_sync_profile(run: Path, process, *, endpoint=None) -> dict:
     """Read-only HMP observations before QEMU teardown; failure is evidence too."""
     report = dict(commands=list(SYNC_PROFILE_COMMANDS), status='unavailable')
     if process is None or process.poll() is not None:
         report['error'] = 'QEMU is not running at collection time'
         return report
+    if endpoint is None:
+        endpoint = run / 'qemu-monitor.sock'
     output = bytearray()
     try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as monitor:
-            monitor.settimeout(3)
-            # Relative names avoid macOS sockaddr_un's short pathname limit.
-            monitor.connect(os.path.relpath(run / 'qemu-monitor.sock'))
+        with connect_monitor(endpoint) as monitor:
 
             def prompt():
                 deadline = time.monotonic() + 3
@@ -165,8 +207,14 @@ def source_schedule(at: float, contact: tuple[int, int], retries: int = 0,
 
 def launch_ports(base: int, debug: bool) -> tuple[int, ...]:
     """Return every localhost port this launcher will bind before launch."""
-    ports = (base, base + 2, base + 4)
-    return ports + ((base + 3,) if debug else ())
+    ports = [base, base + 2, base + 4]
+    if debug:
+        ports.append(base + 3)
+        if not UNIX_CONTROL:
+            ports.append(base + 1)
+    if not UNIX_CONTROL:
+        ports.append(base + 5)
+    return tuple(ports)
 
 
 def occupied_local_ports(base: int, debug: bool) -> list[int]:
@@ -202,12 +250,12 @@ def automatic_run_path() -> Path:
 def run_command_path(run: Path) -> str:
     """Render a run path that can be pasted from the repository root."""
     try:
-        return str(run.relative_to(ROOT))
+        return run.relative_to(ROOT).as_posix()
     except ValueError:
-        return str(run)
+        return Path(run).as_posix()
 
 
-def print_agent_commands(run: Path, port: int, debug: bool) -> None:
+def print_agent_commands(run: Path, port: int, debug: bool, qmp_endpoint=None) -> None:
     """Print bounded, copyable follow-up commands for humans and agents."""
     name = shlex.quote(run_command_path(run))
     print(f'run: {name}', flush=True)
@@ -220,7 +268,7 @@ def print_agent_commands(run: Path, port: int, debug: bool) -> None:
     if debug:
         print(f'agent qmp: python -m tools.cdj_main.dev {name} qmp status', flush=True)
         print(f'gdb: target remote 127.0.0.1:{port + 3}', flush=True)
-        print(f'qmp: {shlex.quote(str(run / "qmp.sock"))}', flush=True)
+        print(f'qmp: {shlex.quote(str(qmp_endpoint or run / "qmp.sock"))}', flush=True)
 
 
 def write_gui_board_override(template: Path, flash: Path, output: Path) -> Path:
@@ -232,7 +280,7 @@ def write_gui_board_override(template: Path, flash: Path, output: Path) -> Path:
     if len(matches) != 1:
         raise ValueError(f'GUI board template must contain one CFI flash file line: {template}')
     newline = '\n' if lines[matches[0]].endswith('\n') else ''
-    lines[matches[0]] = marker + json.dumps(str(flash.resolve())) + newline
+    lines[matches[0]] = marker + json.dumps(flash.resolve().as_posix()) + newline
     output.write_text(''.join(lines))
     return output
 
@@ -642,18 +690,21 @@ def main():
         ports = ', '.join(str(port) for port in occupied)
         parser.error(f'localhost port(s) already in use: {ports}; choose another --port')
     qmp_path = os.path.relpath(run / 'qmp.sock', ROOT)
-    if args.debug and (',' in qmp_path or len(os.fsencode(qmp_path)) >= 104):
+    if UNIX_CONTROL and args.debug and (',' in qmp_path or len(os.fsencode(qmp_path)) >= 104):
         parser.error('debugging requires a shorter run path without commas')
     monitor_path = os.path.relpath(run / 'qemu-monitor.sock', ROOT)
-    if args.qemu_sync_profile and (',' in monitor_path or
+    if UNIX_CONTROL and args.qemu_sync_profile and (',' in monitor_path or
                                    len(os.fsencode(monitor_path)) >= 104):
         parser.error('sync profiling requires a shorter run path without commas')
+    qmp_endpoint = (qmp_path if UNIX_CONTROL else f'127.0.0.1:{args.port + 1}')
+    monitor_endpoint = (monitor_path if UNIX_CONTROL else f'127.0.0.1:{args.port + 5}')
     firmware = ROOT / 'firmware/nxs'
     main_firmware = (args.main_firmware or firmware / 'main-firmware.bin').resolve()
     gui_firmware = (args.gui_firmware or firmware).resolve()
     if args.gui_firmware and not gui_firmware.is_dir():
         parser.error(f'GUI firmware directory does not exist: {gui_firmware}')
-    simulator = ROOT / 'bin/cdj-run'
+    args.qemu = resolve_qemu(args.qemu)
+    simulator = resolve_simulator()
     for path in (args.qemu, simulator, main_firmware,
                  gui_firmware / 'gui-boot-memory.elf',
                  gui_firmware / 'gui-flash-image.bin'):
@@ -705,8 +756,12 @@ def main():
         '-serial', f'tcp:127.0.0.1:{args.port + 2},server,nowait', '-serial', 'null']
     main_command += media_command
     if args.debug:
-        main_command += ['-qmp', f'unix:{qmp_path},server=on,wait=off',
-                         '-gdb', f'tcp:127.0.0.1:{args.port + 3}']
+        if UNIX_CONTROL:
+            main_command += ['-qmp', f'unix:{qmp_path},server=on,wait=off',
+                             '-gdb', f'tcp:127.0.0.1:{args.port + 3}']
+        else:
+            main_command += ['-qmp', f'tcp:{qmp_endpoint},server=on,wait=off',
+                             '-gdb', f'tcp:127.0.0.1:{args.port + 3}']
         if args.debug_paused:
             main_command += ['-S']
     if args.ethernet_peer_port is None:
@@ -718,8 +773,12 @@ def main():
         main_command += ['-nic', 'socket,model=cdj-nxs-ethernet,id=nxsnet,'
                          f'connect=127.0.0.1:{args.ethernet_peer_port}']
     if args.qemu_sync_profile:
-        main_command += ['-enable-sync-profile', '-monitor',
-                         f'unix:{monitor_path},server=on,wait=off']
+        if UNIX_CONTROL:
+            main_command += ['-enable-sync-profile', '-monitor',
+                             f'unix:{monitor_path},server=on,wait=off']
+        else:
+            main_command += ['-enable-sync-profile', '-monitor',
+                             f'telnet:{monitor_endpoint},server,nowait']
     gui_command = [str(simulator), '--model', 'bf531', '--environment', 'operating', '--memory-region', '0,64M',
         '--hw-board-file', str(gui_board) if args.gui_firmware else 'emulator/cdj2000-gui-nxs.hw',
         str(gui_firmware / 'gui-boot-memory.elf')]
@@ -799,7 +858,7 @@ def main():
     run_manifest = dict(main=main_command, gui=gui_command,
         dsp_source_sha256_at_launch=dsp_source_hashes(),
         endpoints=dict(panel_host='127.0.0.1', panel_port=args.port + 4,
-                       qmp='qmp.sock' if args.debug else None,
+                       qmp=qmp_endpoint if args.debug else None,
                        gdb_host='127.0.0.1' if args.debug else None,
                        gdb_port=args.port + 3 if args.debug else None),
         debug=dict(enabled=args.debug, main_starts_paused=args.debug_paused,
@@ -847,7 +906,7 @@ def main():
             limitation='D-window decode inferred from MPU2 coverage and SDRAM pin mapping; MPU protection and geometry reconfiguration unmodeled'),
         qemu_sync_profile=dict(enabled=args.qemu_sync_profile,
             commands=list(SYNC_PROFILE_COMMANDS) if args.qemu_sync_profile else [],
-            monitor='qemu-monitor.sock' if args.qemu_sync_profile else None,
+            monitor=monitor_endpoint if args.qemu_sync_profile else None,
             observer_overhead='Lock profiling and monitor collection add host overhead; '
                               'timings are diagnostic observations, not uninstrumented performance'),
         architectural_validation_eligible=not (
@@ -883,7 +942,7 @@ def main():
     main_process = None
     with (run / 'main-stderr.log').open('w') as mainlog, (run / 'gui.log').open('w') as guilog:
         try:
-            main_process = subprocess.Popen(main_command, cwd=ROOT, env=main_env, stdin=subprocess.DEVNULL, stdout=mainlog, stderr=mainlog)
+            main_process = subprocess.Popen(main_command, cwd=ROOT, env=qemu_environment(main_env), stdin=subprocess.DEVNULL, stdout=mainlog, stderr=mainlog)
             processes.append(main_process)
             session['processes']['main'] = main_process.pid
             write_json(run / 'session.json', session)
@@ -905,7 +964,8 @@ def main():
             session['state'] = 'running'
             write_json(run / 'session.json', session)
             print(f'MAIN {main_process.pid}, GUI {gui.pid}; logs: {run}', flush=True)
-            print_agent_commands(run, args.port, args.debug)
+            print_agent_commands(run, args.port, args.debug,
+                                  qmp_endpoint if args.debug else None)
             deadline = time.monotonic() + args.seconds + 5
             while gui.poll() is None and time.monotonic() < deadline:
                 if (run / 'stop-request.json').is_file():
@@ -937,7 +997,7 @@ def main():
             write_json(run / 'session.json', session)
             if args.qemu_sync_profile:
                 run_manifest['qemu_sync_profile']['collection'] = capture_sync_profile(
-                    run, main_process)
+                    run, main_process, endpoint=monitor_endpoint)
             for process in reversed(processes):
                 if process.poll() is None:
                     process.terminate()

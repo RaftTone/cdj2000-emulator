@@ -81,9 +81,8 @@ def observe_run(run: Path, timeout: float = 0, poll: float = 0.25) -> dict:
     endpoint = manifest.get("endpoints", {}).get("qmp")
     if not isinstance(endpoint, str) or not endpoint:
         raise ValueError("run has no QMP endpoint; launch with --debug")
-    endpoint = Path(endpoint)
-    if not endpoint.is_absolute():
-        endpoint = run / endpoint
+    from tools.cdj_main.qmp import parse_endpoint
+    endpoint = parse_endpoint(endpoint, relative_to=run)
     if not math.isfinite(timeout) or timeout < 0 or timeout > 3600:
         raise ValueError("timeout must be 0..3600 seconds")
     if not math.isfinite(poll) or poll <= 0 or poll > 60:

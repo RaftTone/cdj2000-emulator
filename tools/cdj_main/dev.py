@@ -21,10 +21,10 @@ attempt in ``actions.jsonl`` so an agent can explain what it did later.
 from __future__ import annotations
 
 import argparse
-import fcntl
 from io import BytesIO
 import json
 import math
+import os
 from pathlib import Path
 import shutil
 import sys
@@ -109,8 +109,8 @@ def _endpoint(run: Path, name: str) -> tuple[str, int] | Path:
         qmp = endpoints.get("qmp")
         if not isinstance(qmp, str):
             raise ValueError("run manifest has no QMP endpoint; start with --debug")
-        path = Path(qmp)
-        return path if path.is_absolute() else run / path
+        from tools.cdj_main.qmp import parse_endpoint
+        return parse_endpoint(qmp, relative_to=run)
     raise ValueError(f"unknown endpoint: {name}")
 
 
@@ -417,6 +417,34 @@ def _copy_checkpoint_sidecar(run: Path, source: Path, metadata: dict) -> tuple[P
     return target, manifest_path
 
 
+def try_exclusive_lock(lock) -> None:
+    """Non-blocking exclusive lock. POSIX flock; Windows msvcrt.locking."""
+    if os.name == 'nt':
+        import msvcrt
+        lock.seek(0, os.SEEK_END)
+        if lock.tell() == 0:
+            lock.write('\0')
+            lock.flush()
+        lock.seek(0)
+        try:
+            msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError as error:
+            raise BlockingIOError from error
+        return
+    import fcntl
+    fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def unlock_exclusive(lock) -> None:
+    if os.name == 'nt':
+        import msvcrt
+        lock.seek(0)
+        msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+    import fcntl
+    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
 def checkpoint(run: Path, timeout: float = 30, poll: float = 0.25) -> int:
     """Request and collect one DSP checkpoint without touching live manifests."""
     # Hold a process lock through collection: the board removes the request
@@ -425,13 +453,13 @@ def checkpoint(run: Path, timeout: float = 30, poll: float = 0.25) -> int:
     # after release; unlinking it would permit competing locks on two inodes.
     with (run / "dsp-checkpoint-client.lock").open("a") as lock:
         try:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try_exclusive_lock(lock)
         except BlockingIOError as error:
             raise ValueError("another DSP checkpoint client is collecting a snapshot") from error
         try:
             return _checkpoint_locked(run, timeout, poll)
         finally:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            unlock_exclusive(lock)
 
 
 def _checkpoint_locked(run: Path, timeout: float, poll: float) -> int:

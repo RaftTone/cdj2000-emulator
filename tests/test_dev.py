@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import fcntl
 from pathlib import Path
 import socket
 import threading
@@ -52,7 +51,7 @@ def test_checkpoint_rejects_concurrent_client_without_touching_completion(tmp_pa
     done = run / "dsp-checkpoint-request.json.done"
     done.write_text('{"ok": true}')
     with (run / "dsp-checkpoint-client.lock").open("a") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        dev.try_exclusive_lock(lock)
         assert dev.main([str(run), "checkpoint"]) == 2
     assert done.read_text() == '{"ok": true}'
     assert not (run / "dsp-checkpoint-request.json").exists()

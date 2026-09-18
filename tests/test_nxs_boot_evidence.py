@@ -35,7 +35,7 @@ def test_sync_profile_collects_commands_before_teardown(tmp_path, monkeypatch):
     monitor.recv.side_effect = [b'QEMU\r\n(qe', b'mu) ',
                                b'total waits\r\n(qemu) ', b'mean waits\r\n(qemu) ']
     factory = Mock(return_value=monitor)
-    monkeypatch.setattr(nxs_vm.socket, 'socket', factory)
+    monkeypatch.setattr(nxs_vm, 'connect_monitor', factory)
     process = Mock()
     process.poll.return_value = None
     result = nxs_vm.capture_sync_profile(tmp_path, process)
@@ -52,17 +52,22 @@ def test_sync_profile_capture_failure_is_nonfatal(tmp_path, monkeypatch, failure
     monitor = Mock()
     monitor.__enter__ = Mock(return_value=monitor)
     monitor.__exit__ = Mock(return_value=False)
-    if failure == 'missing': monitor.connect.side_effect = FileNotFoundError('missing')
-    elif failure == 'timeout': monitor.recv.side_effect = TimeoutError('timeout')
-    else: monitor.recv.return_value = b''
-    monkeypatch.setattr(nxs_vm.socket, 'socket', Mock(return_value=monitor))
+    if failure == 'missing':
+        monkeypatch.setattr(nxs_vm, 'connect_monitor',
+                            Mock(side_effect=FileNotFoundError('missing')))
+    else:
+        if failure == 'timeout':
+            monitor.recv.side_effect = TimeoutError('timeout')
+        else:
+            monitor.recv.return_value = b''
+        monkeypatch.setattr(nxs_vm, 'connect_monitor', Mock(return_value=monitor))
     result = nxs_vm.capture_sync_profile(tmp_path, SimpleNamespace(poll=lambda: None))
     assert result['status'] == 'unavailable' and result['error']
 
 
 def test_sync_profile_dead_qemu_does_not_open_socket(tmp_path, monkeypatch):
     factory = Mock()
-    monkeypatch.setattr(nxs_vm.socket, 'socket', factory)
+    monkeypatch.setattr(nxs_vm, 'connect_monitor', factory)
     result = nxs_vm.capture_sync_profile(tmp_path, SimpleNamespace(poll=lambda: 1))
     assert result['status'] == 'unavailable'
     factory.assert_not_called()
@@ -276,7 +281,7 @@ def test_run_manifest_records_launched_inputs_and_optional_observations(
     monkeypatch.setattr(nxs_vm.time, 'monotonic', lambda: clock[0])
     monkeypatch.setattr(nxs_vm.time, 'sleep', lambda duration: clock.__setitem__(0, clock[0] + duration))
     monkeypatch.setattr(nxs_vm, 'finalize_dsp_artifacts', Mock())
-    def collect(run, process):
+    def collect(run, process, **_):
         assert process.poll() is None and clock[0] >= 2.5
         return {'status': 'captured', 'commands': list(nxs_vm.SYNC_PROFILE_COMMANDS)}
     collector = Mock(side_effect=collect)

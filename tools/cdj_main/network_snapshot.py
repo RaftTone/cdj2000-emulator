@@ -6,10 +6,10 @@ perturbs host timing; it neither changes guest RAM nor establishes wire timing.
 import argparse
 import hashlib
 import json
-import os
 from pathlib import Path
-import socket
 import time
+
+from tools.cdj_main.qmp import connect_chardev, parse_endpoint
 
 MAIN_SHA = 'd88369e4b1986a9d3dcd58b68b784968ff1a756b7e59637c71dc13e4f9d891fe'
 REGIONS = {'autoip': (0x045a6360, 0x20), 'dhcp': (0x046313b4, 0x70),
@@ -30,9 +30,8 @@ def capture(run, tag):
         raise FileExistsError('capture already exists')
     if any('"' in str(p) or '\n' in str(p) for p in paths.values()):
         raise ValueError('unsafe monitor path')
-    with socket.socket(socket.AF_UNIX) as sock:
-        sock.settimeout(10)
-        sock.connect(os.path.relpath(run / 'qemu-monitor.sock'))
+    monitor = manifest.get('qemu_sync_profile', {}).get('monitor') or 'qemu-monitor.sock'
+    with connect_chardev(parse_endpoint(monitor, relative_to=run), timeout=10) as sock:
 
         def receive():
             data = b''

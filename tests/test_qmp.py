@@ -70,3 +70,21 @@ def test_bad_greeting_closes_connection(monkeypatch):
 def test_invalid_deadline_rejected(timeout):
     with pytest.raises(ValueError):
         Qmp(Path('/tmp/emulator.sock'), timeout=timeout)
+
+
+def test_tcp_endpoint_uses_create_connection(monkeypatch):
+    sock = Socket([b'{"QMP":{}}\n', b'{"return":{},"id":1}\n',
+                   b'{"return":{"running":false},"id":2}\n'])
+    monkeypatch.setattr('tools.cdj_main.qmp.socket.create_connection',
+                        lambda address, timeout=None: sock)
+    with Qmp(('127.0.0.1', 5981)) as qmp:
+        assert qmp.command('query-status') == {'running': False}
+    assert sock.closed
+
+
+def test_parse_endpoint_keeps_unix_paths_and_host_port():
+    from tools.cdj_main.qmp import parse_endpoint
+    run = Path('/tmp/run')
+    assert parse_endpoint('qmp.sock', relative_to=run) == run / 'qmp.sock'
+    assert parse_endpoint('127.0.0.1:5981') == ('127.0.0.1', 5981)
+    assert parse_endpoint(('127.0.0.1', 5981)) == ('127.0.0.1', 5981)

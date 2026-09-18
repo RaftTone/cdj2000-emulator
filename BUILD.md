@@ -1,5 +1,27 @@
 # Building
 
+Host recipes for both Windows and macOS. Diagnostic notes from NXS/DSP work
+follow; they do not replace the build steps.
+
+**Windows (MSYS2 MINGW64, x86-64):** install the packages under
+[What you need](#what-you-need), then:
+
+```sh
+sh scripts/build-bfin-sim.sh
+git clone --depth 1 https://gitlab.com/qemu-project/qemu.git /c/qemu-src
+sh scripts/build-qemu-sh4.sh /c/qemu-src
+export CDJ_QEMU=/c/qemu-src/build/qemu-system-sh4
+```
+
+The NXS launcher resolves `bin/cdj-run.exe` and `CDJ_QEMU`. `--debug` and
+`--qemu-sync-profile` use TCP/telnet chardevs; MinGW QEMU has no `unix:` sockets.
+
+**macOS (Homebrew, including Apple Silicon):** see
+[macOS migration](#macos-migration). `scripts/build-bfin-sim.sh` uses `gmake`
+and Homebrew `gmp`/`mpfr`. In-tree QEMU stays
+`build/qemu/build/qemu-system-sh4`. `--debug` keeps Unix QMP/monitor sockets
+and the relative-path `sockaddr_un` workaround.
+
 Check the captured NXS MAIN/DSP ready/clear/ack sequence without executing or
 modifying firmware:
 
@@ -143,7 +165,9 @@ C6X_DISASSEMBLER=/tmp/cdj-tic6x-disasm .venv/bin/python -m pytest -q \
 ```
 
 The link flags above match this host's Homebrew zstd-enabled BFD build; use the
-equivalent library path for another host. Report output must be new. The
+equivalent library path for another host. On MSYS2 MINGW64 that is typically
+`-lz -lzstd` without `-L/opt/homebrew/...`, writing the binary under `build/`
+instead of `/tmp` if you prefer. Report output must be new. The
 frontend batches exact addresses via stdin instead of linear sweeping across
 data. Reports preserve provenance hashes and remain non-validating: canonical
 disassembly does not prove execution, semantic correctness or test completeness.

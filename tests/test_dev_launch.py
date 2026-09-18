@@ -55,7 +55,7 @@ def test_gui_board_override_points_cfi_at_selected_flash(tmp_path):
     output = tmp_path / 'run' / 'gui-board.hw'
     output.parent.mkdir()
     nxs_vm.write_gui_board_override(template, flash, output)
-    assert f'/core/bfin_ebiu_amc/cfi@0/file "{flash.resolve()}"' == output.read_text().strip()
+    assert f'/core/bfin_ebiu_amc/cfi@0/file "{flash.resolve().as_posix()}"' == output.read_text().strip()
 
 
 def test_gui_firmware_override_launches_with_generated_board_and_records_it(
@@ -105,7 +105,7 @@ def test_gui_firmware_override_launches_with_generated_board_and_records_it(
     gui_command = next(command for command in commands if '--model' in command)
     board = tmp_path / 'run/gui-board.hw'
     assert gui_command[gui_command.index('--hw-board-file') + 1] == str(board)
-    assert f'"{(gui / "gui-flash-image.bin").resolve()}"' in board.read_text()
+    assert f'"{(gui / "gui-flash-image.bin").resolve().as_posix()}"' in board.read_text()
     manifest = json.loads((tmp_path / 'run/run.json').read_text())
     assert manifest['firmware']['gui_board_file'] == str(board)
     assert manifest['firmware']['gui_board_mode'] == 'run-local override'
@@ -201,3 +201,47 @@ def test_agent_commands_include_status_report_panel_and_debug(capsys, tmp_path, 
     assert 'panel_control --port 6204 state' in output
     assert 'gdb: target remote 127.0.0.1:6203' in output
     assert 'qmp.sock' in output
+
+
+def test_debug_chardev_stays_unix_on_posix_and_tcp_on_windows(tmp_path, monkeypatch):
+    for name in ('bin/cdj-run', 'build/qemu/build/qemu-system-sh4',
+                 'firmware/nxs/main-firmware.bin',
+                 'firmware/nxs/gui-boot-memory.elf',
+                 'firmware/nxs/gui-flash-image.bin'):
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(name.encode())
+    monkeypatch.setattr(nxs_vm, 'ROOT', tmp_path)
+    monkeypatch.setattr(nxs_vm, 'occupied_local_ports', lambda base, debug: [])
+    monkeypatch.setattr(nxs_vm.sys, 'argv', [
+        'nxs_vm', 'run', '--seconds', '1', '--lightweight', '--debug',
+        '--qemu-sync-profile'])
+    commands = []
+
+    class Process:
+        def __init__(self, is_gui):
+            self.is_gui, self.stopped, self.pid = is_gui, False, 123
+        def poll(self):
+            return 0 if self.is_gui or self.stopped else None
+        def terminate(self):
+            self.stopped = True
+        def wait(self, timeout):
+            return 0
+
+    def launch(command, **kwargs):
+        commands.append(command)
+        if '--model' in command:
+            (tmp_path / 'run/screen.ppm').write_bytes(FRAME)
+        return Process('--model' in command)
+    monkeypatch.setattr(nxs_vm.subprocess, 'Popen', launch)
+    monkeypatch.setattr(nxs_vm, 'capture_sync_profile', lambda *a, **k: {'status': 'captured'})
+    assert nxs_vm.main() == 0
+    main = next(command for command in commands if '-M' in command)
+    if nxs_vm.UNIX_CONTROL:
+        assert any(part.startswith('unix:') and 'qmp.sock' in part for part in main)
+        assert any(part.startswith('unix:') and 'qemu-monitor.sock' in part for part in main)
+        assert not any(part.startswith('tcp:') and 'server=on' in part for part in main)
+    else:
+        assert any(part.startswith('tcp:127.0.0.1:') and 'server=on' in part for part in main)
+        assert any(part.startswith('telnet:127.0.0.1:') for part in main)
+        assert not any(part.startswith('unix:') for part in main)

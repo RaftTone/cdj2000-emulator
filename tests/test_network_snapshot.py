@@ -21,7 +21,7 @@ def test_rejects_before_connect(tmp_path, monkeypatch, tag, sha, existing, error
     if existing:
         (tmp_path / 'network-good.json').touch()
     factory = Mock()
-    monkeypatch.setattr(snapshot.socket, 'socket', factory)
+    monkeypatch.setattr(snapshot, 'connect_chardev', factory)
     with pytest.raises(error):
         snapshot.capture(tmp_path, tag)
     factory.assert_not_called()
@@ -53,7 +53,7 @@ def test_capture_resumes_even_on_failure(tmp_path, monkeypatch, fail):
             snapshot.Path(path.strip('"')).write_bytes(contents)
 
     sock.sendall.side_effect = send
-    monkeypatch.setattr(snapshot.socket, 'socket', Mock(return_value=sock))
+    monkeypatch.setattr(snapshot, 'connect_chardev', Mock(return_value=sock))
     if fail:
         with pytest.raises(OSError):
             snapshot.capture(tmp_path, 'test')

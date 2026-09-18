@@ -2,6 +2,25 @@
 # Build only the assembler/linker used by the Blackfin guest regressions.
 set -eu
 REPO=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+
+# MSYS2 drops TMP for native processes; GCC then writes to C:\WINDOWS.
+# --force-local is GNU tar on Windows only: BSD tar on macOS has no such flag,
+# and a C: path would otherwise be treated as a remote host.
+case $(uname -s 2>/dev/null) in
+    MINGW*|MSYS*|CYGWIN*)
+        if [ -z "$TMP" ]; then
+            TMP=$(cygpath -w "${TMPDIR:-/tmp}" 2>/dev/null) || TMP='C:\Windows\Temp'
+            TEMP=$TMP
+            export TMP TEMP
+            echo "TMP was unset by the shell; using $TMP"
+        fi
+        TAR_EXTRACT='tar --force-local -xf'
+        ;;
+    *)
+        TAR_EXTRACT='tar -xf'
+        ;;
+esac
+
 version=2.44
 archive=${1:-"$REPO/build/binutils-$version.tar.xz"}
 mkdir -p "$REPO/build"
@@ -16,7 +35,7 @@ if hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest() != expected:
     raise SystemExit('binutils archive checksum mismatch')
 PY
 if [ ! -d "$REPO/build/binutils-$version" ]; then
-    tar -xf "$archive" -C "$REPO/build"
+    $TAR_EXTRACT "$archive" -C "$REPO/build"
 fi
 mkdir -p "$REPO/build/bfin-binutils"
 cd "$REPO/build/bfin-binutils"

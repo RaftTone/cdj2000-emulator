@@ -9,28 +9,79 @@ from pathlib import Path
 import socket
 import time
 
+QmpEndpoint = Path | tuple[str, int] | str
+
 
 class QmpError(RuntimeError):
     pass
 
 
+def is_tcp_endpoint(endpoint: object) -> bool:
+    """True for (host, port) or a host:port string with no path separators."""
+    if isinstance(endpoint, tuple) and len(endpoint) == 2:
+        host, port = endpoint
+        return isinstance(host, str) and isinstance(port, int)
+    if not isinstance(endpoint, str):
+        return False
+    if '/' in endpoint or '\\' in endpoint:
+        return False
+    host, separator, port = endpoint.rpartition(':')
+    return bool(separator) and bool(host) and port.isdigit()
+
+
+def parse_endpoint(endpoint: QmpEndpoint, *, relative_to: Path | None = None) -> QmpEndpoint:
+    """Return a Path for a Unix socket or (host, port) for TCP."""
+    if isinstance(endpoint, tuple):
+        return endpoint
+    if is_tcp_endpoint(endpoint):
+        host, _, port = str(endpoint).rpartition(':')
+        return host, int(port)
+    path = Path(endpoint)
+    if relative_to is not None and not path.is_absolute():
+        path = relative_to / path
+    return path
+
+
+def connect_chardev(endpoint: QmpEndpoint, timeout: float = 3) -> socket.socket:
+    """Connect to a QEMU unix or TCP chardev. Caller owns the socket."""
+    parsed = parse_endpoint(endpoint)
+    if isinstance(parsed, tuple):
+        sock = socket.create_connection(parsed, timeout=timeout)
+        sock.settimeout(timeout)
+        return sock
+    family = getattr(socket, 'AF_UNIX', socket.AF_INET)
+    sock = socket.socket(family, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    names = (str(parsed.resolve()), os.path.relpath(parsed))
+    sock.connect(min(names, key=lambda s: len(os.fsencode(s))))
+    return sock
+
+
 class Qmp:
-    def __init__(self, path: Path, timeout: float = 3):
+    def __init__(self, path: QmpEndpoint, timeout: float = 3):
         if not math.isfinite(timeout) or timeout <= 0:
             raise ValueError('QMP timeout must be finite and positive')
         self.timeout, self.sequence, self.pending = timeout, 0, b''
-        self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.socket = None
+        endpoint = parse_endpoint(path)
         try:
+            if isinstance(endpoint, tuple):
+                self.socket = socket.create_connection(endpoint, timeout=timeout)
+            else:
+                family = getattr(socket, 'AF_UNIX', socket.AF_INET)
+                self.socket = socket.socket(family, socket.SOCK_STREAM)
+                self.socket.settimeout(timeout)
+                # Prefer the shorter spelling for macOS's sockaddr_un limit.
+                names = (str(endpoint.resolve()), os.path.relpath(endpoint))
+                self.socket.connect(min(names, key=lambda s: len(os.fsencode(s))))
             self.socket.settimeout(timeout)
-            # Prefer the shorter spelling for macOS's sockaddr_un limit.
-            names = (str(path.resolve()), os.path.relpath(path))
-            self.socket.connect(min(names, key=lambda s: len(os.fsencode(s))))
             greeting = self.receive(time.monotonic() + timeout)
             if 'QMP' not in greeting:
                 raise QmpError('endpoint did not send a QMP greeting')
             self.command('qmp_capabilities')
         except BaseException:
-            self.socket.close()
+            if self.socket is not None:
+                self.socket.close()
             raise
 
     def __enter__(self):

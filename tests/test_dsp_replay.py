@@ -7,7 +7,7 @@ import subprocess
 import sys
 import pytest
 
-from tools.cdj_dsp.replay import write_manifest
+from tools.cdj_dsp.replay import DEFAULT_FORMATS, write_manifest
 from tools.cdj_dsp.tx_capture import tx_capture_metadata
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -35,6 +35,8 @@ def test_aborted_replay_leaves_no_manifest(tmp_path, monkeypatch):
     manifest that claimed architectural validation eligibility.
     """
     from tools.cdj_dsp import replay as replay_module
+
+    _require_replay_toolchain()
 
     data = bytearray(0x40000)
     struct.pack_into('<I', data, 0, 0x00800020)
@@ -85,7 +87,16 @@ def test_compact_trace_preserves_execution_and_coverage(tmp_path, monkeypatch):
     assert reports[0] == reports[1]
 
 
+def _require_replay_toolchain():
+    import shutil
+    if not DEFAULT_FORMATS.is_file():
+        pytest.skip('requires GNU tic6x-insn-formats.h from a GDB 17.2 build')
+    if not (shutil.which('cc') or shutil.which('gcc')):
+        pytest.skip('requires C compiler')
+
+
 def run(dump, output, *args):
+    _require_replay_toolchain()
     return subprocess.run([sys.executable, '-m', 'tools.cdj_dsp.replay',
                            str(dump), str(output), *args], cwd=ROOT,
                           text=True, capture_output=True, timeout=20)

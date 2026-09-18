@@ -343,9 +343,9 @@ def main():
         parser.error('event transcript must be an existing file')
     if not args.formats.is_file():
         parser.error('C6x format header is required (build dependencies per BUILD.md or use --formats)')
-    cc = shutil.which('cc')
+    cc = shutil.which('cc') or shutil.which('gcc')
     if not cc:
-        parser.error('C compiler required (install Xcode command line tools)')
+        parser.error('C compiler required (cc or gcc)')
     # Snapshot input so hashing and execution always describe the same bytes.
     data = data if selected_checkpoint is not None else args.dump.read_bytes()
     checkpoint = data.startswith(tuple(CHECKPOINT_MAGIC.values()))
