@@ -53,7 +53,7 @@ bool cdj_c6747_psc_read(const CdjC6747Psc *s, uint32_t address, uint32_t *value)
      * Table 8-14; zero readback is an explicit, unmeasured bus assumption. */
     if (off == 0x120) { *value = 0; return true; }
     if (off == 0x128) {
-        *value = !!s->remaining[b][0] | (!!s->remaining[b][1] << 1);
+        *value = (s->remaining[b][0] ? 1 : 0) | (s->remaining[b][1] ? 2 : 0);
         return true;
     }
     if ((off >= 0x800 && off < 0x880) || (off >= 0xa00 && off < 0xa80)) {

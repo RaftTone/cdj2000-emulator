@@ -93,7 +93,7 @@ def _run(tmp_path, wake_sources, case, mutation=None, sanitize=False):
     flags = ['-fsanitize=address,undefined', '-fno-omit-frame-pointer'] if sanitize else []
     subprocess.run([compiler, '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
                     *flags, '-I', str(tmp_path), str(ROOT / 'tests/cstub/bfin-wake-timing.c'),
-                    '-o', str(binary)], check=True, capture_output=True, timeout=30)
+                    '-o', str(binary), '-lm'], check=True, capture_output=True, timeout=30)
     return subprocess.run([str(binary), case], text=True, capture_output=True, timeout=5)
 
 

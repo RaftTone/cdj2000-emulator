@@ -447,28 +447,40 @@ bool cdj_c6747_edma_write(CdjC6747Edma *s, uint32_t address, uint64_t value,
     }
     if (o == 0x260u) {
         if (!legal_queue_map(v)) return false;
-        if (commit) s->qdmaqnum = v; return true;
+        if (commit)
+            s->qdmaqnum = v;
+        return true;
     }
     if (o == 0x308u) { if (commit) s->emr &= ~v; return true; }
     if (o == 0x314u) {
         if (v & ~0xffu) return false;
-        if (commit) s->qemr &= ~v; return true;
+        if (commit)
+            s->qemr &= ~v;
+        return true;
     }
     if (o == 0x31cu) {
         if (v & ~0x00030003u) return false;
-        if (commit) s->ccerr &= ~v; return true;
+        if (commit)
+            s->ccerr &= ~v;
+        return true;
     }
     if (o == 0x320u) return v <= 1u;
     if (o >= 0x340u && o <= 0x358u && !((o - 0x340u) & 7u)) {
-        if (commit) s->drae[(o - 0x340u) / 8u] = v; return true;
+        if (commit)
+            s->drae[(o - 0x340u) / 8u] = v;
+        return true;
     }
     if (o >= 0x380u && o <= 0x38cu) {
         if (v & ~0xffu) return false;
-        if (commit) s->qrae[(o - 0x380u) / 4u] = v; return true;
+        if (commit)
+            s->qrae[(o - 0x380u) / 4u] = v;
+        return true;
     }
     if (o == 0x620u) {
         if (v & ~0x1f1fu) return false;
-        if (commit) s->qwmthra = v; return true;
+        if (commit)
+            s->qwmthra = v;
+        return true;
     }
     uint32_t local, dmask, qmask; int region;
     if (channel_view(s, o, &local, &dmask, &qmask, &region))

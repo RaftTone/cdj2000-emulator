@@ -64,7 +64,7 @@ def build_native(cc, directory, sources, *, cache, optimization='-O2'):
         except (OSError, ValueError, KeyError, TypeError):
             pass
     if not hit:
-        subprocess.run([*command, '-o', str(binary)], check=True)
+        subprocess.run([*command, '-o', str(binary), '-lm'], check=True)
         if dependency_hashes() != hashes:
             raise RuntimeError('compiler inputs changed during replay build; retry')
     binary.chmod(0o700)

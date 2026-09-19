@@ -24,7 +24,7 @@ def test_c674x_spkernel_fields(tmp_path):
                     str(ROOT / 'emulator/qemu/cdj_c674x_sp.c'),
                     str(ROOT / 'emulator/qemu/cdj_c674x_control.c'),
                     str(ROOT / 'emulator/qemu/cdj_c674x_loop.c'),
-                    '-o', str(binary)], check=True)
+                    '-o', str(binary), '-lm'], check=True)
     subprocess.run([str(binary)], check=True, timeout=10)
 
 

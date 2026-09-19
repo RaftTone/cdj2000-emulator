@@ -18,5 +18,5 @@ def test_spi_core_clock(tmp_path):
                     str(ROOT / 'tests/cstub/c6747-spi-clock.c'),
                     str(ROOT / 'emulator/qemu/cdj_c6747_spi.c'),
                     str(ROOT / 'emulator/qemu/cdj_c6747_pll.c'),
-                    '-o', str(binary)], check=True)
+                    '-o', str(binary), '-lm'], check=True)
     subprocess.run([str(binary)], check=True, timeout=10)

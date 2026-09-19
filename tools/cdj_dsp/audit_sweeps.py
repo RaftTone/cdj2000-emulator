@@ -55,7 +55,7 @@ def build(workdir: Path) -> Path:
     subprocess.run(
         [compiler, "-std=c11", "-Wall", "-Wextra", "-Werror",
          "-I", str(ROOT / "emulator" / "qemu"), str(PROBE),
-         *[str(p) for p in CORE], "-o", str(binary)],
+         *[str(p) for p in CORE], "-o", str(binary), "-lm"],
         check=True, capture_output=True, text=True)
     return binary
 

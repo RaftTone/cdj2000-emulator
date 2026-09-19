@@ -18,6 +18,6 @@ def test_sh7764_iic_empty_bus(tmp_path):
         "-I", str(ROOT / "emulator/qemu"),
         str(ROOT / "tests/cstub/sh7764-iic.c"),
         str(ROOT / "emulator/qemu/cdj_sh7764_iic.c"),
-        "-o", str(binary),
+        "-o", str(binary), '-lm',
     ], check=True)
     subprocess.run([str(binary)], check=True, timeout=10)

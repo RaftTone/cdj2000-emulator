@@ -48,7 +48,7 @@ int main(void) {
 ''')
     binary = tmp_path / 'test'
     subprocess.run([cc, '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
-                    str(harness), '-o', str(binary)], check=True)
+                    str(harness), '-o', str(binary), '-lm'], check=True)
     output = tmp_path / 'capture'
     env = dict(os.environ, BFIN_MAIN_LINK_DUMP=str(output))
     env.pop('ABRUPT', None)

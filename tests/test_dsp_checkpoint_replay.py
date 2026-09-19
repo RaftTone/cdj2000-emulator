@@ -74,7 +74,7 @@ def make_checkpoint(tmp_path, stop_reason='boot-phase boundary'):
         str(ROOT / 'emulator/qemu/cdj_c6747_cache.c'),
         str(ROOT / 'emulator/qemu/cdj_c6747_mcasp.c'),
         str(ROOT / 'emulator/qemu/cdj_c6747_edma.c'),
-        '-o', str(maker),
+        '-o', str(maker), '-lm',
     ], check=True)
     subprocess.run([str(maker), str(checkpoint), stop_reason],
                    check=True, timeout=5)
