@@ -120,5 +120,5 @@ int main(void)
     models = sorted(directory.glob('cdj_c6747_*.c'))
     subprocess.run([cc, '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
                     '-I', str(directory), str(fixture), *map(str, models),
-                    str(directory / 'cdj_c674x_loop.c'), '-o', str(binary)], check=True)
+                    str(directory / 'cdj_c674x_loop.c'), '-o', str(binary), '-lm'], check=True)
     subprocess.run([str(binary)], check=True, timeout=5)

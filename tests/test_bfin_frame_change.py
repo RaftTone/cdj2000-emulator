@@ -67,7 +67,7 @@ int main(void)
 ''')
     executable = tmp_path / 'frame-test'
     subprocess.run([compiler, '-std=gnu11', '-O2', '-I', str(tmp_path),
-                    str(tmp_path / 'test.c'), '-o', str(executable)], check=True)
+                    str(tmp_path / 'test.c'), '-o', str(executable), '-lm'], check=True)
     # Keep diagnostic settings from affecting the standalone fixture.
     import os
     env = {k: v for k, v in os.environ.items() if not k.startswith('BFIN_')}

@@ -74,7 +74,7 @@ def test_probe_classifies_encodings_we_can_reason_about_independently(tmp_path):
          str(ROOT / "emulator/qemu/cdj_c674x_mpy.c"), str(ROOT / "emulator/qemu/cdj_c674x_dotp.c"), str(ROOT / "emulator/qemu/cdj_c674x_packed8.c"), str(ROOT / "emulator/qemu/cdj_c674x_packed16.c"), str(ROOT / "emulator/qemu/cdj_c674x_packbits.c"), str(ROOT / "emulator/qemu/cdj_c674x_mpy32.c"), str(ROOT / "emulator/qemu/cdj_c674x_dp.c"), str(ROOT / "emulator/qemu/cdj_c674x_approx.c"),
          str(ROOT / "emulator/qemu/cdj_c674x_sp.c"),
          str(ROOT / "emulator/qemu/cdj_c674x_control.c"),
-         str(ROOT / "emulator/qemu/cdj_c674x_loop.c"), "-o", str(binary)],
+         str(ROOT / "emulator/qemu/cdj_c674x_loop.c"), "-o", str(binary), '-lm'],
         check=True)
     words = ["02988078", "0280022a", "ffffffff"]
     result = subprocess.run([str(binary), "pointer"], input="\n".join(words) + "\n",
@@ -251,7 +251,7 @@ def test_single_precision_rounding_against_an_independent_oracle(tmp_path):
          str(ROOT / "emulator/qemu/cdj_c674x_mpy.c"), str(ROOT / "emulator/qemu/cdj_c674x_dotp.c"), str(ROOT / "emulator/qemu/cdj_c674x_packed8.c"), str(ROOT / "emulator/qemu/cdj_c674x_packed16.c"), str(ROOT / "emulator/qemu/cdj_c674x_packbits.c"), str(ROOT / "emulator/qemu/cdj_c674x_mpy32.c"), str(ROOT / "emulator/qemu/cdj_c674x_dp.c"), str(ROOT / "emulator/qemu/cdj_c674x_approx.c"),
          str(ROOT / "emulator/qemu/cdj_c674x_sp.c"),
          str(ROOT / "emulator/qemu/cdj_c674x_control.c"),
-         str(ROOT / "emulator/qemu/cdj_c674x_loop.c"), "-o", str(binary)],
+         str(ROOT / "emulator/qemu/cdj_c674x_loop.c"), "-o", str(binary), '-lm'],
         check=True)
     result = subprocess.run([str(binary)], capture_output=True, text=True,
                             timeout=120, check=True)

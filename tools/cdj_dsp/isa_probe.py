@@ -347,7 +347,7 @@ def run_probe(words: list[str], workdir: Path) -> dict[str, dict]:
     subprocess.run(
         [compiler, "-std=c11", "-Wall", "-Wextra", "-Werror",
          "-I", str(ROOT / "emulator" / "qemu"), str(PROBE_SOURCE),
-         *[str(p) for p in CORE_SOURCES], "-o", str(binary)],
+         *[str(p) for p in CORE_SOURCES], "-o", str(binary), "-lm"],
         check=True, capture_output=True, text=True,
     )
     merged: dict[str, dict] = {}

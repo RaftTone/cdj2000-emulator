@@ -15,5 +15,5 @@ def test_sh7764_eth(tmp_path):
                     "-I", str(ROOT / "emulator/qemu"),
                     str(ROOT / "tests/cstub/sh7764-eth.c"),
                     str(ROOT / "emulator/qemu/cdj_sh7764_eth.c"),
-                    "-o", str(binary)], check=True)
+                    "-o", str(binary), '-lm'], check=True)
     subprocess.run([str(binary)], check=True, timeout=10)

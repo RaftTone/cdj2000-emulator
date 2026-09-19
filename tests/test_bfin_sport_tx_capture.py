@@ -56,7 +56,7 @@ int main(void) {
     )
     binary = tmp_path / "test"
     subprocess.run(
-        [cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", str(harness), "-o", str(binary)],
+        [cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", str(harness), "-o", str(binary), '-lm'],
         check=True,
     )
     output = tmp_path / "capture"

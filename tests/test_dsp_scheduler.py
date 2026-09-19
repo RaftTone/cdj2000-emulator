@@ -18,6 +18,6 @@ def test_dsp_scheduler_state_machine(tmp_path):
         '-I', str(ROOT / 'emulator/qemu'),
         str(ROOT / 'tests/cstub/dsp-scheduler.c'),
         str(ROOT / 'emulator/qemu/cdj_dsp_scheduler.c'),
-        '-o', str(binary),
+        '-o', str(binary), '-lm',
     ], check=True)
     subprocess.run([str(binary)], check=True, timeout=10)

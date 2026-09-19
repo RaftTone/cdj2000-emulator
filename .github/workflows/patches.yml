@@ -19,14 +19,17 @@ jobs:
         # the board file needs is sim/common/dv-cfi.c, and 02 patches four files
         # there.  Unpacking only sim/bfin makes those hunks fail to apply for a
         # reason that reads like a broken patch and is a missing directory.
+        # sim/Makefile.in as well: 03-macos-lp64 patches it, and a file that is
+        # not there fails the patch with no hunk to blame.
         run: |
           curl -fL -o gdb.tar.xz https://ftp.gnu.org/gnu/gdb/gdb-17.2.tar.xz
-          tar -xJf gdb.tar.xz gdb-17.2/sim/bfin gdb-17.2/sim/common
+          tar -xJf gdb.tar.xz gdb-17.2/sim/bfin gdb-17.2/sim/common gdb-17.2/sim/Makefile.in
 
       - name: Apply the patch series
         run: |
           set -e
-          for p in patches/0*-gdb-*.patch; do
+          # The same glob as scripts/build-bfin-sim.sh; 0* stopped at 09.
+          for p in patches/[0-9][0-9]-gdb-*.patch; do
             echo "== $p"
             # --batch: never stop to ask "File to patch:".  With no tty it
             # reads EOF, answers itself, and skips every remaining hunk while

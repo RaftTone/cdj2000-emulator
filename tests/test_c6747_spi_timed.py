@@ -17,5 +17,5 @@ def test_timed_spi1_wm8740(tmp_path):
                     '-I', str(ROOT / 'emulator/qemu'),
                     str(ROOT / 'tests/cstub/c6747-spi-timed.c'),
                     str(ROOT / 'emulator/qemu/cdj_c6747_spi.c'),
-                    '-o', str(binary)], check=True)
+                    '-o', str(binary), '-lm'], check=True)
     subprocess.run([str(binary)], check=True, timeout=10)

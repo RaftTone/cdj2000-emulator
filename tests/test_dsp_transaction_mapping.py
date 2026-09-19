@@ -47,7 +47,7 @@ int main(void) {
     subprocess.run([cc, '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
                     '-I', str(ROOT / 'emulator/qemu'), str(source),
                     str(ROOT / 'emulator/qemu/cdj_c6747_edma.c'),
-                    str(ROOT / 'emulator/qemu/cdj_c6747_mcasp.c'), '-o', str(binary)], check=True)
+                    str(ROOT / 'emulator/qemu/cdj_c6747_mcasp.c'), '-o', str(binary), '-lm'], check=True)
     subprocess.run([str(binary)], check=True)
 
 
@@ -195,5 +195,5 @@ int main(void)
                     str(ROOT / 'emulator/qemu/cdj_c6747_mcasp.c'),
                     str(ROOT / 'emulator/qemu/cdj_c6747_spi.c'),
                     str(ROOT / 'emulator/qemu/cdj_c6747_syscfg.c'),
-                    '-o', str(binary)], check=True)
+                    '-o', str(binary), '-lm'], check=True)
     subprocess.run([str(binary)], check=True)

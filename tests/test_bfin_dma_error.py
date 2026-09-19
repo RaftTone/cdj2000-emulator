@@ -56,7 +56,7 @@ int main(void)
     )
     executable = tmp_path / "dma-error"
     subprocess.run(
-        [compiler, "-std=c99", "-Wall", "-Wextra", "-Werror", str(harness), "-o", str(executable)],
+        [compiler, "-std=c99", "-Wall", "-Wextra", "-Werror", str(harness), "-o", str(executable), '-lm'],
         check=True,
     )
     subprocess.run([str(executable)], check=True)

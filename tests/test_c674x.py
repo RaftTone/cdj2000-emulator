@@ -11,7 +11,7 @@ def test_c6747_spi_registers(tmp_path):
     binary = tmp_path / 'spi-test'
     subprocess.run([cc, '-std=c11', '-Wall', '-Wextra', '-Werror',
         '-I', str(ROOT / 'emulator/qemu'), str(ROOT / 'tests/cstub/c6747-spi.c'),
-        str(ROOT / 'emulator/qemu/cdj_c6747_spi.c'), '-o', str(binary)], check=True)
+        str(ROOT / 'emulator/qemu/cdj_c6747_spi.c'), '-o', str(binary), '-lm'], check=True)
     subprocess.run([str(binary)], check=True, timeout=5)
 
 def test_c6747_cache_registers(tmp_path):
@@ -20,7 +20,7 @@ def test_c6747_cache_registers(tmp_path):
     binary = tmp_path / 'cache-test'
     subprocess.run([cc, '-std=c11', '-Wall', '-Wextra', '-Werror',
         '-I', str(ROOT / 'emulator/qemu'), str(ROOT / 'tests/cstub/c6747-cache.c'),
-        str(ROOT / 'emulator/qemu/cdj_c6747_cache.c'), '-o', str(binary)], check=True)
+        str(ROOT / 'emulator/qemu/cdj_c6747_cache.c'), '-o', str(binary), '-lm'], check=True)
     subprocess.run([str(binary)], check=True, timeout=5)
 
 def test_c6747_edma_registers_and_transfers(tmp_path):
@@ -29,7 +29,7 @@ def test_c6747_edma_registers_and_transfers(tmp_path):
     binary = tmp_path / 'edma-test'
     subprocess.run([cc, '-std=c11', '-Wall', '-Wextra', '-Werror',
         '-I', str(ROOT / 'emulator/qemu'), str(ROOT / 'tests/cstub/c6747-edma.c'),
-        str(ROOT / 'emulator/qemu/cdj_c6747_edma.c'), '-o', str(binary)], check=True)
+        str(ROOT / 'emulator/qemu/cdj_c6747_edma.c'), '-o', str(binary), '-lm'], check=True)
     subprocess.run([str(binary)], check=True, timeout=5)
 
 def test_c6747_timer64p_registers(tmp_path):
@@ -38,7 +38,7 @@ def test_c6747_timer64p_registers(tmp_path):
     binary = tmp_path / 'timer-test'
     subprocess.run([cc, '-std=c11', '-Wall', '-Wextra', '-Werror',
         '-I', str(ROOT / 'emulator/qemu'), str(ROOT / 'tests/cstub/c6747-timer.c'),
-        str(ROOT / 'emulator/qemu/cdj_c6747_timer.c'), '-o', str(binary)], check=True)
+        str(ROOT / 'emulator/qemu/cdj_c6747_timer.c'), '-o', str(binary), '-lm'], check=True)
     subprocess.run([str(binary)], check=True, timeout=5)
 
 def test_c6747_interrupt_controller(tmp_path):
@@ -55,7 +55,7 @@ def test_c6747_interrupt_controller(tmp_path):
         str(ROOT / 'emulator/qemu/cdj_c674x_uncond.c'),
         str(ROOT / 'emulator/qemu/cdj_c674x_mpy.c'), str(ROOT / 'emulator/qemu/cdj_c674x_dotp.c'), str(ROOT / 'emulator/qemu/cdj_c674x_packed8.c'), str(ROOT / 'emulator/qemu/cdj_c674x_packed16.c'), str(ROOT / 'emulator/qemu/cdj_c674x_packbits.c'), str(ROOT / 'emulator/qemu/cdj_c674x_mpy32.c'), str(ROOT / 'emulator/qemu/cdj_c674x_dp.c'), str(ROOT / 'emulator/qemu/cdj_c674x_approx.c'),
         str(ROOT / 'emulator/qemu/cdj_c674x_loop.c'),
-        '-o', str(binary)], check=True)
+        '-o', str(binary), '-lm'], check=True)
     subprocess.run([str(binary)], check=True, timeout=5)
 
 def test_c6747_emifb_configuration(tmp_path):
@@ -64,7 +64,7 @@ def test_c6747_emifb_configuration(tmp_path):
     binary = tmp_path / 'emifb-test'
     subprocess.run([cc, '-std=c11', '-Wall', '-Wextra', '-Werror',
         '-I', str(ROOT / 'emulator/qemu'), str(ROOT / 'tests/cstub/c6747-emifb.c'),
-        str(ROOT / 'emulator/qemu/cdj_c6747_emifb.c'), '-o', str(binary)], check=True)
+        str(ROOT / 'emulator/qemu/cdj_c6747_emifb.c'), '-o', str(binary), '-lm'], check=True)
     subprocess.run([str(binary)], check=True, timeout=5)
 
 def test_c6747_hpi_control(tmp_path):
@@ -73,7 +73,7 @@ def test_c6747_hpi_control(tmp_path):
     binary = tmp_path / 'hpi-test'
     subprocess.run([cc, '-std=c11', '-Wall', '-Wextra', '-Werror',
         '-I', str(ROOT / 'emulator/qemu'), str(ROOT / 'tests/cstub/c6747-hpi.c'),
-        str(ROOT / 'emulator/qemu/cdj_c6747_hpi.c'), '-o', str(binary)], check=True)
+        str(ROOT / 'emulator/qemu/cdj_c6747_hpi.c'), '-o', str(binary), '-lm'], check=True)
     subprocess.run([str(binary)], check=True, timeout=5)
 
 def test_dsp_checkpoint_round_trip(tmp_path):
@@ -91,7 +91,7 @@ def test_dsp_checkpoint_round_trip(tmp_path):
         str(ROOT / 'emulator/qemu/cdj_c6747_cache.c'),
         str(ROOT / 'emulator/qemu/cdj_c6747_mcasp.c'),
         str(ROOT / 'emulator/qemu/cdj_c6747_edma.c'),
-        str(ROOT / 'emulator/qemu/cdj_dsp_scheduler.c'), '-o', str(binary)], check=True)
+        str(ROOT / 'emulator/qemu/cdj_dsp_scheduler.c'), '-o', str(binary), '-lm'], check=True)
     subprocess.run([str(binary), str(checkpoint)], check=True, timeout=5)
 
 def test_c6747_pll_cycle_clock(tmp_path):
@@ -104,7 +104,7 @@ def test_c6747_pll_cycle_clock(tmp_path):
           ('cdj_c6747_pll.c', 'cdj_c6747_timer.c', 'cdj_c6747_mcasp.c',
            'cdj_c674x.c', 'cdj_c674x_uncond.c', 'cdj_c674x_mpy.c', 'cdj_c674x_dotp.c', 'cdj_c674x_packed8.c', 'cdj_c674x_packed16.c', 'cdj_c674x_packbits.c', 'cdj_c674x_mpy32.c', 'cdj_c674x_dp.c', 'cdj_c674x_approx.c',
            'cdj_c674x_sp.c', 'cdj_c674x_control.c', 'cdj_c674x_loop.c')],
-        '-o', str(binary)], check=True)
+        '-o', str(binary), '-lm'], check=True)
     subprocess.run([str(binary)], check=True, timeout=5)
 
 def test_c6747_pll_configuration(tmp_path):
@@ -113,7 +113,7 @@ def test_c6747_pll_configuration(tmp_path):
     binary = tmp_path / 'pll-test'
     subprocess.run([cc, '-std=c11', '-Wall', '-Wextra', '-Werror',
         '-I', str(ROOT / 'emulator/qemu'), str(ROOT / 'tests/cstub/c6747-pll.c'),
-        str(ROOT / 'emulator/qemu/cdj_c6747_pll.c'), '-o', str(binary)], check=True)
+        str(ROOT / 'emulator/qemu/cdj_c6747_pll.c'), '-o', str(binary), '-lm'], check=True)
     subprocess.run([str(binary)], check=True, timeout=5)
 
 def test_c6747_i2c_gpio_mode(tmp_path):
@@ -122,7 +122,7 @@ def test_c6747_i2c_gpio_mode(tmp_path):
     binary = tmp_path / 'i2c-test'
     subprocess.run([cc, '-std=c11', '-Wall', '-Wextra', '-Werror',
         '-I', str(ROOT / 'emulator/qemu'), str(ROOT / 'tests/cstub/c6747-i2c.c'),
-        str(ROOT / 'emulator/qemu/cdj_c6747_i2c.c'), '-o', str(binary)], check=True)
+        str(ROOT / 'emulator/qemu/cdj_c6747_i2c.c'), '-o', str(binary), '-lm'], check=True)
     subprocess.run([str(binary)], check=True, timeout=5)
 
 def test_c6747_gpio_registers(tmp_path):
@@ -131,7 +131,7 @@ def test_c6747_gpio_registers(tmp_path):
     binary = tmp_path / 'gpio-test'
     subprocess.run([cc, '-std=c11', '-Wall', '-Wextra', '-Werror',
         '-I', str(ROOT / 'emulator/qemu'), str(ROOT / 'tests/cstub/c6747-gpio.c'),
-        str(ROOT / 'emulator/qemu/cdj_c6747_gpio.c'), '-o', str(binary)], check=True)
+        str(ROOT / 'emulator/qemu/cdj_c6747_gpio.c'), '-o', str(binary), '-lm'], check=True)
     subprocess.run([str(binary)], check=True, timeout=5)
 
 def test_c6747_mcasp_pin_registers(tmp_path):
@@ -140,7 +140,7 @@ def test_c6747_mcasp_pin_registers(tmp_path):
     binary = tmp_path / 'mcasp-test'
     subprocess.run([cc, '-std=c11', '-Wall', '-Wextra', '-Werror',
         '-I', str(ROOT / 'emulator/qemu'), str(ROOT / 'tests/cstub/c6747-mcasp.c'),
-        str(ROOT / 'emulator/qemu/cdj_c6747_mcasp.c'), '-o', str(binary)], check=True)
+        str(ROOT / 'emulator/qemu/cdj_c6747_mcasp.c'), '-o', str(binary), '-lm'], check=True)
     subprocess.run([str(binary)], check=True, timeout=5)
 
 def test_c6747_psc_transitions(tmp_path):
@@ -149,7 +149,7 @@ def test_c6747_psc_transitions(tmp_path):
     binary = tmp_path / 'psc-test'
     subprocess.run([cc, '-std=c11', '-Wall', '-Wextra', '-Werror',
         '-I', str(ROOT / 'emulator/qemu'), str(ROOT / 'tests/cstub/c6747-psc.c'),
-        str(ROOT / 'emulator/qemu/cdj_c6747_psc.c'), '-o', str(binary)], check=True)
+        str(ROOT / 'emulator/qemu/cdj_c6747_psc.c'), '-o', str(binary), '-lm'], check=True)
     subprocess.run([str(binary)], check=True, timeout=5)
 
 def test_c674x_packets_and_branch_delays(tmp_path):
@@ -163,7 +163,7 @@ def test_c674x_packets_and_branch_delays(tmp_path):
         str(ROOT / 'emulator/qemu/cdj_c674x_mpy.c'), str(ROOT / 'emulator/qemu/cdj_c674x_dotp.c'), str(ROOT / 'emulator/qemu/cdj_c674x_packed8.c'), str(ROOT / 'emulator/qemu/cdj_c674x_packed16.c'), str(ROOT / 'emulator/qemu/cdj_c674x_packbits.c'), str(ROOT / 'emulator/qemu/cdj_c674x_mpy32.c'), str(ROOT / 'emulator/qemu/cdj_c674x_dp.c'), str(ROOT / 'emulator/qemu/cdj_c674x_approx.c'),
         str(ROOT / 'emulator/qemu/cdj_c674x_sp.c'),
         str(ROOT / 'emulator/qemu/cdj_c674x_control.c'),
-        str(ROOT / 'emulator/qemu/cdj_c674x_loop.c'), '-o', str(binary)], check=True)
+        str(ROOT / 'emulator/qemu/cdj_c674x_loop.c'), '-o', str(binary), '-lm'], check=True)
     subprocess.run([str(binary)], check=True, timeout=5)
 
 
@@ -178,7 +178,7 @@ def test_c674x_nonconditional_encodings(tmp_path):
         str(ROOT / 'emulator/qemu/cdj_c674x_mpy.c'), str(ROOT / 'emulator/qemu/cdj_c674x_dotp.c'), str(ROOT / 'emulator/qemu/cdj_c674x_packed8.c'), str(ROOT / 'emulator/qemu/cdj_c674x_packed16.c'), str(ROOT / 'emulator/qemu/cdj_c674x_packbits.c'), str(ROOT / 'emulator/qemu/cdj_c674x_mpy32.c'), str(ROOT / 'emulator/qemu/cdj_c674x_dp.c'), str(ROOT / 'emulator/qemu/cdj_c674x_approx.c'),
         str(ROOT / 'emulator/qemu/cdj_c674x_sp.c'),
         str(ROOT / 'emulator/qemu/cdj_c674x_control.c'),
-        str(ROOT / 'emulator/qemu/cdj_c674x_loop.c'), '-o', str(binary)], check=True)
+        str(ROOT / 'emulator/qemu/cdj_c674x_loop.c'), '-o', str(binary), '-lm'], check=True)
     subprocess.run([str(binary)], check=True, timeout=10)
 
 
@@ -188,7 +188,7 @@ def test_c674x_loop_schedule(tmp_path):
     binary = tmp_path / 'c674x-loop-test'
     subprocess.run([cc, '-std=c11', '-Wall', '-Wextra', '-Werror',
         '-I', str(ROOT / 'emulator/qemu'), str(ROOT / 'tests/cstub/c674x-loop.c'),
-        str(ROOT / 'emulator/qemu/cdj_c674x_loop.c'), '-o', str(binary)], check=True)
+        str(ROOT / 'emulator/qemu/cdj_c674x_loop.c'), '-o', str(binary), '-lm'], check=True)
     subprocess.run([str(binary)], check=True, timeout=5)
 
 
@@ -205,7 +205,7 @@ def test_c6747_syscfg_unlock_and_pipeline(tmp_path):
         str(ROOT / 'emulator/qemu/cdj_c674x_mpy.c'), str(ROOT / 'emulator/qemu/cdj_c674x_dotp.c'), str(ROOT / 'emulator/qemu/cdj_c674x_packed8.c'), str(ROOT / 'emulator/qemu/cdj_c674x_packed16.c'), str(ROOT / 'emulator/qemu/cdj_c674x_packbits.c'), str(ROOT / 'emulator/qemu/cdj_c674x_mpy32.c'), str(ROOT / 'emulator/qemu/cdj_c674x_dp.c'), str(ROOT / 'emulator/qemu/cdj_c674x_approx.c'),
         str(ROOT / 'emulator/qemu/cdj_c674x_sp.c'),
         str(ROOT / 'emulator/qemu/cdj_c674x_control.c'),
-        str(ROOT / 'emulator/qemu/cdj_c674x_loop.c'), '-o', str(binary)], check=True)
+        str(ROOT / 'emulator/qemu/cdj_c674x_loop.c'), '-o', str(binary), '-lm'], check=True)
     subprocess.run([str(binary)], check=True, timeout=5)
 
 
@@ -240,7 +240,7 @@ def test_c674x_dispatch_table_has_no_shadowed_rows(tmp_path):
         str(ROOT / 'emulator/qemu/cdj_c674x_uncond.c'),
         str(ROOT / 'emulator/qemu/cdj_c674x_mpy.c'), str(ROOT / 'emulator/qemu/cdj_c674x_dotp.c'), str(ROOT / 'emulator/qemu/cdj_c674x_packed8.c'), str(ROOT / 'emulator/qemu/cdj_c674x_packed16.c'), str(ROOT / 'emulator/qemu/cdj_c674x_packbits.c'), str(ROOT / 'emulator/qemu/cdj_c674x_mpy32.c'), str(ROOT / 'emulator/qemu/cdj_c674x_dp.c'), str(ROOT / 'emulator/qemu/cdj_c674x_approx.c'),
         str(ROOT / 'emulator/qemu/cdj_c674x_loop.c'),
-        '-o', str(binary)], check=True)
+        '-o', str(binary), '-lm'], check=True)
     out = subprocess.run([str(binary)], check=True, timeout=30,
                          capture_output=True, text=True).stdout
     lines = out.splitlines()
@@ -278,7 +278,7 @@ def test_c674x_packed_dot_products(tmp_path):
         str(ROOT / 'emulator/qemu/cdj_c674x_mpy.c'), str(ROOT / 'emulator/qemu/cdj_c674x_dotp.c'), str(ROOT / 'emulator/qemu/cdj_c674x_packed8.c'), str(ROOT / 'emulator/qemu/cdj_c674x_packed16.c'), str(ROOT / 'emulator/qemu/cdj_c674x_packbits.c'), str(ROOT / 'emulator/qemu/cdj_c674x_mpy32.c'), str(ROOT / 'emulator/qemu/cdj_c674x_dp.c'), str(ROOT / 'emulator/qemu/cdj_c674x_approx.c'),
         str(ROOT / 'emulator/qemu/cdj_c674x_sp.c'),
         str(ROOT / 'emulator/qemu/cdj_c674x_control.c'),
-        str(ROOT / 'emulator/qemu/cdj_c674x_loop.c'), '-o', str(binary)], check=True)
+        str(ROOT / 'emulator/qemu/cdj_c674x_loop.c'), '-o', str(binary), '-lm'], check=True)
     subprocess.run([str(binary)], check=True, timeout=30)
 
 
@@ -299,7 +299,7 @@ def test_c674x_packed_8bit(tmp_path):
         str(ROOT / 'emulator/qemu/cdj_c674x_mpy.c'), str(ROOT / 'emulator/qemu/cdj_c674x_dotp.c'), str(ROOT / 'emulator/qemu/cdj_c674x_packed8.c'), str(ROOT / 'emulator/qemu/cdj_c674x_packed16.c'), str(ROOT / 'emulator/qemu/cdj_c674x_packbits.c'), str(ROOT / 'emulator/qemu/cdj_c674x_mpy32.c'), str(ROOT / 'emulator/qemu/cdj_c674x_dp.c'), str(ROOT / 'emulator/qemu/cdj_c674x_approx.c'),
         str(ROOT / 'emulator/qemu/cdj_c674x_sp.c'),
         str(ROOT / 'emulator/qemu/cdj_c674x_control.c'),
-        str(ROOT / 'emulator/qemu/cdj_c674x_loop.c'), '-o', str(binary)], check=True)
+        str(ROOT / 'emulator/qemu/cdj_c674x_loop.c'), '-o', str(binary), '-lm'], check=True)
     subprocess.run([str(binary)], check=True, timeout=10)
 
 
@@ -320,7 +320,7 @@ def test_c674x_packed16_arithmetic(tmp_path):
         str(ROOT / 'emulator/qemu/cdj_c674x_mpy.c'), str(ROOT / 'emulator/qemu/cdj_c674x_dotp.c'), str(ROOT / 'emulator/qemu/cdj_c674x_packed8.c'), str(ROOT / 'emulator/qemu/cdj_c674x_packed16.c'), str(ROOT / 'emulator/qemu/cdj_c674x_packbits.c'), str(ROOT / 'emulator/qemu/cdj_c674x_mpy32.c'), str(ROOT / 'emulator/qemu/cdj_c674x_dp.c'), str(ROOT / 'emulator/qemu/cdj_c674x_approx.c'),
         str(ROOT / 'emulator/qemu/cdj_c674x_sp.c'),
         str(ROOT / 'emulator/qemu/cdj_c674x_control.c'),
-        str(ROOT / 'emulator/qemu/cdj_c674x_loop.c'), '-o', str(binary)], check=True)
+        str(ROOT / 'emulator/qemu/cdj_c674x_loop.c'), '-o', str(binary), '-lm'], check=True)
     subprocess.run([str(binary)], check=True, timeout=10)
 
 
@@ -338,7 +338,7 @@ def test_c674x_pack_unpack_shuffle_and_bit_manipulation(tmp_path):
         str(ROOT / 'emulator/qemu/cdj_c674x_mpy.c'), str(ROOT / 'emulator/qemu/cdj_c674x_dotp.c'), str(ROOT / 'emulator/qemu/cdj_c674x_packed8.c'), str(ROOT / 'emulator/qemu/cdj_c674x_packed16.c'), str(ROOT / 'emulator/qemu/cdj_c674x_packbits.c'), str(ROOT / 'emulator/qemu/cdj_c674x_mpy32.c'), str(ROOT / 'emulator/qemu/cdj_c674x_dp.c'), str(ROOT / 'emulator/qemu/cdj_c674x_approx.c'),
         str(ROOT / 'emulator/qemu/cdj_c674x_sp.c'),
         str(ROOT / 'emulator/qemu/cdj_c674x_control.c'),
-        str(ROOT / 'emulator/qemu/cdj_c674x_loop.c'), '-o', str(binary)], check=True)
+        str(ROOT / 'emulator/qemu/cdj_c674x_loop.c'), '-o', str(binary), '-lm'], check=True)
     subprocess.run([str(binary)], check=True, timeout=10)
 
 
@@ -362,7 +362,7 @@ def test_c674x_double_precision(tmp_path):
         str(ROOT / 'emulator/qemu/cdj_c674x_mpy.c'), str(ROOT / 'emulator/qemu/cdj_c674x_dotp.c'), str(ROOT / 'emulator/qemu/cdj_c674x_packed8.c'), str(ROOT / 'emulator/qemu/cdj_c674x_packed16.c'), str(ROOT / 'emulator/qemu/cdj_c674x_packbits.c'), str(ROOT / 'emulator/qemu/cdj_c674x_mpy32.c'), str(ROOT / 'emulator/qemu/cdj_c674x_dp.c'), str(ROOT / 'emulator/qemu/cdj_c674x_approx.c'),
         str(ROOT / 'emulator/qemu/cdj_c674x_sp.c'),
         str(ROOT / 'emulator/qemu/cdj_c674x_control.c'),
-        str(ROOT / 'emulator/qemu/cdj_c674x_loop.c'), '-o', str(binary)], check=True)
+        str(ROOT / 'emulator/qemu/cdj_c674x_loop.c'), '-o', str(binary), '-lm'], check=True)
     subprocess.run([str(binary)], check=True, timeout=30)
 
 
@@ -379,7 +379,7 @@ def test_c674x_32bit_multiply_galois_and_long_forms(tmp_path):
         str(ROOT / 'emulator/qemu/cdj_c674x_mpy.c'), str(ROOT / 'emulator/qemu/cdj_c674x_dotp.c'), str(ROOT / 'emulator/qemu/cdj_c674x_packed8.c'), str(ROOT / 'emulator/qemu/cdj_c674x_packed16.c'), str(ROOT / 'emulator/qemu/cdj_c674x_packbits.c'), str(ROOT / 'emulator/qemu/cdj_c674x_mpy32.c'), str(ROOT / 'emulator/qemu/cdj_c674x_dp.c'), str(ROOT / 'emulator/qemu/cdj_c674x_approx.c'),
         str(ROOT / 'emulator/qemu/cdj_c674x_sp.c'),
         str(ROOT / 'emulator/qemu/cdj_c674x_control.c'),
-        str(ROOT / 'emulator/qemu/cdj_c674x_loop.c'), '-o', str(binary)], check=True)
+        str(ROOT / 'emulator/qemu/cdj_c674x_loop.c'), '-o', str(binary), '-lm'], check=True)
     subprocess.run([str(binary)], check=True, timeout=10)
 
 
@@ -422,7 +422,7 @@ def test_c674x_no_word_reaches_two_dispatch_rows(tmp_path):
         str(ROOT / 'emulator/qemu/cdj_c674x_mpy32.c'),
         str(ROOT / 'emulator/qemu/cdj_c674x_dp.c'), str(ROOT / 'emulator/qemu/cdj_c674x_approx.c'),
         str(ROOT / 'emulator/qemu/cdj_c674x_loop.c'),
-        '-o', str(binary)], check=True)
+        '-o', str(binary), '-lm'], check=True)
     out = subprocess.run([str(binary)], check=True, timeout=300,
                          capture_output=True, text=True).stdout
     lines = out.splitlines()
