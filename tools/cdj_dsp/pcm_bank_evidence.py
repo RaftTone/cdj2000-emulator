@@ -14,8 +14,12 @@ BASE = 0x118381e0
 STRIDE = 0x3cc0
 
 def digest(path):
+    # hashlib.file_digest is Python 3.11+; BUILD.md promises 3.10.
+    h = hashlib.sha256()
     with path.open('rb') as f:
-        return hashlib.file_digest(f, 'sha256').hexdigest()
+        for chunk in iter(lambda: f.read(1024 * 1024), b''):
+            h.update(chunk)
+    return h.hexdigest()
 
 def report(run, wav, events):
     gate = json.loads((run/'gate.json').read_text())
