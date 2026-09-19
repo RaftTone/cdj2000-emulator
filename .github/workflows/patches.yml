@@ -1,5 +1,8 @@
 name: patches apply
 
+permissions:
+  contents: read
+
 on:
   push:
   pull_request:
