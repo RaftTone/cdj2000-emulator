@@ -19,6 +19,7 @@ from __future__ import annotations
 import contextlib
 import io
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -100,11 +101,15 @@ class GateRunsBeforeAnythingStartsTests(unittest.TestCase):
             started.append("popen")
             raise SystemExit(0)                  # stop before the real work
 
-        with mock.patch.object(view_ui, "coverage",
+        # view_vm refuses to start without a MAIN flash image (QEMU would drop
+        # a missing -bios silently); CI has no firmware, so hand it a stand-in.
+        with tempfile.NamedTemporaryFile(suffix=".bin") as image, \
+             mock.patch.object(view_ui, "coverage",
                                return_value=([], ["19.0"], [])), \
              mock.patch.object(view_vm.subprocess, "Popen", note_popen), \
              mock.patch.object(sys, "argv",
-                               ["view_vm", "--ignore-coverage"]), \
+                               ["view_vm", "--ignore-coverage",
+                                "--firmware", image.name]), \
              contextlib.redirect_stdout(said):
             with self.assertRaises(SystemExit):
                 view_vm.main()
