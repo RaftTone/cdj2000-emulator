@@ -38,3 +38,11 @@ Thumbs.db
 
 # Local MAIN stderr capture
 /vm-main-stderr.log
+# boot_vm's per-port logs when TEMP is the checkout: MAIN's and the GUI's own
+# console text, so firmware-derived like everything under /runs/
+/vm-main*.log
+/vm-gui*.log
+/vm-console*.txt
+
+# Local build logs
+/build-*.log

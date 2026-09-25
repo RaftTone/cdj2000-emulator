@@ -713,6 +713,153 @@ cursor moves. Pitch, jog, cue and loop are not in the model's position yet
 (it only runs, at nominal speed), and beat grid and phase meter are the next
 things to trace from the GUI side. There is no audio path.
 
+**Both boards in one guest time (co-simulation).** The GUI simulator runs about
+thirty million instructions a second where the BF531 runs four hundred, and on the
+wall clock that speed was part of the protocol: MAIN allows the GUI 3 ms per answer,
+falls back to forced sends when it is late and resets it after ~7 s (E-8709). With
+`--cosim` each board keeps guest time of its own -- MAIN under `-icount`, the GUI on
+`BFIN_TIME_BASE=virtual` -- and `emulator/qemu/cdj2000_cosim.c` keeps them together
+over one connection on PORT+5 with a 100 us link latency, so the GUI answers in its
+own time as on the chip, however long the host takes. Both skip idle time; a run goes
+at 0.4-0.7x real time.
+
+```
+python -m tools.cdj_main.boot_vm --cosim --sd CARD ...          # stock pair
+python -m tools.cdj_main.nxs_vm RUN --cosim ...                 # NXS GUI, cdj2000-main
+python -m tools.cdj_main.cosim_scenario --card CARD --playlist-row 4 --out runs/cosim/NAME [--show]
+python -m tools.cdj_main.cosim_scenario --card CARD --out runs/cosim/NAME --manual --show
+```
+
+`cosim_scenario` is the track-load self-test: it boots the stock pair on its own
+ports (6480.. by default; it refuses busy ones), presses its way from the SD library
+to a playlist's track, loads it and presses PLAY, each step waiting for the event it
+causes, and checks that MAIN's status records carry a running time (words 5..8). It
+writes a table (`REPORT.md`), a frame per step and the logs. 2026-09-23, stock MAIN
+4.33 + GUI 4.20, an MP3 from a rekordbox stick: library 13 s, playlist 16 s, track
+list 22 s, LOAD 26 s, load closed 74 s, PLAY 76 s, REMAIN counting 04:52 -> 04:41 by
+88 s of guest time (`runs/cosim/scenario-9`). `--manual --show` starts the same
+machine with the deck window and presses nothing.
+
+**Sound: the PCM tap.** `cosim_scenario --audio` records what MAIN streams into
+the DSP (`CDJ_DSP_STREAM_DUMP`) and where the position model says the deck is
+(`CDJ_DSP_TRANSPORT_LOG`, every 10 ms of guest time while it plays), and
+`tools/cdj_main/deck_audio.py` renders the two into `deck.wav`. For an MP3 the stream
+is the file's audio data itself: 8192-byte blocks in the two halves of the staging
+area (+0x81e0 / +0xbea0), each followed by a 24-byte tail (`0, 1, 0, 8, 0, 0` as u32),
+block n of record 1 = file offset 0x9a000 + 8192 n, the first block zeros. Joined per
+record and decoded with ffmpeg, then played by the transport log -- silence while the
+deck stands, jumps at CUE and loops, the tempo word as the rate. Measured 2026-09-23
+(`runs/cosim/audio-2`): 20 s after PLAY, correlation 1.0000 with the original file
+over 15 s, 22.7 ms in (the zero first block). This is not the DSP: no master tempo,
+EQ or effects, and a WAV track's PCM stream is not handled yet.
+
+`gui_update_check` is the gate for a GUI update file, the GUI board's counterpart of
+`safety_check`: in one guest time, stock MAIN 4.33 in the update key mode installs
+`--upd FILE` on the stock GUI 4.20 over the link, then the GUI running the new body,
+started from the flash that install left, takes the stock `C2KGUI.UPD` back. Each time
+the flash is dumped (the GUI exits by itself when MAIN's side of the link closes, which
+writes `BFIN_CFI_DUMP`) and must hold the file's body at 0x10000 byte for byte with
+sector 0 -- the CDJ-2000's GUI loader, in no update file -- and the top 16 KiB untouched.
+2026-09-23: PASS both ways for an NXS GUI body (Ver1.20 -> Ver4.20 on the rollback,
+992 records of 2048 bytes each way). Beyond it: the real sector-0 loader (not dumped)
+and a power cut while programming.
+
+**More of the player's own paths (2026-09-24).** `cosim_scenario --usb` plugs the
+card image in as a USB stick instead of the SD card (USB SOURCE key at 12 s); stock
+4.33 loads, plays and counts from it (`runs/cosim/usb-7`), writes included: MAIN writes
+to the stick at boot and at a load, and those writes used to STALL for good. Two USB
+host rules fixed that: a DMA-filled OUT buffer goes on the bus in the host's schedule
+(a microframe later), not the moment the DMAC is done, so the driver's own BVAL after
+the DMA meets a full buffer instead of sending a zero-length packet; and CURPIPE = 0 on
+D0FIFO/D1FIFO selects no pipe, so a transfer the driver starts before it picks the
+pipe waits for it. `CDJ_USBH_TRACE=scsi` prints the mass-storage commands and their
+statuses only; `=scsi+write` adds the full register trace for 1500 lines after the
+first WRITE(10).
+
+`--load2-row N` adds the next track while the first plays (steps `load2`, `stream2`);
+`--then KEY:SECONDS[,...]` presses more keys afterwards (NEW FIRMWARE's `nf_cosim`
+syntax). The DSP model now does what the DSP program does on the mid-manager command
+`+0x7cb0 = 1/2` (0x800429e0 -> 0x80034c08): the record table, both fill levels, the
+position report and the status blocks cleared, `+0x7cd4 = 0xff`. Before that a second
+LOAD (and a CALL to a memory cue) found the old levels still up and MAIN never sent
+the new stream (`CDJ_DSP_FLUSH=0` restores the old behaviour for an A/B). Still open
+after it: MAIN then re-opens stream buffer 2 every 40 ms, because the model does not
+fill the status blocks +0x8180/+0x81a0 (the record byte at +0x81a4 MAIN compares).
+
+**Jumps, cues and the next track (2026-09-24).** What MAIN 4.33 expects from the DSP
+beyond a plain load, each rule taken from MAIN's or the DSP program's code and now in the
+model (each can be switched off with its variable set to `0`, for an A/B):
+
+- *Jobs* (`CDJ_DSP_JOB`, `CDJ_DSP_JOB_ADVANCE`). MAIN's seek routine 0x041b699a moves the
+  deck to a target (a memory cue, the cue point) in steps: it posts a job through
+  `+0x7ba4 = 1`, `+0x7ba8` = a count of half frames (1/150 s; negative = backwards),
+  `+0x7bac` = a parameter, and reads `+0x7ba4` back until it is 0 (0x0419fef2). The count
+  is min(3/4 of the distance, the level on that side * 2), so the steps shrink: 204, 68,
+  23, 6, 1, 1 half frames on a jump to a cue at 15.26 s (`runs/cosim/cue-12`). The model
+  answers 0, moves the position by the count and moves the level from one side to the
+  other. Unanswered, the jump ended in E-8302 (000F) (reason -13, 0x041b6b7e).
+- *Levels.* `+0x7cd0` is the audio the DSP holds ahead of the position and `+0x7ccc` the
+  audio behind it, in CD frames (a backward job takes its count from `+0x7ccc`,
+  0x041b6a0e). Byte 1 of a class-1 header is the stream buffer (1 = ahead, 2 = behind;
+  byte 2 is open = 1 / data = 2); the model used byte 2, which booked all of the data
+  behind the position.
+- *The flush* (`CDJ_DSP_FLUSH`): `+0x7cb0 = 1/2` clears the DSP's record table, both levels,
+  the position report and the status blocks, and reports `+0x7cd4 = 0xff`.
+- *Seek fields:* a class-1 header of buffer 1 with `+0x8154/+0x8158/+0x815c` starts the
+  record at frame `+0x815c` plus `+0x8158` samples (1152-sample MPEG frames). It places the
+  deck only for the stream that named the record, before any job or state request: after a
+  jump has landed MAIN re-opens buffer 1 from another frame, and the deck stays on the cue.
+- *Slot 0 is the cue point:* in `+0x7c80 = 0x11/0x21` (stand at / play from), `+0x7c84` is
+  a slot number (0x80043ea8), not a position. Slot 0 is the track's start after a load and
+  where a jump landed. Hot-cue slots (1..) are not modelled yet.
+- *Event 5* (`CDJ_DSP_EVENTS`): posted after a record joins the DSP's table (0x8003079c)
+  and after each job, as the DSP does when its levels move.
+- *Status-block record bytes* (`CDJ_DSP_STATUS_RECORD`): the record of a stream open goes
+  into the low byte of `+0x81a4` (buffer 1) or `+0x8184` (buffer 2), which MAIN's stream
+  worker compares before and after an open (0x041ad1f2, 0x041ad374).
+
+With these, stock 4.33 on aconcert-1g does CALL > to a memory cue, PLAY from it, CUE back to
+it and PLAY again with no error (`runs/cosim/cue-13`), and a second LOAD while playing shows
+the new track with its overview and BPM and runs its time (`runs/cosim/load2-8`). Open: the
+second LOAD streams nothing new into buffer 1 when the next track was not preloaded, and
+the red NEEDLE label blinks during playback, which a real player does not do.
+
+**The link stall after TAG LIST was the GUI simulator's.** A list answer of exactly
+32 words (`拡張 SndSize=32W`) is a 64-byte payload, the length of a status record, and the
+live link took it for one: it carried the pending announcement onto the payload's bytes
+58..63, re-stamped them as a record, and kept the announcement pending, so the GUI never
+finished the receive and MAIN waited 5 s on every exchange after it ("bAnsReceive ...
+(Cmd=0x0)"). The receive's buffer says which it is -- a record goes to 0x00f00000, a
+payload to 0x00f00040 -- and the link now asks it (patch 14, installed in `bin/cdj-run`
+2026-09-24). On aconcert-1g the stall came on the first library browse; now the stock
+self-test passes there and TAG LIST, BROWSE, INFO, BROWSE keep 333 exchanges a second
+(`runs/cosim/b9-2`).
+
+**A jump to a cue.** After the flush stock MAIN re-streams from the cue with the DSP's
+own start fields on the first buffer-1 data header: +0x814c the byte, +0x8154 frames to
+decode and discard, +0x815c the first frame heard, +0x8158 samples into it (r55, CALL >
+to a memory cue: frame 532 + 1008 = 13.92 s). The model now puts the position there
+(`starts record N at frame F` in its log). Buffer 2 is not the deck's: loading track 2
+it gets the last second of track 1. MAIN re-opening buffer 2 every 40 ms is the open
+problem (the status block +0x81a0/+0x81a4 is empty in the model).
+
+`boot_vm --gui-flash FILE` boots the GUI from a flash image instead of an update file:
+the ELF is built from the boot stream in FILE at 0x10000 -- where the GUI's updater
+programs it -- and FILE is the CFI flash (`tools/cdj_gui/flash_boot.py`). So a
+`BFIN_CFI_DUMP` taken after an update can be the next run's GUI. The stock and NXS dumps
+of `runs/guiupd/check-1` rebuild the same ELF, byte for byte, as their update files, and
+the stock one boots to the browser (`runs/cosim/guiflash-1`). The board's sector-0 loader
+is still not run; nothing here has a dump of it.
+
+Three things made that possible besides the shared time, all in the same change: the
+GUI's 200-byte reads are its line drain after every record, and the zeros
+`run_headless` feeds them (`BFIN_SPORT_RX_ZERO_200`) kept the line from ever going
+quiet -- three seconds after every answer from MAIN, the old "3.7 s per step"
+(`--cosim` removes them); the DSP model names the record being played from the first
+stream open after a load (see `cdj_dsp_model_stream_open`), which is what the time
+display needs for compressed tracks; and the display is placed by the DMA's frame
+start (patch 14), which put the browser's title row back on screen.
+
 **The update file is not what the emulator boots, but the emulator can take
 it.** The board loads `firmware/main-firmware.bin` -- the address-zero flash
 image, decoded from `C2KMAIN.UPD` by `tools.cdj_gui.main_unpack` -- into its
@@ -927,8 +1074,15 @@ switch's sense line, whose absence made MAIN raise caution `0x92` "USB Error"
 every 50 polls), `CDJ_DSP_ACK` (the DSP model zeroes its control block once
 MAIN has seen it up and answers the request words a track load and its PCM
 stream write there; off, an experiment -- see "Loading a track"),
-`CDJ_DSP_TRACE` (firmware pages, mailbox, every acknowledged request, a
-per-second census of the control block, every event posted), `CDJ_DSP_EVENT_PROBE=<start s>[:<interval s>[:<codes>]]`
+`CDJ_DSP_TRACE` (firmware pages, mailbox, every acknowledged request -- the
+format command +0x8100 with its whole parameter block +0x8104..+0x8124 -- a
+per-second census of the control block, every event posted),
+`CDJ_DSP_READ_TRACE[=LO-HI,...]` (MAIN's reads of the window, which is RAM
+and otherwise leaves no trace: an overlay over the hex offset ranges, by
+default `7b80-7d00,8100-81e0`, reports each new word/PC pair as `new reader
++0x7ccc by pc 0x041be168` and a per-second `reads t=...: +OFF@PC=COUNT`
+census; a transfer's own copy counts as `dma`, gdb and monitor accesses not
+at all; slows those window pages), `CDJ_DSP_EVENT_PROBE=<start s>[:<interval s>[:<codes>]]`
 (post DSP event codes to MAIN on its interrupt line -- irq 0x7f, bit 24 of
 0xffd4005c, GPIO 0xfff10040 bit 4, the code in bytes 2/3 of window+0xffe8:
 byte 2 is the class the player task switches on, byte 3 a parameter --
