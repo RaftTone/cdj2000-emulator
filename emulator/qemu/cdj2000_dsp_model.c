@@ -45,6 +45,7 @@
 #define DSP_LEVEL_BUFFER1   0x7cd0
 #define DSP_LEVEL_BUFFER2   0x7ccc
 #define DSP_HEADER_COUNT    0x8144
+#define DSP_HOT_SLOTS       10      /* +0x7c80 slots: 0 the cue, 1.. hot cue A.., +5 for 0x12/0x22 */
 
 /* Transport states.  Named after what the deck does, not after a wire value —
    the wire values are still being measured. */
@@ -99,6 +100,7 @@ struct CdjDspModel {
     unsigned pos_state;                 /* 0 nothing loaded, 2 loaded/stopped, 3 playing */
     int64_t pos_ms;                     /* position of the deck, milliseconds */
     int64_t cue_ms;                     /* slot 0, the cue point: where 0x11/0x21 slot 0 go */
+    int64_t hot_ms[DSP_HOT_SLOTS];      /* slots 1..9 (hot cues): what 0x11/0x12 recorded, -1 empty */
     int64_t pos_last_ns;                /* last advance while playing */
     int64_t pos_print_ns;
     bool pos_standby;                   /* +0x7ba0 = 4 (cue standby): 0x21 does not run */
@@ -421,6 +423,9 @@ CdjDspModel *cdj_dsp_model_new(Chardev *external)
      * said 3 (PLAY), stands after 5, and starts at 0 with the load's closing 4.
      */
     model->pos_report = getenv("CDJ_DSP_POSITION") != NULL;
+    for (unsigned i = 0; i < DSP_HOT_SLOTS; i++) {
+        model->hot_ms[i] = -1;
+    }
     model->slot_period_ns = (int64_t)(getenv("CDJ_DSP_SLOT_PERIOD_MS")
         ? strtol(getenv("CDJ_DSP_SLOT_PERIOD_MS"), NULL, 0) : 500) * 1000000;
     /*
@@ -1292,53 +1297,87 @@ void cdj_dsp_model_tick(CdjDspModel *model, uint8_t *window, size_t length)
                 model->pos_ms = 0;
                 model->pos_state = 0;
                 model->loop_on = false;
+                /*
+                 * The DSP hands the word to 0x800429e0: 1 resets all ten
+                 * slot records (0x8002abc4: held flags 0x10024f70 cleared,
+                 * positions -1), 2 only the stream (0x8002ad84).  So a new
+                 * track forgets the hot cues and a jump or a hot cue call
+                 * (flush 2) keeps them.
+                 */
+                if (word == 1) {
+                    for (unsigned i = 0; i < DSP_HOT_SLOTS; i++) {
+                        model->hot_ms[i] = -1;
+                    }
+                }
                 fprintf(stderr, "cdj2000-dsp: +0x7cb0 = %d flushes the DSP: record table, "
-                        "levels and position report cleared, +0x7cd4 = 0xff t=%.3f\n",
-                        word, now / 1e9);
+                        "levels and position report cleared, +0x7cd4 = 0xff%s t=%.3f\n",
+                        word, word == 1 ? ", hot cue slots emptied" : "", now / 1e9);
             }
             stl_le_p(window + req->offset, 0);
             if (req->clear_result) {
                 stl_le_p(window + req->offset + 4, 0);
             }
             if (req->offset == 0x7c80 && model->pos_report && length >= 0x7c88
-                && (word == 0x11 || word == 0x21)) {
+                && (word == 0x11 || word == 0x12 || word == 0x21 || word == 0x22)) {
                 /*
                  * MAIN's DSP task 0x19fca2 (Ghidra, trackload-118) writes
                  * +0x7c80 = msg[0xb] with msg[0xc] in +0x7c84 for the codes
-                 * 0x11/0x12/0x21/0x22: a locate.  A CUE while playing sends
-                 * 0x11 (stop there), then the state request 4, then 0x21;
-                 * the PLAY after it sends state 2 and 0x21 (trackload-104,
-                 * 113, 117).  So 0x11 = stand at the position, 0x21 = run
-                 * from it unless the deck is in cue standby.  The position
-                 * parameter was 0 in every run so far (the cue at the start);
-                 * CD frames like +0x7c10 is the assumption.
+                 * 0x11/0x12/0x21/0x22.  A CUE while playing sends 0x11, then
+                 * the state request 4, then 0x21; the PLAY after it sends
+                 * state 2 and 0x21 (trackload-104, 113, 117).  The stop there
+                 * is the 4's doing, not the 0x11's.
                  */
                 /*
                  * +0x7c84 is not a position but a SLOT: the DSP's handlers
                  * (0x80043ea8 for 0x11/0x12, 0x80043f20 for 0x21/0x22) take
-                 * +0x7c84 + 5 * bit 1 of the code as the slot and jump to
-                 * what it holds (0x8002cfb0).  Slot 0 is the cue point: at
-                 * the track's start after a load, and where a jump to a cue
-                 * landed (the stream-open start plus the jobs, see
-                 * cdj_dsp_model_stream_seek) -- after the jobs converged on
-                 * a memory cue MAIN sends 0x11 with slot 0 (cue-12).  Other
-                 * slots (the hot cues, set by +0x7c9c) are not modelled yet:
-                 * a jump to one leaves the position where it is.
+                 * +0x7c84 + 5 * bit 1 of the code as the slot.  Slot 0 is the
+                 * cue point: at the track's start after a load, and where a
+                 * jump to a cue landed (the stream-open start plus the jobs,
+                 * see cdj_dsp_model_stream_seek) -- after the jobs converged
+                 * on a memory cue MAIN sends 0x11 with slot 0 (cue-12).
+                 */
+                /*
+                 * hc-1 (stock 4.33, track 836, live): slot 1 is hot cue A,
+                 * 2 is B.  0x11/0x12 RECORD a slot: 0x80043ea8 fills it from
+                 * the running play state (0x8002cfb0 -> 0x8002ca88) only if
+                 * it is not held yet (0x10024f70[slot]) and leaves the play
+                 * state alone -- REC MODE (a short press) + A while playing
+                 * sends 0x11 slot 1 and MAIN goes on as playing (its next
+                 * PLAY is a pause, +0x7ba0 = 2).  0x21/0x22 JUMP to a held
+                 * slot (0x80043f20 queues it in 0x100255e0): A outside REC
+                 * sends +0x7c9c = 0x2c, +0x7ba0 = 2, 0x21 slot 1 and plays
+                 * on from A.  Slot 0 keeps its own bookkeeping: the cue is
+                 * where the load's seek and the jobs put it (cue_ms).
                  */
                 uint32_t slot = ldl_le_p(window + 0x7c84) + ((word & 2) ? 5 : 0);
+                bool jump = (word & 0xf0) == 0x20;
+                const char *what;
 
                 if (slot == 0) {
                     model->pos_ms = model->cue_ms;
+                    what = " (the cue)";
+                } else if (slot >= DSP_HOT_SLOTS) {
+                    what = " (no such slot, ignored)";
+                } else if (!jump) {
+                    if (model->hot_ms[slot] < 0) {
+                        model->hot_ms[slot] = model->pos_ms;
+                        what = " recorded here";
+                    } else {
+                        what = " already held, kept";
+                    }
+                } else if (model->hot_ms[slot] >= 0) {
+                    model->pos_ms = model->hot_ms[slot];
+                    what = " (a hot cue)";
+                } else {
+                    what = " is empty: position kept";
                 }
                 model->pos_last_ns = now;
-                if (word == 0x21 && !model->pos_standby) {
-                    model->pos_state = 3;
-                } else {
-                    model->pos_state = 2;
+                if (jump && slot < DSP_HOT_SLOTS
+                    && (slot == 0 || model->hot_ms[slot] >= 0)) {
+                    model->pos_state = model->pos_standby ? 2 : 3;
                 }
                 fprintf(stderr, "cdj2000-dsp: +0x7c80 = 0x%x slot %u%s -> position state %u "
-                        "at %" PRId64 " ms%s t=%.3f\n", word, slot,
-                        slot ? " (not modelled, position kept)" : " (the cue)",
+                        "at %" PRId64 " ms%s t=%.3f\n", word, slot, what,
                         model->pos_state, model->pos_ms,
                         model->pos_standby ? " (standby)" : "", now / 1e9);
             }
@@ -1367,7 +1406,22 @@ void cdj_dsp_model_tick(CdjDspModel *model, uint8_t *window, size_t length)
                 int64_t point_ms = (int64_t)half * 1000 / 150 + sub * 1000 / 44100;
                 const char *effect = "position untouched";
 
-                if ((word & 0xf) == 1) {
+                /*
+                 * The nibble is the slot + 1 (0x80044054: n - 1).  Stock's
+                 * loop IN/OUT use n = 1, the cue slot (runs/cosim/loop-nibble:
+                 * OUT = 0x12); calling hot cue B from the card sends 0x31
+                 * command 1 with B's point (hc-1: (1, 102, 2218, 1) =
+                 * 14788 ms, B = 14789) and then jumps to slot 2 -- so for
+                 * n >= 2 command 1 is where that hot cue's slot starts.
+                 */
+                unsigned seg_slot = ((word >> 4) & 0xf) ? ((word >> 4) & 0xf) - 1 : 0;
+
+                if ((word & 0xf) == 1 && seg_slot >= 1 && seg_slot < DSP_HOT_SLOTS) {
+                    model->hot_ms[seg_slot] = point_ms;
+                    effect = "hot cue slot point";
+                } else if ((word & 0xf) == 2 && seg_slot >= 1) {
+                    effect = "hot cue slot end, not modelled";
+                } else if ((word & 0xf) == 1) {
                     model->loop_in_ms = point_ms;
                     model->loop_on = false;
                     effect = "loop IN";

@@ -809,9 +809,16 @@ model (each can be switched off with its variable set to `0`, for an A/B):
   record at frame `+0x815c` plus `+0x8158` samples (1152-sample MPEG frames). It places the
   deck only for the stream that named the record, before any job or state request: after a
   jump has landed MAIN re-opens buffer 1 from another frame, and the deck stays on the cue.
-- *Slot 0 is the cue point:* in `+0x7c80 = 0x11/0x21` (stand at / play from), `+0x7c84` is
-  a slot number (0x80043ea8), not a position. Slot 0 is the track's start after a load and
-  where a jump landed. Hot-cue slots (1..) are not modelled yet.
+- *Cue and hot cue slots:* in `+0x7c80`, `+0x7c84` is a slot number, not a position (plus 5
+  for 0x12/0x22). On stock 4.33, slot 0 is the cue point, 1 is hot cue A and 2 is B.
+  `0x11/0x12` *record* a slot at the running position if it is not held yet (0x80043ea8)
+  and leave the play state alone: REC MODE + A while playing keeps playing.
+  `0x21/0x22` *jump* to a held slot and play, unless the deck is in cue standby
+  (0x80043f20). A hot cue called from the card (CALL held, then B) arrives as
+  `+0x7c9c = 0x31` command 1 with B's point, then `0x21` slot 2; the model records that
+  point, so B can be jumped to again later. `+0x7cb0 = 1` (a new track) empties the slots
+  and `+0x7cb0 = 2` keeps them (0x800429e0). Slot 0 keeps its own bookkeeping: the
+  track's start after a load, and where a jump landed.
 - *Event 5* (`CDJ_DSP_EVENTS`): posted after a record joins the DSP's table (0x8003079c)
   and after each job, as the DSP does when its levels move.
 - *Status-block record bytes* (`CDJ_DSP_STATUS_RECORD`): the record of a stream open goes
@@ -820,9 +827,15 @@ model (each can be switched off with its variable set to `0`, for an A/B):
 
 With these, stock 4.33 on aconcert-1g does CALL > to a memory cue, PLAY from it, CUE back to
 it and PLAY again with no error (`runs/cosim/cue-13`), and a second LOAD while playing shows
-the new track with its overview and BPM and runs its time (`runs/cosim/load2-8`). Open: the
-second LOAD streams nothing new into buffer 1 when the next track was not preloaded, and
-the red NEEDLE label blinks during playback, which a real player does not do.
+the new track with its overview and BPM and runs its time (`runs/cosim/load2-8`). On a
+track with hot cues (`runs/cosim/hc-2`): REC MODE + A records A at 9.82 s and the deck
+plays on, A jumps back there and plays, CALL + B streams from B and parks on it (14.788 s,
+B = 14.789 s), PLAY plays from B, and B again jumps to it. Open: the second LOAD streams
+nothing new into buffer 1 when the next track was not preloaded; after a hot cue jump
+MAIN's next PLAY sends `+0x7ba0 = 3`, as if the deck were paused (one PLAY press does
+nothing visible, the second pauses), which belongs to the still open meaning of the
+`+0x7ba0` requests 2 and 3; and the red NEEDLE label blinks during playback, which a real
+player does not do.
 
 **The link stall after TAG LIST was the GUI simulator's.** A list answer of exactly
 32 words (`拡張 SndSize=32W`) is a 64-byte payload, the length of a status record, and the
