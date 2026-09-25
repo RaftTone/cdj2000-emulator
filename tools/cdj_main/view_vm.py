@@ -121,6 +121,10 @@ def main() -> int:
                         help="pixel zoom; the panel is 480x234")
     parser.add_argument("--no-main", action="store_true",
                         help="GUI only, against the replayed record stream")
+    parser.add_argument("--firmware", default=str(FIRMWARE / "main-firmware.bin"),
+                        help="the MAIN flash image to boot, e.g. one written "
+                             "by tools.cdj_main.repack_main (default "
+                             "firmware/main-firmware.bin)")
     parser.add_argument("--sd", default=os.environ.get("CDJ_SD_IMAGE"),
                         help="FAT32 card image; build one with "
                              "tools.cdj_main.make_sd_image")
@@ -168,6 +172,12 @@ def main() -> int:
     # the window sits on the boot screen at 0.6 fps for as long as you leave
     # it.  That failure has now cost two evenings and been diagnosed twice as
     # "the emulator is slow".  It is checkable in a millisecond.
+    # The same trap as the card below: QEMU refuses a missing -bios on the
+    # stderr nobody reads, and the window waits on the boot screen.
+    if not args.no_main and not Path(args.firmware).exists():
+        print("view_vm: no MAIN flash image at %s" % args.firmware)
+        return 2
+
     if args.sd and not Path(args.sd).exists():
         print("view_vm: no card image at %s" % args.sd)
         print("  MAIN would exit before the GUI ever reached it, and the "
@@ -198,7 +208,7 @@ def main() -> int:
         board = subprocess.Popen(
             [
                 str(QEMU), "-M", "cdj2000-main",
-                "-bios", str(FIRMWARE / "main-firmware.bin"),
+                "-bios", str(args.firmware),
                 "-display", "none", "-no-reboot",
                 "-d", "unimp", "-D", str(main_log),
                 "-serial", f"tcp:127.0.0.1:{PORT},server,nowait",

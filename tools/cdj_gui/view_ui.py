@@ -1462,7 +1462,11 @@ class UiViewer:
             self.long_press(control)
             return
         if control.kind == "button" and control.input_id is not None:
-            if getattr(self.args, "nxs_panel", False):
+            if getattr(self.args, "click_hold_ms", None):
+                self.press(control, self.args.click_hold_ms,
+                           "a short click; the screen follows when the GUI "
+                           "has answered")
+            elif getattr(self.args, "nxs_panel", False):
                 self.press(control, NXS_CLICK_HOLD_MS,
                            "observe browser status and the framebuffer")
             else:
@@ -1936,6 +1940,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="device label in the window header")
     parser.add_argument("--nxs-panel", action="store_true",
                         help="use verified NXS persistent SD-lid contact semantics")
+    parser.add_argument("--click-hold-ms", type=int, default=None,
+                        help="how long an ordinary click holds a key (Shift-click "
+                             "stays the long press).  The default is %d ms, sized "
+                             "for MAIN's 3 s idle record cadence; with the GUI on "
+                             "BFIN_LINK_FRESH_ONLY every record reaches it and "
+                             "that much is a *held* key -- the browse knob then "
+                             "shows the long-press arrows instead of entering.  "
+                             "150 is a click there" % WINDOW_HOLD_MS)
     parser.add_argument("--skin", choices=("device", "lab"), default="device",
                         help="'device' draws the CDJ-2000 front panel around "
                              "the picture; 'lab' is the bit-level window, "

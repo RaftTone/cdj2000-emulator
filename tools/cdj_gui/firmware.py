@@ -125,31 +125,36 @@ class GuiUpdate:
         return BLACKFIN_BF531_ENTRY_POINT
 
     def memory_spans(self) -> tuple[MemorySpan, ...]:
-        memory: dict[int, int] = {}
-        for block in self.blocks:
-            if not block.loaded:
-                continue
-            payload = bytes(block.count) if block.is_zero_fill else block.data
-            for offset, value in enumerate(payload):
-                memory[block.target + offset] = value
+        return blocks_memory_spans(self.blocks)
 
-        if not memory:
-            return ()
 
-        spans: list[MemorySpan] = []
-        addresses = sorted(memory)
-        start = addresses[0]
-        previous = start
-        values = bytearray([memory[start]])
-        for address in addresses[1:]:
-            if address != previous + 1:
-                spans.append(MemorySpan(start, bytes(values)))
-                start = address
-                values = bytearray()
-            values.append(memory[address])
-            previous = address
-        spans.append(MemorySpan(start, bytes(values)))
-        return tuple(spans)
+def blocks_memory_spans(blocks: Iterable[BootBlock]) -> tuple[MemorySpan, ...]:
+    """What a boot stream leaves in memory, as contiguous spans."""
+    memory: dict[int, int] = {}
+    for block in blocks:
+        if not block.loaded:
+            continue
+        payload = bytes(block.count) if block.is_zero_fill else block.data
+        for offset, value in enumerate(payload):
+            memory[block.target + offset] = value
+
+    if not memory:
+        return ()
+
+    spans: list[MemorySpan] = []
+    addresses = sorted(memory)
+    start = addresses[0]
+    previous = start
+    values = bytearray([memory[start]])
+    for address in addresses[1:]:
+        if address != previous + 1:
+            spans.append(MemorySpan(start, bytes(values)))
+            start = address
+            values = bytearray()
+        values.append(memory[address])
+        previous = address
+    spans.append(MemorySpan(start, bytes(values)))
+    return tuple(spans)
 
 
 def crc16_xmodem(data: bytes) -> int:

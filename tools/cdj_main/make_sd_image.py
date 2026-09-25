@@ -24,6 +24,7 @@ this text claimed only 8.3 names were written; the code never did that.)
 from __future__ import annotations
 
 import argparse
+import mmap
 import struct
 import sys
 from pathlib import Path
@@ -69,8 +70,11 @@ def short_name(name: str, taken: set[bytes]) -> bytes:
     stem, _, ext = name.rpartition(".")
     if not stem:
         stem, ext = name, ""
-    stem = "".join(c for c in stem.upper() if c not in BAD)
-    ext = "".join(c for c in ext.upper() if c not in BAD)[:3]
+    # A short name is ASCII: `RÜFÜS` or a Cyrillic title keeps its real name
+    # in the long-name entries only, and the 8.3 field gets `_` in its place,
+    # as Windows does.
+    stem = "".join(c if c.isascii() else "_" for c in stem.upper() if c not in BAD)
+    ext = "".join(c if c.isascii() else "_" for c in ext.upper() if c not in BAD)[:3]
     # Compare against the upper-cased original: 8.3 is case-insensitive and is
     # stored upper-case, so `export.pdb` is a perfectly good short name.
     # Comparing against `name` itself only ever matched already-upper-case
@@ -114,7 +118,7 @@ def lfn_entries(name: str, short: bytes) -> list[bytes]:
 
 
 class Builder:
-    def __init__(self, total_bytes: int):
+    def __init__(self, total_bytes: int, path: Path | None = None):
         self.total_sectors = total_bytes // SECTOR
         self.part_sectors = self.total_sectors - PART_LBA
         clusters = self.part_sectors // CLUSTER_SECTORS
@@ -122,7 +126,16 @@ class Builder:
         self.fat_sectors = ((clusters + 2) * 4 + SECTOR - 1) // SECTOR
         self.data_start = RESERVED + 2 * self.fat_sectors
         self.max_cluster = (self.part_sectors - self.data_start) // CLUSTER_SECTORS
-        self.image = bytearray(total_bytes)
+        if path is None:
+            self.image = bytearray(total_bytes)
+        else:
+            # Written in place through a mapping of a sparse file: a 4 GiB
+            # card held as a bytearray, and then copied by bytes() to write
+            # it out, costs twice its size in memory.
+            with open(path, "wb") as created:
+                created.truncate(total_bytes)
+            self._file = open(path, "r+b")
+            self.image = mmap.mmap(self._file.fileno(), total_bytes)
         self.fat = [0] * (self.max_cluster + 2)
         self.fat[0], self.fat[1] = 0x0FFFFFF8, 0x0FFFFFFF
         self.next_cluster = 2
@@ -248,13 +261,13 @@ def main() -> int:
     parser.add_argument("--size", default="512M")
     args = parser.parse_args()
 
-    builder = Builder(parse_size(args.size))
+    builder = Builder(parse_size(args.size), args.image)
     root = builder.alloc(1)[0]
     if root != 2:
         raise SystemExit("root cluster must be 2")
     builder.add_dir(args.source, root, 0, is_root=True)
     builder.finish()
-    args.image.write_bytes(bytes(builder.image))
+    builder.image.flush()
 
     print("%s: %d bytes, %d clusters used of %d"
           % (args.image, len(builder.image), builder.next_cluster - 2,

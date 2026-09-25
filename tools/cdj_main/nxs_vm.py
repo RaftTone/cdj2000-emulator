@@ -579,6 +579,18 @@ def main():
                         help='enable run-local QMP and localhost GDB on --port + 3')
     parser.add_argument('--debug-paused', action='store_true',
                         help='with --debug, hold MAIN at reset until debugger/resume; GUI time still runs')
+    parser.add_argument('--cosim', action='store_true',
+                        help='both boards in one guest time (emulator/qemu/cdj2000_cosim.c): '
+                             'MAIN under -icount and started with the GUI, the GUI on its '
+                             'virtual time base, the link on --port + 5 with a fixed latency; '
+                             'needs a machine with the CDJ-2000 link (cdj2000-main)')
+    parser.add_argument('--cosim-quantum-us', type=int, default=100,
+                        help='--cosim link latency and lookahead in microseconds (100)')
+    parser.add_argument('--cosim-shift', type=int, default=2,
+                        help='--cosim: MAIN runs 2^N ns per instruction (-icount shift=N)')
+    parser.add_argument('--panel-rev2', action='store_true',
+                        help='the GUI board reads PF3 = 1, the late "/2" panel revision '
+                             '(BFIN_GPIO_STRAP=0x8:0x8)')
     parser.add_argument('--lightweight', action='store_true',
                         help='capture DSP checkpoints only on faults; omit the event transcript')
     parser.add_argument('--sd', type=Path,
@@ -680,8 +692,16 @@ def main():
     run = automatic_run_path() if args.timestamp_run or args.run is None else (ROOT / args.run).resolve()
     if run.exists():
         parser.error(f'run directory already exists: {run}')
+    if args.cosim and args.qemu_sync_profile and not UNIX_CONTROL:
+        parser.error('--cosim takes --port + 5, which --qemu-sync-profile uses for the monitor here')
     try:
         occupied = occupied_local_ports(args.port, args.debug)
+        if args.cosim:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                try:
+                    probe.bind(('127.0.0.1', args.port + 5))
+                except OSError:
+                    occupied.append(args.port + 5)
     except PermissionError as error:
         parser.error(f'localhost port preflight unavailable: {error}; grant socket probe permission or choose a permitted environment')
     except OSError as error:
@@ -762,8 +782,12 @@ def main():
         else:
             main_command += ['-qmp', f'tcp:{qmp_endpoint},server=on,wait=off',
                              '-gdb', f'tcp:127.0.0.1:{args.port + 3}']
-        if args.debug_paused:
+        if args.debug_paused and not args.cosim:
             main_command += ['-S']
+    if args.cosim:
+        # MAIN's time is its instruction count, and it waits paused until the
+        # GUI connects, so both boards start at guest time 0.
+        main_command += ['-icount', f'shift={args.cosim_shift},sleep=off', '-S']
     if args.ethernet_peer_port is None:
         main_command += ['-nic', 'none']
     else:
@@ -787,8 +811,14 @@ def main():
         BFIN_MAIN_LINK=args.gui_link or f'127.0.0.1:{args.port}',
         BFIN_MAIN_LINK_DUMP=str(run / 'main-link.bin'), BFIN_GPIO5_READY_TOGGLE='1',
         BFIN_STATS='5', BFIN_EXCEPTION_TRACE='1', BFIN_EXIT_AFTER_WALL=str(args.seconds))
-    if args.fresh_link:
+    if args.fresh_link or args.cosim:
+        # --cosim: a wire delivers what MAIN sent, once (see boot_vm --cosim).
         overrides['BFIN_LINK_FRESH_ONLY'] = '1'
+    if args.panel_rev2:
+        overrides['BFIN_GPIO_STRAP'] = '0x8:0x8'
+    if args.cosim:
+        overrides['BFIN_COSIM'] = f'127.0.0.1:{args.port + 5}'
+        overrides['BFIN_COSIM_QUANTUM_US'] = str(args.cosim_quantum_us)
     if args.trace_link_tx:
         overrides['BFIN_SPORT_TX_OUTPUT'] = str(run / 'gui-link-tx.bin')
     # Do not inherit replay/proxy data or a firmware shortcut from the shell.
@@ -796,6 +826,9 @@ def main():
     gui_env.update(overrides)
     main_env = {k:v for k,v in os.environ.items() if not k.startswith('CDJ_')}
     main_env['CDJ_INPUT_PORT'] = str(args.port + 4)
+    if args.cosim:
+        main_env['CDJ_COSIM'] = str(args.port + 5)
+        main_env['CDJ_COSIM_QUANTUM_US'] = str(args.cosim_quantum_us)
     main_env['CDJ_PANEL_FRAME'] = neutral_frame().hex()
     main_env['CDJ_NXS_SD_LID'] = 'closed'
     if args.trace_bus:

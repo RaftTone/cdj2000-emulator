@@ -1447,7 +1447,7 @@ def main(argv: list[str] | None = None) -> int:
                        help="milliseconds to hold the bit down; default %d "
                             "(%s).  The board's own default is %d ms, at which "
                             "0 of 24 measured presses reached a status record"
-                            % (PLAN_HOLD_MS, PLAN_HOLD_SOURCE,
+                            % (PLAN_HOLD_MS, PLAN_HOLD_SOURCE.replace("%", "%%"),
                                CHANNEL_HOLD_DEFAULT_MS))
     press.add_argument("--repeat", type=int, default=1)
     press.add_argument("--gap", type=float, default=0.0,
@@ -1545,7 +1545,7 @@ def main(argv: list[str] | None = None) -> int:
                            "(%s); below %d ms the measured delivery into a "
                            "status record is 0 of 27 and this refuses to emit "
                            "the plan"
-                           % (PLAN_HOLD_MS, PLAN_HOLD_SOURCE,
+                           % (PLAN_HOLD_MS, PLAN_HOLD_SOURCE.replace("%", "%%"),
                               HOLD_DELIVERY_FLOOR_MS))
 
     args = parser.parse_args(argv)

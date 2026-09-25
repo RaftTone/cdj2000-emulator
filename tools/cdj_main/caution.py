@@ -681,11 +681,17 @@ def trace_thread(port: int, addresses: list[int], budget: int,
     before 2026-08-07 therefore says only "this address was reached", never how
     often and never with a second argument set.
     """
-    try:
-        stub = Stub(port, timeout=10.0)
-    except OSError as error:
-        print("# trace: cannot reach the stub: %s" % error)
-        return
+    # QEMU opens the stub a moment after it starts; keep knocking for a while.
+    deadline = time.monotonic() + 15.0
+    while True:
+        try:
+            stub = Stub(port, timeout=10.0)
+            break
+        except OSError as error:
+            if time.monotonic() > deadline or stop.is_set():
+                print("# trace: cannot reach the stub: %s" % error)
+                return
+            time.sleep(0.2)
     placed = []
     watched = []
     started = time.monotonic()
@@ -723,6 +729,15 @@ def trace_thread(port: int, addresses: list[int], budget: int,
             if len(regs) > REG_PR:
                 pc = regs[REG_PC]
                 key = (pc, regs[4], regs[5], regs[6], regs[7], regs[REG_PR])
+                # CDJ_TRACE_PEEK=<offset>: also the word at r4 + offset -- the
+                # field of the object a method was handed, which the argument
+                # registers alone never show.
+                peek = os.environ.get("CDJ_TRACE_PEEK")
+                if peek:
+                    reply = stub.command("m%x,4" % ((regs[4] + int(peek, 0)) & 0xFFFFFFFF))
+                    word = (int.from_bytes(bytes.fromhex(reply), "little")
+                            if len(reply) == 8 and not reply.startswith("E") else -1)
+                    key = key + (word,)
                 record = hits.get(key)
                 if record is None:
                     # [count, first seen, last seen], both in seconds since the

@@ -197,6 +197,16 @@ POLL_HEADER = ("elapsed", "panel", "guicom", "ready", "ready4", "rtos",
 # sent through the P2 window (`0xa0000000`), which is untranslated and uncached:
 # a P0 address would need the guest's TLB to agree, and a cached one would let
 # MAIN keep reading a stale line.
+def console_chardev(setting: str | None, log: Path) -> str:
+    """The QEMU chardev for MAIN's console SCIF: off, a log file, or a TCP
+    server when CDJ_DEBUG_CONSOLE is "tcp:HOST:PORT"."""
+    if not setting:
+        return "null"
+    if setting.startswith("tcp:"):
+        return setting if ",server" in setting else setting + ",server,nowait"
+    return f"file:{log}"
+
+
 def gdb_poke(port: int, address: int, value: int, size: int = 4) -> str:
     payload = value.to_bytes(size, "little").hex()
     body = "M%x,%x:%s" % (0xA0000000 | (address & 0x1FFFFFFF), size, payload)
@@ -355,6 +365,22 @@ def main() -> int:
     parser.add_argument("--no-peer", action="store_true",
                         help="serve the GUI from the live MAIN board alone, "
                              "without the canned bootstrap records")
+    parser.add_argument("--cosim", action="store_true",
+                        help="both boards in one guest time "
+                             "(emulator/qemu/cdj2000_cosim.c): MAIN under "
+                             "-icount, started with the GUI, the GUI on its "
+                             "virtual time base, the link on port PORT+5 with "
+                             "a fixed latency.  Neither board then depends on "
+                             "the other simulator's speed; implies --no-peer")
+    parser.add_argument("--cosim-quantum-us", type=int, default=100,
+                        metavar="US",
+                        help="--cosim link latency and lookahead (100)")
+    parser.add_argument("--cosim-shift", type=int, default=2, metavar="N",
+                        help="--cosim: MAIN runs 2^N ns per instruction "
+                             "(-icount shift=N); 2 is 250 MIPS")
+    parser.add_argument("--gui-board", metavar="FILE",
+                        help="the GUI simulator's board file (run_headless --board), "
+                             "e.g. one whose flash is the dump of an earlier update run")
     parser.add_argument("--gui-env", action="append", default=[],
                         metavar="NAME=VALUE",
                         help="extra environment variable for the Blackfin "
@@ -369,6 +395,11 @@ def main() -> int:
     parser.add_argument("--gui-elf", metavar="FILE",
                         help="boot-memory ELF for the Blackfin simulator; pass "
                              "the matching BFIN_FAST_LZSS/_SHIFT via --gui-env")
+    parser.add_argument("--gui-flash", metavar="FILE",
+                        help="boot the GUI from this 2 MiB flash image (e.g. a "
+                             "BFIN_CFI_DUMP after an update): the ELF is built from "
+                             "the boot stream in it at 0x10000, and the file is the "
+                             "CFI flash too (tools/cdj_gui/flash_boot.py)")
     parser.add_argument("--watch", action="append", default=[],
                         metavar="ADDRESS[:WORDS]",
                         help="also read this address back at the end, e.g. "
@@ -487,6 +518,14 @@ def main() -> int:
                      "in separate runs")
 
     env = qemu_environment()
+    if args.cosim:
+        # The canned bootstrap records are a wall-clock stand-in for MAIN;
+        # in one guest time MAIN answers from its first record on.
+        args.no_peer = True
+        env = dict(env, CDJ_COSIM=str(PORT + 5),
+                   CDJ_COSIM_QUANTUM_US=str(args.cosim_quantum_us))
+        print(f"# cosim: one guest time, link on {PORT + 5}, latency "
+              f"{args.cosim_quantum_us} us, MAIN -icount shift={args.cosim_shift}")
     # The fixed names are what RUNNING.md and the notes refer to.  A run on a
     # non-default CDJ_LINK_PORT is a second machine beside the first, and it
     # must not delete or share the first one's logs.
@@ -495,6 +534,27 @@ def main() -> int:
     gui_log = TEMP / f"vm-gui{suffix}.log"
     console_log = TEMP / f"vm-console{suffix}.txt"
     frame = TEMP / f"vm-frame{suffix}.ppm"
+    if args.gui_flash:
+        from tools.cdj_gui.flash_boot import boot_from_flash
+
+        booted = TEMP / f"gui-flash{suffix}"
+        report = boot_from_flash(Path(args.gui_flash), booted)
+        args.gui_elf = str(booted / "gui-boot-memory.elf")
+        args.gui_board = str(booted / "gui-board.hw")
+        shift = report["resource_bank0_shift"]
+        if not any(v.startswith("BFIN_FAST_LZSS") for v in args.gui_env):
+            # The accelerator reads the flash at the addresses its table names,
+            # whatever is there: without the stock first bank in this flash it
+            # is switched off, not left on the stock image run_headless
+            # defaults to.
+            args.gui_env += ([f"BFIN_FAST_LZSS={Path(args.gui_flash).resolve()}",
+                              f"BFIN_FAST_LZSS_SHIFT={shift:#x}"] if shift is not None
+                             else ["BFIN_FAST_LZSS="])
+        print(f"# GUI:  from the flash {args.gui_flash}: {len(report['blocks'])} boot "
+              f"blocks at 0x10000..{report['stream_end']}, entry {report['entry']}, "
+              + (f"first resource bank {shift:+#x} from stock" if shift is not None
+                 else "no stock resource bank (the GUI unpacks its own)")
+              + " (the sector-0 loader is not run)")
     # A previous run that was killed rather than closed leaves its QEMU behind,
     # and that orphan still holds this log open.  Windows then refuses the
     # unlink with WinError 32, and an unhandled PermissionError names the file
@@ -545,14 +605,20 @@ def main() -> int:
             "-display", "none", "-no-reboot", "-d", "unimp", "-D", str(main_log),
             "-serial", f"tcp:127.0.0.1:{PORT},server,nowait",
             "-serial", f"tcp:127.0.0.1:{PORT + 2},server,nowait",
-            # MAIN's own console is the third SCIF.  It stays off unless
-            # CDJ_DEBUG_CONSOLE asks for it, exactly as on a stock player.
-            "-serial", (f"file:{console_log}" if os.environ.get("CDJ_DEBUG_CONSOLE")
-                        else "null"),
+            # MAIN's own console is the third SCIF (SCIF0, 0xffe00000).  It stays
+            # off unless CDJ_DEBUG_CONSOLE asks for it, exactly as on a stock
+            # player: any value logs it to a file, "tcp:HOST:PORT" serves it both
+            # ways, so the 232C command processor and, after its "CM 9", the
+            # stock Cente shell (tsk, d, lnk, ...) can be typed at.
+            "-serial", console_chardev(os.environ.get("CDJ_DEBUG_CONSOLE"), console_log),
             "-monitor", f"telnet:127.0.0.1:{PORT + 1},server,nowait",
             # Reading is the monitor's job; writing is the stub's.  It is always
             # offered and costs nothing until something connects.
             "-gdb", f"tcp:127.0.0.1:{PORT + 3}",
+            # --cosim: MAIN's time is its instruction count, and it waits
+            # paused until the GUI connects, so both boards start at 0.
+            *(["-icount", f"shift={args.cosim_shift},sleep=off", "-S"]
+              if args.cosim else []),
             *(args.qemu_arg or []),
             # The card is inserted a while after reset on purpose: the poller at
             # 0x1ff164 arms its mount gate only while the slot is empty, and the
@@ -658,6 +724,7 @@ def main() -> int:
                 "--seconds", str(args.seconds),
                 "--simulator", str(BFIN_SIM),
                 *(["--elf", args.gui_elf] if args.gui_elf else []),
+                *(["--board", args.gui_board] if args.gui_board else []),
                 "--packet", str(PACKETS / "status-standalone.bin"),
                 "--output", str(frame), "--log", str(gui_log),
                 # The TX dump reopens its file per record; the default lands
@@ -668,6 +735,21 @@ def main() -> int:
                 "--env", "BFIN_PARALLEL_WRITEBACK=1",
                 "--env", "BFIN_GUI_COLOR=rgb555le",
                 "--env", f"BFIN_MAIN_LINK=127.0.0.1:{PORT}",
+                *(["--env", f"BFIN_COSIM=127.0.0.1:{PORT + 5}",
+                   "--env", f"BFIN_COSIM_QUANTUM_US={args.cosim_quantum_us}",
+                   # The 200-byte reads are the GUI draining the line after
+                   # each record (0xb7ef40: it re-arms while bytes keep
+                   # coming and stops when the DMA count stands still).  A
+                   # quiet wire gives them nothing; zeros made it never go
+                   # quiet and cost 3 s after every answer from MAIN.
+                   "--env", "BFIN_SPORT_RX_ZERO_200=",
+                   # A wire delivers what MAIN sent, once.  Repeating the last
+                   # record and payload every retry was the wall clock's
+                   # stand-in for a MAIN that is always ahead; in one guest
+                   # time the GUI re-parsed the repeats, answered them, and
+                   # MAIN retransmitted the update's first payload 38 times.
+                   "--env", "BFIN_LINK_FRESH_ONLY=1"]
+                  if args.cosim else []),
                 # The GUI's interpreter is still thirty times slower than the
                 # real chip on real work, so an announcement-plus-payload
                 # transaction takes it longer than MAIN's status interval, and
@@ -846,11 +928,13 @@ def main() -> int:
             caution.report(words)
         if args.pmemsave:
             # The monitor splits its line on spaces, so the dump goes through
-            # a path without any and is moved afterwards.
+            # a path without any and is moved afterwards; and it reads the
+            # size as an expression, so an unquoted "/Users/..." after it is
+            # a division ("invalid char 'U' in expression").
             start, size, path = args.pmemsave.split(",", 2)
             staging = TEMP / f"pmemsave{suffix}.bin"
-            mon.sendall(f"pmemsave {int(start, 0):#x} {int(size, 0):#x} "
-                        f"{staging.as_posix()}\n".encode())
+            mon.sendall(f'pmemsave {int(start, 0):#x} {int(size, 0):#x} '
+                        f'"{staging.as_posix()}"\n'.encode())
             deadline = time.monotonic() + 30
             while time.monotonic() < deadline:
                 time.sleep(0.5)
@@ -894,11 +978,14 @@ def main() -> int:
             tracer.join(timeout=5)
         if trace_hits:
             print("\n# trace hits, first seen first, repeats counted")
-            for (entry, r4, r5, r6, r7, caller), record in trace_hits.items():
+            for key, record in trace_hits.items():
+                entry, r4, r5, r6, r7, caller = key[:6]
                 count, first, last = record
-                print("  0x%08x  r4=%#010x r5=%#010x r6=%#010x r7=%#010x "
+                peek = (" [r4+%s]=%#010x" % (os.environ.get("CDJ_TRACE_PEEK"), key[6])
+                        if len(key) > 6 else "")
+                print("  0x%08x  r4=%#010x r5=%#010x r6=%#010x r7=%#010x%s "
                       "from 0x%08x  x%-6d t%.1f..t%.1f"
-                      % (entry, r4, r5, r6, r7, caller, count, first, last))
+                      % (entry, r4, r5, r6, r7, peek, caller, count, first, last))
             print("  -- per address: "
                   + ", ".join("0x%08x x%d" % (address, total)
                               for address, total in sorted(
