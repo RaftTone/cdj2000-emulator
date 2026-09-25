@@ -186,7 +186,7 @@ def run_update(flash: Path, stick: Path, out: Path, name: str,
             time.sleep(2)
         took = time.monotonic() - started
         time.sleep(2)
-        monitor_command(f'pmemsave 0 {FLASH_SIZE:#x} "{dump}"')
+        monitor_command(f'pmemsave 0 {FLASH_SIZE:#x} "{dump.as_posix()}"')
         for _ in range(30):
             if dump.exists() and dump.stat().st_size == FLASH_SIZE:
                 break

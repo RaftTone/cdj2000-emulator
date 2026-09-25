@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import argparse
 import subprocess
-import tempfile
 import wave
 from pathlib import Path
 
@@ -51,12 +50,11 @@ def records(stream: Path) -> dict[int, bytes]:
 
 def decode(mp3: bytes) -> np.ndarray:
     """Stereo float32 at 44.1 kHz."""
-    with tempfile.NamedTemporaryFile(suffix=".mp3") as src:
-        src.write(mp3)
-        src.flush()
-        pcm = subprocess.run(["ffmpeg", "-v", "error", "-i", src.name, "-f", "s16le",
-                              "-ac", "2", "-ar", str(RATE), "-"],
-                             capture_output=True, check=True).stdout
+    # Through stdin: Windows will not let ffmpeg open a temporary file that
+    # is still open here.
+    pcm = subprocess.run(["ffmpeg", "-v", "error", "-f", "mp3", "-i", "pipe:0", "-f", "s16le",
+                          "-ac", "2", "-ar", str(RATE), "-"],
+                         input=mp3, capture_output=True, check=True).stdout
     return np.frombuffer(pcm, dtype="<i2").reshape(-1, 2).astype(np.float32) / 32768.0
 
 

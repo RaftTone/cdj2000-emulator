@@ -54,12 +54,39 @@
 #include "hw/core/cpu.h"
 #include "system/runstate.h"
 
+#include "cdj2000_cosim.h"
+
+#ifdef _WIN32
+/*
+ * The wire is plain BSD sockets and poll(), which MinGW does not have.  A
+ * Windows build keeps the entry points so MAIN links, and refuses CDJ_COSIM
+ * rather than running a co-simulation that cannot work.
+ */
+bool cdj_cosim_active(void)
+{
+    return false;
+}
+
+void cdj_cosim_send_record(const uint8_t *frame, unsigned len)
+{
+}
+
+bool cdj_cosim_init(CdjCosimRequestFn sink, CdjCosimPollFn poll, void *opaque)
+{
+    const char *spec = getenv("CDJ_COSIM");
+
+    if (spec && *spec) {
+        error_report("cdj2000-cosim: CDJ_COSIM is not supported on Windows");
+        exit(1);
+    }
+    return false;
+}
+#else
+
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
 #include <sys/socket.h>
-
-#include "cdj2000_cosim.h"
 
 enum { COSIM_TIME = 1, COSIM_RECORD = 2, COSIM_REQUEST = 3, COSIM_HELLO = 4 };
 #define COSIM_HEADER        20
@@ -514,3 +541,4 @@ bool cdj_cosim_init(CdjCosimRequestFn sink, CdjCosimPollFn poll, void *opaque)
             "%" PRId64 " us\n", cs.port, cs.quantum / 1000);
     return true;
 }
+#endif

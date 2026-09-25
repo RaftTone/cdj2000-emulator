@@ -892,7 +892,7 @@ def run_main_only(seconds: float, extra_env: dict[str, str], sd: str | None,
 
     if hits:
         print("\n# caution calls, first seen first, repeats counted")
-        for (entry, first, second, _r6, _r7, caller), record in hits.items():
+        for (entry, first, second, _r6, _r7, caller, *_peek), record in hits.items():
             count = record[0]
             if entry == 0x0424FD20:
                 code = DEVICE_CAUTION.get(first)

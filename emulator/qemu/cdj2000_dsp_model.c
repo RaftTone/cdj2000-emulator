@@ -536,6 +536,10 @@ void cdj_dsp_model_reset(CdjDspModel *model, uint8_t *window, size_t length)
     model->running = false;
     model->control_cleared = false;
     model->last_tick_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    /* a reset DSP reloads its program, and its slot records with it */
+    for (unsigned i = 0; i < DSP_HOT_SLOTS; i++) {
+        model->hot_ms[i] = -1;
+    }
     if (window) {
         /* A DSP being reset is not running, and must not claim to be. */
         stl_le_p(window + CDJ_DSP_MAIL_UP, 0);
@@ -1284,6 +1288,19 @@ void cdj_dsp_model_tick(CdjDspModel *model, uint8_t *window, size_t length)
                 /* a load begins, or the deck is unloaded: no stream open */
                 model->rec_count = 0;
             }
+            if (req->offset == 0x7cb0 && word == 1) {
+                /*
+                 * The DSP hands the word to 0x800429e0: 1 resets all ten
+                 * slot records (0x8002abc4: held flags 0x10024f70 cleared,
+                 * positions -1), 2 only the stream (0x8002ad84).  So a new
+                 * track forgets the hot cues and a jump or a hot cue call
+                 * (flush 2) keeps them -- also with CDJ_DSP_FLUSH=0, which
+                 * only switches off the window resets below.
+                 */
+                for (unsigned i = 0; i < DSP_HOT_SLOTS; i++) {
+                    model->hot_ms[i] = -1;
+                }
+            }
             if (req->offset == 0x7cb0 && (word == 1 || word == 2)
                 && model->flush_reset && length >= 0x81c8) {
                 memset(window + 0x7c10, 0, 0x20);       /* +0x7c10..+0x7c2c */
@@ -1297,18 +1314,6 @@ void cdj_dsp_model_tick(CdjDspModel *model, uint8_t *window, size_t length)
                 model->pos_ms = 0;
                 model->pos_state = 0;
                 model->loop_on = false;
-                /*
-                 * The DSP hands the word to 0x800429e0: 1 resets all ten
-                 * slot records (0x8002abc4: held flags 0x10024f70 cleared,
-                 * positions -1), 2 only the stream (0x8002ad84).  So a new
-                 * track forgets the hot cues and a jump or a hot cue call
-                 * (flush 2) keeps them.
-                 */
-                if (word == 1) {
-                    for (unsigned i = 0; i < DSP_HOT_SLOTS; i++) {
-                        model->hot_ms[i] = -1;
-                    }
-                }
                 fprintf(stderr, "cdj2000-dsp: +0x7cb0 = %d flushes the DSP: record table, "
                         "levels and position report cleared, +0x7cd4 = 0xff%s t=%.3f\n",
                         word, word == 1 ? ", hot cue slots emptied" : "", now / 1e9);
