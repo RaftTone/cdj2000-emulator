@@ -98,6 +98,7 @@ struct CdjDspModel {
     bool pos_report;
     unsigned pos_state;                 /* 0 nothing loaded, 2 loaded/stopped, 3 playing */
     int64_t pos_ms;                     /* position of the deck, milliseconds */
+    int64_t cue_ms;                     /* slot 0, the cue point: where 0x11/0x21 slot 0 go */
     int64_t pos_last_ns;                /* last advance while playing */
     int64_t pos_print_ns;
     bool pos_standby;                   /* +0x7ba0 = 4 (cue standby): 0x21 does not run */
@@ -105,6 +106,19 @@ struct CdjDspModel {
     int64_t loop_out_ms;
     bool loop_on;                       /* both points set; 0xc (flush) clears */
     uint32_t pos_record;                /* +0x8120 of the last +0x8100 command: the record id the report names */
+    uint32_t fmt_record;                /* +0x8120 of the last format command, any kind */
+    bool fmt_seen;
+    bool flush_reset;                   /* +0x7cb0 = 1/2 resets as 0x80034c08 does */
+    bool job_answer;                    /* +0x7ba4 = 1 (a job) answered with 0 */
+    bool job_consume;                   /* CDJ_DSP_JOB_CONSUME: the job empties buffer 1's level */
+    bool job_advance;                   /* CDJ_DSP_JOB_ADVANCE: ... and moves the position by it */
+    bool events;                        /* CDJ_DSP_EVENTS: post event 5 as the DSP does */
+    bool status_record;                 /* CDJ_DSP_STATUS_RECORD: the buffers' record bytes */
+    uint64_t jobs;
+    uint32_t seek_applied[3];           /* +0x8154/8/c of the last start taken */
+    bool seek_armed;                    /* the record was just named: its start is the position */
+    uint32_t rec_queue[10];             /* records opened since the load began, in order */
+    unsigned rec_count;
 
     /* CDJ_DSP_EVENT_PROBE: post event codes to MAIN on a schedule. */
     int64_t probe_start_ns;
@@ -121,6 +135,10 @@ struct CdjDspModel {
      */
     uint8_t *census;
     int64_t census_ns;
+    FILE *stream_dump;                  /* CDJ_DSP_STREAM_DUMP */
+    FILE *transport_log;                /* CDJ_DSP_TRANSPORT_LOG */
+    int64_t transport_last_ms;
+    unsigned transport_last_state;
     uint64_t commands;
     uint64_t acknowledged;
     bool trace;
@@ -227,6 +245,27 @@ CdjDspModel *cdj_dsp_model_new(Chardev *external)
 
     model->trace = getenv("CDJ_DSP_TRACE") != NULL;
     /*
+     * CDJ_DSP_STREAM_DUMP=<file>: every stream transfer into the window after
+     * the DSP is up, as "CDJS", the guest time in ns (u64), the window offset,
+     * the byte count, the last format command's record id, +0x81c8 and
+     * +0x81cc (u32 each, little endian), then the bytes -- what the DSP would
+     * have been given to play, for working out its framing against the file.
+     */
+    if (getenv("CDJ_DSP_STREAM_DUMP") && *getenv("CDJ_DSP_STREAM_DUMP")) {
+        model->stream_dump = fopen(getenv("CDJ_DSP_STREAM_DUMP"), "wb");
+    }
+    /*
+     * CDJ_DSP_TRANSPORT_LOG=<file>: the deck's transport as the position model
+     * keeps it -- one line per 10 ms tick while it plays and one per change
+     * otherwise: guest ns, position ms, state (2 standing, 3 playing), the
+     * rate word (2^20 = 1.0) and the record played.  With the stream dump it
+     * is what tools/cdj_main/deck_audio.py renders to sound.
+     */
+    if (getenv("CDJ_DSP_TRANSPORT_LOG") && *getenv("CDJ_DSP_TRANSPORT_LOG")) {
+        model->transport_log = fopen(getenv("CDJ_DSP_TRANSPORT_LOG"), "w");
+        model->transport_last_ms = -1;
+    }
+    /*
      * CDJ_DSP_ABSENT keeps the window and the DMA but never answers, which is
      * the machine as it was before this device existed.  It is the control for
      * every claim made about the DSP: "the banner is gone" only means something
@@ -281,6 +320,87 @@ CdjDspModel *cdj_dsp_model_new(Chardev *external)
      * CDJ_DSP_STATUS_FLAGS the bits are up while the slot state is 3.
      */
     model->status_flags = getenv("CDJ_DSP_STATUS_FLAGS") != NULL;
+    /*
+     * +0x7cb0 = 1 or 2 (the DJcont mid-manager's command) is a flush in the
+     * DSP program, not an acknowledgement alone: the main loop (0x80040fd8)
+     * copies the word, runs 0x800429e0 and only then writes the 0 back.
+     * Both codes clear the 10-entry record table (0x8002ad84 sets the current
+     * record bytes b14+896..898 to 0xff, 0x8002a2a0 wipes 0x10024e50) -- code
+     * 1 also re-initialises the rest (0x8002abc4) -- and 0x80034c08 then
+     * zeroes the position report +0x7c10..+0x7c2c, both status blocks
+     * +0x8180..+0x81bf, the fill levels +0x7ccc/+0x7cd0 and +0x81c4, and
+     * reports the current record, now 0xff, in +0x7cd4, which MAIN reads
+     * right after its poll (0x041b85f4).  Without it a second LOAD found the
+     * old track's levels still up, took the DSP for loaded and never sent
+     * the new stream.  CDJ_DSP_FLUSH=0 leaves the word acknowledged only.
+     */
+    model->flush_reset = g_strcmp0(getenv("CDJ_DSP_FLUSH"), "0") != 0;
+    /*
+     * +0x7ba4 is not only the result of a +0x7ba0 command.  MAIN's DSP task
+     * hands the DSP a job through it (0x041a0aa8..0x041a0aba): +0x7ba8 = the
+     * count, +0x7bac = a parameter, +0x7ba4 = 1, and from then on reads
+     * +0x7ba4 back (0x0419fef2): positive is "still working", 0 is done
+     * (0x0419ff06: finished a few passes later), negative is a failure
+     * code.  The DSP program writes its answer there (0x80035870 writes 0,
+     * 0x80035898 0 or -1, 0x800358bc another result).  On a jump to a cue
+     * the player gives that job right after the stream open -- the count is
+     * the buffer-1 level in half frames, 0x041b6ad2 -- and waits 2001 x 3
+     * ticks for it (0x041b6b60) before it sends the next state; unanswered it
+     * ended in E-8302 (000F) (reason -13, 0x041b6b7e).  A load never showed
+     * it only because the following +0x7ba0 acknowledgement cleared the word.
+     * The model has no decoder to run the job, so it answers it done at once,
+     * as it acknowledges every other command.  CDJ_DSP_JOB=0 leaves it.
+     */
+    model->job_answer = g_strcmp0(getenv("CDJ_DSP_JOB"), "0") != 0;
+    /*
+     * CDJ_DSP_JOB_CONSUME=1 -- an experiment, not a rule read in the DSP
+     * code yet: the player computes the job's count as buffer 1's level
+     * (+0x7cd0) in half frames (0x041b6ad2: level * 2, one less past half a
+     * frame in +0x7bf4) and posts the same job again for as long as that
+     * level stays up (cue-7: 2357 jobs of 68, then 204).  If the job is
+     * "take that much out of buffer 1", the level has to drop by it.
+     */
+    model->job_consume = getenv("CDJ_DSP_JOB_CONSUME") != NULL;
+    /*
+     * CDJ_DSP_JOB_ADVANCE (on unless =0; implies _CONSUME).  The
+     * job comes from MAIN's seek routine 0x041b699a, which compares the
+     * DSP-reported position (X+0x218, half frames: +0x7c10 * 2 + half) with
+     * its target and posts jobs of min(3/4 of the distance, level * 2)
+     * (0x041b6b22..0x041b6b4e) until the two match -- and only then goes on
+     * to the next state (cue-8 and NXS r59 stand on the cue without it).  So
+     * the job moves the play position forward by its count, in half frames
+     * of 1/150 s.  A job with +0x7bac other than 0 is logged and not moved:
+     * no run has shown one yet.
+     */
+    model->job_advance = g_strcmp0(getenv("CDJ_DSP_JOB_ADVANCE"), "0") != 0;
+    /*
+     * CDJ_DSP_EVENTS (on unless =0) -- built on two places in the DSP
+     * program that post event 5 (the byte pair at +0xffea/+0xffeb = 5, 0,
+     * then the host interrupt, 0x800358e0): right after a record is added
+     * to the record table (0x8003079c, after b14+801 counts it) and when the
+     * level behind the position has moved by more than 20 since the last
+     * report (0x800304d0..0x80030578, then 0x80045010 rewrites both
+     * levels).  MAIN's stream worker reads the levels again on it; without
+     * it a jump to a cue used up the level ahead with its first job and then
+     * waited for data nobody asked for.  Events 1 and 2 (a hot-cue slot
+     * whose counter passed 40, 0x8002eb14 / 0x8002ea7c) are not posted yet.
+     */
+    model->events = g_strcmp0(getenv("CDJ_DSP_EVENTS"), "0") != 0;
+    /*
+     * CDJ_DSP_STATUS_RECORD (on unless =0).  Each buffer has a 32-byte
+     * status block the DSP copies from its channel structure (+0x81a0 for
+     * buffer 1, 0x80034f38; +0x8180 for buffer 2, 0x80034f68).  MAIN's
+     * stream worker reads the low byte of its second word (+0x81a4 /
+     * +0x8184) before and after it opens a stream (0x041ad1f2, 0x041ad374)
+     * and takes it as the record the DSP now holds there.  With it left 0,
+     * a second LOAD re-opened buffer 2 with the same start 37 times in 1.5 s
+     * and never went on to buffer 1 (load2-6/7).  The model puts the record
+     * of each stream open there.
+     */
+    model->status_record = g_strcmp0(getenv("CDJ_DSP_STATUS_RECORD"), "0") != 0;
+    if (model->job_advance) {
+        model->job_consume = true;
+    }
     model->refill_event = getenv("CDJ_DSP_REFILL_EVENT")
         ? (unsigned)strtoul(getenv("CDJ_DSP_REFILL_EVENT"), NULL, 0) : 0;
     model->refill_low = getenv("CDJ_DSP_REFILL_LOW")
@@ -426,6 +546,19 @@ void cdj_dsp_model_reset(CdjDspModel *model, uint8_t *window, size_t length)
 void cdj_dsp_model_firmware(CdjDspModel *model, uint8_t *window,
                             size_t length, uint32_t offset, unsigned bytes)
 {
+    if (model->control_cleared && model->stream_dump && offset + bytes <= length) {
+        uint8_t head[4 + 8 + 5 * 4] = { 'C', 'D', 'J', 'S' };
+
+        stq_le_p(head + 4, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+        stl_le_p(head + 12, offset);
+        stl_le_p(head + 16, bytes);
+        stl_le_p(head + 20, model->fmt_record);
+        stl_le_p(head + 24, ldl_le_p(window + 0x81c8));
+        stl_le_p(head + 28, ldl_le_p(window + 0x81cc));
+        fwrite(head, 1, sizeof(head), model->stream_dump);
+        fwrite(window + offset, 1, bytes, model->stream_dump);
+        fflush(model->stream_dump);
+    }
     if (model->control_cleared) {
         /*
          * Once MAIN has seen the DSP up, a transfer into the window is stream
@@ -640,12 +773,37 @@ static void cdj_dsp_model_census(CdjDspModel *model, uint8_t *window,
  * The stream header at +0x8140 and the two fill levels.
  *
  * MAIN keeps two buffers in the DSP and reads their fill levels at +0x7ccc
- * (buffer 2) and +0x7cd0 (buffer 1).  The header's bytes say what a transfer
- * is: byte 3 is the class -- 1 data, 2 drop -- and byte 2 the buffer.  The
- * count travels in +0x8144: the PCM sender writes 40 with every 9408-byte
- * transfer, and the drop routine (0x1be0ec..0x1be1be) writes min(level, 40)
- * and header 0x02000100 / 0x02000200 to take that much out of buffer 1 / 2
- * again, so the level's unit is the count's unit.
+ * (buffer 2) and +0x7cd0 (buffer 1).  Byte 3 of the header is its class, and
+ * where the buffer sits depends on the class.  The DSP program's own header
+ * dispatcher (4.33, main-unpacked.bin 0xe3d0.. loaded at DSP 0x80000000; the
+ * window is DSP 0x10030000, so +0x8140 is 0x10038140) takes exactly these
+ * words, 0x80040e28..0x80040f5c:
+ *
+ *   class 1  0x01010100 0x01020100 0x01010200 0x01010101 0x01020101
+ *            0x01010102 0x01020102       -> 0x80041208
+ *   class 2  0x02000100 0x02000200       -> 0x80042570, the drop
+ *   class 3  0x03000100 0x03000200       -> 0x80042734
+ *   class 4  0x04010000 0x04020000       -> 0x80041e68
+ *
+ * A drop names its buffer in byte 1: 0x80042570 passes index 0 for
+ * 0x02000100 and 1 for 0x02000200 to the drop proper (0x8002afec), and
+ * MAIN's drop routine (0x1be0ec..0x1be1be) sends 0x02000100 with
+ * min(+0x7cd0, 40) and 0x02000200 with min(+0x7ccc, 40) in +0x8144 -- byte 1
+ * = 1 is buffer 1, 2 is buffer 2, and the level's unit is the count's unit.
+ * A negative count is 20 to the DSP (0x800425d4).  The DSP writes both levels
+ * in one place, 0x80045010: +0x7ccc and +0x7cd0 from the halfwords +0x10 and
+ * +0x12 of the current deck's 22-byte record.
+ *
+ * Class 1 is the stream's data path.  MAIN 4.33 writes 0x01010100 once as
+ * the open after a format command, then 0x01020100 with 40 in +0x8144 for
+ * every transfer (cosim scenario-8, an MP3: one open per record, 2246 data
+ * headers in the first minute); 0x01010200 is a third writer's (0x1a2a9e,
+ * 0x1a6626).  The DSP handler tests bit 17 (byte 2 = 2), bit 9 (byte 1 = 2)
+ * and the low nibble separately, takes the record id on the open (see
+ * cdj_dsp_model_stream_open) and consumes the doorbell buffers that follow
+ * (0x80041310, 0x80045fe4).  The model reads byte 2 of a class-1 header as the
+ * buffer those transfers fill.  That is what makes the load's pre-fill below
+ * come out, not yet something traced to the level halfwords in the DSP code.
  *
  * The load's pre-fill (0x1b6ffe..0x1b7048) sends buffers until +0x7ccc >= 160
  * and +0x7cd0 >= 40 (the other branch, 0x1b6faa.., wants 80 and 160), and only
@@ -673,6 +831,15 @@ static void cdj_dsp_model_census(CdjDspModel *model, uint8_t *window,
  * trackload-41 t=298.7 -- before any PLAY press, so not playback, as
  * trackload-36's coincidence with one had suggested).  Nothing is consumed:
  * playback is not modelled, the levels only grow.
+ *
+ * +0x81c8 is not a level: the DSP's buffer taker 0x80045fe4 reads it as the
+ * half of the staging area the data sits in, 0x100381e0 + index * 0x3cc0 --
+ * +0x81e0 or +0xbea0, the two buffers the PCM sender fills.  With format 3 or
+ * 4 in force the doorbell buffers go to 0x80047280 or 0x80046728 (picked by
+ * 0x800463c8 on the kind), which hand them to a stream object; neither calls
+ * the level report 0x80045010 directly.  So booking every transfer to the
+ * last class-1 buffer, as cdj_dsp_model_firmware does, is right for a class-1
+ * stream and unverified for a format-3 one.
  */
 
 /*
@@ -776,33 +943,198 @@ static void cdj_dsp_model_slot_report(CdjDspModel *model, uint8_t *window,
  * layout is measured; the time display stays blank.
  */
 
-/* A data header (class 1) names the buffer the following transfers fill; a
-   drop (class 2) takes its count out of the level.  The data itself is booked
+/* A data header (class 1) names the buffer the following transfers fill, in
+   byte 2; a drop (class 2) takes its count out of the level of the buffer in
+   byte 1 (see "The stream header" above for both).  The data itself is booked
    when it arrives, in cdj_dsp_model_firmware. */
 static void cdj_dsp_model_stream_header(CdjDspModel *model, uint8_t *window,
                                         uint32_t header, int64_t now)
 {
-    unsigned class = header >> 24, buffer = (header >> 16) & 0xff;
+    unsigned class = header >> 24;
+    /*
+     * Byte 1 is the buffer for every class: the class-2 drops, the class-3
+     * headers, and class 1 too (bit 9 at 0x800413c4 tells buffer 2).  Byte 2
+     * of a class-1 header is what it does: 1 opens a stream, 2 carries data.
+     * Reading the buffer from byte 2 booked all of buffer 1's data (0x0102
+     * 0100) to +0x7ccc, the level behind the position, and only each open's
+     * first transfer to +0x7cd0, the level ahead -- so a jump to a cue, which
+     * moves the position by the level ahead (the jobs, 0x041b6ad2), stopped
+     * a few half frames short of the cue once the first 34 were used up.
+     */
+    unsigned buffer = (header >> 8) & 0xff;
     unsigned level = buffer == 1 ? DSP_LEVEL_BUFFER1
                    : buffer == 2 ? DSP_LEVEL_BUFFER2 : 0;
     int32_t count = (int32_t)ldl_le_p(window + DSP_HEADER_COUNT);
     int32_t was, is;
 
-    if (!level || count < 0) {
+    if (!level) {
         return;
     }
     if (class == 1) {
-        model->stream_buffer = buffer;
+        if (count >= 0) {
+            model->stream_buffer = buffer;
+        }
         return;
     }
     if (class != 2) {
         return;
+    }
+    if (count < 0) {
+        count = 20;
     }
     was = (int32_t)ldl_le_p(window + level);
     is = was > count ? was - count : 0;
     stl_le_p(window + level, is);
     fprintf(stderr, "cdj2000-dsp: buffer %u dropped %d -> level %d (+0x%04x) t=%.3f\n",
             buffer, count, is, level, now / 1e9);
+}
+
+/*
+ * Which record the position report names, for streams of any format.
+ *
+ * The DSP takes a record id in one place only: the class-1 header handler
+ * reads parameter 13 -- +0x8120 of the last +0x8100 command, copied by
+ * 0x80044ab4 for format 2 and for 3/4 alike -- at 0x80041aec and registers
+ * it with 0x8002a3a4 in a table of ten records kept in order (head, tail and
+ * count bytes at b14+799/800/801).  Stock 4.33 loading an MP3 (cosim
+ * scenario-8): +0x7ba0 = 1, +0x8100 = 3 naming record 1, class-1 0x01010100,
+ * then 0x01020100 with 40 in +0x8144 for every transfer; 15 s later +0x8100
+ * = 3 naming record 2 -- the next track, preloaded -- and another 0x01010100,
+ * and so on to record 5.  Both kinds of header reach the registration, at
+ * the end of the handler's stream loop, and an id is registered once; the
+ * NXS port's first header is a 0x01020100, which names its record too.  The record played is the first one opened after
+ * the load began, the rest wait behind it: naming the latest (trackload-87)
+ * switched the deck to the next track, and naming none left MAIN without a
+ * track length, so the time display read "--".  The "Only a 2 sets it" rule
+ * below stays for format 2, which this has not been measured on.
+ */
+static void cdj_dsp_model_stream_open(CdjDspModel *model, uint8_t *window,
+                                      size_t length, uint32_t header, int64_t now)
+{
+    unsigned i;
+
+    /* Any class-1 header: 0x0101.. (a new stream) and 0x0102.. (the next
+       part) meet at 0x800413c4 and end at the registration (0x80041aec),
+       which skips an id already in the table -- so a record counts from the
+       first class-1 header after its format command, whichever kind. */
+    if ((header >> 24) != 1 || !model->pos_report || !model->fmt_seen) {
+        return;
+    }
+    /*
+     * Byte 1 is the stream buffer (bit 9 in the DSP's test at 0x800413c4,
+     * as byte 1 of the class-2 drops and of the class-3 headers).  The
+     * registration is the same for both buffers (0x80041aec, the id of the
+     * last format command), and so is event 5 after a new id joins the table
+     * (0x8003079c).  Only buffer 1 carries what the deck plays: every load
+     * and every jump to a cue streams there, so only a buffer-1 record can be
+     * the one played.  Buffer 2 got the last second of the PREVIOUS track
+     * (aconcert-1g, loading track 2: record 0xff, track number 1 in +0x8124,
+     * from frame 11136 of track 1's file) -- it names no position.
+     */
+    unsigned buffer = (header >> 8) & 0xff;
+    bool known = false;
+
+    if (model->status_record && ((header >> 16) & 0xff) == 1
+        && (buffer == 1 || buffer == 2)) {
+        if (length >= 0x81c0) {
+            window[buffer == 1 ? 0x81a4 : 0x8184] = model->fmt_record;
+        }
+    }
+
+    for (i = 0; i < model->rec_count; i++) {
+        if (model->rec_queue[i] == model->fmt_record) {
+            known = true;
+        }
+    }
+    if (!known && model->rec_count < ARRAY_SIZE(model->rec_queue)) {
+        model->rec_queue[model->rec_count++] = model->fmt_record;
+        if (model->events) {
+            cdj_dsp_event(0x0500);      /* 0x8003079c: a record joined the table */
+        }
+    }
+    if (buffer != 1 || known) {
+        if (!known) {
+            fprintf(stderr, "cdj2000-dsp: stream open 0x%08x registers record %u "
+                    "(buffer %u) t=%.3f\n", header, model->fmt_record, buffer, now / 1e9);
+        }
+        return;
+    }
+    if (model->pos_record == 0 || model->pos_state == 0) {
+        memset(model->seek_applied, 0, sizeof(model->seek_applied));
+        model->seek_armed = true;
+        model->pos_record = model->fmt_record;
+        model->pos_ms = 0;
+        model->cue_ms = 0;
+        model->pos_state = 2;
+        fprintf(stderr, "cdj2000-dsp: stream open 0x%08x names record %u, the "
+                "one to play, position 0 t=%.3f\n", header, model->pos_record,
+                now / 1e9);
+    } else {
+        fprintf(stderr, "cdj2000-dsp: stream open 0x%08x queues record %u "
+                "behind record %u t=%.3f\n", header, model->fmt_record,
+                model->pos_record, now / 1e9);
+    }
+}
+
+/*
+ * A stream that starts from a frame, not from the file's start.  The class-1
+ * header copy (0x80044c90) takes +0x814c, +0x8154, +0x8158 and +0x815c as
+ * parameters 24, 26, 27 and 28: the byte to start at, a count of frames the
+ * decoder then runs and discards (g688, 0x80046ac4), the frame counter's
+ * start (g696 = p28 - p26, +1 per decoded frame, 0x80046abc) -- so the first
+ * frame heard is number p28 -- and p27, which 0x80042b08 keeps in b14+28 for
+ * the decode loop to subtract (0x80042f8c): samples into that first frame,
+ * below 1152 in every run (900, 1008).  Stock 4.33 sends them with the first
+ * buffer-1 data header after a flush when it jumps to a memory cue (r55:
+ * frame 532 + 1008 = 13.92 s, the cue), and with the buffer-2 open of the
+ * previous track's last second (frame 11136, load2-3 and r55-4), which is
+ * not the deck's position; the NXS port on a load from the cue.  The model
+ * has no decoder, so a buffer-1 start is the position: p28 MPEG-1 layer III
+ * frames of 1152 samples at 44.1 kHz plus p27 samples, for the record being
+ * played.  Taken once per set of values.
+ */
+static void cdj_dsp_model_stream_seek(CdjDspModel *model, uint8_t *window,
+                                      uint32_t header, int64_t now)
+{
+    uint32_t p26 = ldl_le_p(window + 0x8154);
+    uint32_t p27 = ldl_le_p(window + 0x8158);
+    uint32_t p28 = ldl_le_p(window + 0x815c);
+
+    if ((header >> 24) != 1 || !model->pos_report || !(p26 | p27 | p28)
+        || ((header >> 8) & 0xff) != 1) {
+        return;         /* buffer 2's start is not the deck's (see above) */
+    }
+    if (p26 == model->seek_applied[0] && p27 == model->seek_applied[1]
+        && p28 == model->seek_applied[2]) {
+        return;
+    }
+    if (!model->seek_armed) {
+        /* reg-3: after the jump had landed on the cue, MAIN opened buffer 1
+           of the same record again from 2.05 s; the deck did not move (the
+           real one stands on the cue).  A start is the position only for
+           the stream that named the record, before any job or state. */
+        fprintf(stderr, "cdj2000-dsp: 0x%08x starts record %u at frame %u, but the deck "
+                "is already placed: position untouched t=%.3f\n", header,
+                model->fmt_record, p28, now / 1e9);
+        return;
+    }
+    if (!model->fmt_seen || model->fmt_record != model->pos_record) {
+        fprintf(stderr, "cdj2000-dsp: 0x%08x starts record %u at frame %u, not the "
+                "one played (%u): position untouched t=%.3f\n", header,
+                model->fmt_record, p28, model->pos_record, now / 1e9);
+        return;
+    }
+    model->seek_armed = false;
+    model->seek_applied[0] = p26;
+    model->seek_applied[1] = p27;
+    model->seek_applied[2] = p28;
+    model->pos_ms = ((int64_t)p28 * 1152 + p27) * 1000 / 44100;
+    model->cue_ms = model->pos_ms;
+    model->pos_last_ns = now;
+    fprintf(stderr, "cdj2000-dsp: 0x%08x starts record %u at frame %u + %u samples "
+            "(%u discarded, byte 0x%x) -> position %" PRId64 " ms t=%.3f\n", header,
+            model->pos_record, p28, p27, p26, ldl_le_p(window + 0x814c),
+            model->pos_ms, now / 1e9);
 }
 
 #define DSP_POS_STATUS      0x7bf0
@@ -857,6 +1189,16 @@ static void cdj_dsp_model_position_report(CdjDspModel *model, uint8_t *window,
     stl_le_p(window + 0x7bfc, model->pos_state == 3 ? 2 : model->pos_state == 2 ? 4 : 0);
     stl_le_p(window + DSP_POS_FRAMES, frames);
     stl_le_p(window + DSP_POS_VALID, model->pos_state ? model->pos_record : 0);
+    if (model->transport_log
+        && (model->pos_state == 3 || model->pos_state != model->transport_last_state
+            || model->pos_ms != model->transport_last_ms)) {
+        fprintf(model->transport_log, "%" PRId64 " %" PRId64 " %u 0x%06x %u\n",
+                now, model->pos_ms, model->pos_state,
+                ldl_le_p(window + 0x7bc0) & 0xffffff, model->pos_record);
+        fflush(model->transport_log);
+        model->transport_last_ms = model->pos_ms;
+        model->transport_last_state = model->pos_state;
+    }
     if (model->pos_state == 3 && now - model->pos_print_ns >= 5 * 1000000000LL) {
         model->pos_print_ns = now;
         fprintf(stderr, "cdj2000-dsp: position %" PRId64 " ms = frame %u + %u "
@@ -886,10 +1228,33 @@ void cdj_dsp_model_tick(CdjDspModel *model, uint8_t *window, size_t length)
                 continue;
             }
             model->acknowledged++;
-            if (req->offset == 0x8140 && (word >> 24) == 1
-                && model->acknowledged > 4) {
-                /* the data headers come thousands a run; the census and the
-                   level lines say what they were */
+            if (req->offset == 0x8140 && (word >> 24) == 1) {
+                /* A stream open: every one, with its time -- the DSP takes
+                   the record id of the last format command here
+                   (0x80041aec: parameter 13, +0x8120), so which stream got
+                   which id is only readable from the sequence.  +0x8150..
+                   +0x815c are the seek fields the DSP copies with +0x814c
+                   (0x80044c90): stock 4.33 leaves them 0. */
+                fprintf(stderr, "cdj2000-dsp: stream open +0x8140 = 0x%08x "
+                        "(+0x8144 %08x +0x8148 %08x +0x814c %08x +0x8150 %08x "
+                        "+0x8154 %08x +0x8158 %08x +0x815c %08x +0x8168 %08x) "
+                        "#%" PRIu64 " t=%.3f\n", (uint32_t)word,
+                        ldl_le_p(window + 0x8144), ldl_le_p(window + 0x8148),
+                        ldl_le_p(window + 0x814c), ldl_le_p(window + 0x8150),
+                        ldl_le_p(window + 0x8154), ldl_le_p(window + 0x8158),
+                        ldl_le_p(window + 0x815c), ldl_le_p(window + 0x8168),
+                        model->acknowledged, now / 1e9);
+            } else if (req->offset == 0x8100 && length >= 0x8128) {
+                /* the format command: its whole parameter block, which is
+                   where the stream's kind and record id travel */
+                fprintf(stderr, "cdj2000-dsp: control +0x8100 command 0x%08x "
+                        "(+4.. %08x %08x %08x %08x %08x %08x %08x %08x %08x) "
+                        "acknowledged, #%" PRIu64 " t=%.3f\n", (uint32_t)word,
+                        ldl_le_p(window + 0x8104), ldl_le_p(window + 0x8108),
+                        ldl_le_p(window + 0x810c), ldl_le_p(window + 0x8110),
+                        ldl_le_p(window + 0x8114), ldl_le_p(window + 0x8118),
+                        ldl_le_p(window + 0x811c), ldl_le_p(window + 0x8120),
+                        ldl_le_p(window + 0x8124), model->acknowledged, now / 1e9);
             } else
             fprintf(stderr, "cdj2000-dsp: control +0x%04x command 0x%08x "
                     "(+4.. %08x %08x %08x %08x) acknowledged, #%" PRIu64
@@ -902,6 +1267,34 @@ void cdj_dsp_model_tick(CdjDspModel *model, uint8_t *window, size_t length)
                     model->acknowledged, now / 1e9);
             if (req->offset == 0x8140) {
                 cdj_dsp_model_stream_header(model, window, (uint32_t)word, now);
+                cdj_dsp_model_stream_open(model, window, length, (uint32_t)word, now);
+                cdj_dsp_model_stream_seek(model, window, (uint32_t)word, now);
+            }
+            if (req->offset == 0x8100 && word >= 2 && word <= 4
+                && length >= 0x8128) {
+                model->fmt_record = ldl_le_p(window + 0x8120);
+                model->fmt_seen = true;
+            }
+            if (req->offset == 0x7ba0 && (word == 1 || word == 5)) {
+                /* a load begins, or the deck is unloaded: no stream open */
+                model->rec_count = 0;
+            }
+            if (req->offset == 0x7cb0 && (word == 1 || word == 2)
+                && model->flush_reset && length >= 0x81c8) {
+                memset(window + 0x7c10, 0, 0x20);       /* +0x7c10..+0x7c2c */
+                memset(window + 0x8180, 0, 0x40);       /* +0x8180..+0x81bf */
+                stl_le_p(window + DSP_LEVEL_BUFFER1, 0);
+                stl_le_p(window + DSP_LEVEL_BUFFER2, 0);
+                stl_le_p(window + 0x81c4, 0);
+                stl_le_p(window + 0x7cd4, 0xff);
+                model->rec_count = 0;
+                model->pos_record = 0;
+                model->pos_ms = 0;
+                model->pos_state = 0;
+                model->loop_on = false;
+                fprintf(stderr, "cdj2000-dsp: +0x7cb0 = %d flushes the DSP: record table, "
+                        "levels and position report cleared, +0x7cd4 = 0xff t=%.3f\n",
+                        word, now / 1e9);
             }
             stl_le_p(window + req->offset, 0);
             if (req->clear_result) {
@@ -920,18 +1313,34 @@ void cdj_dsp_model_tick(CdjDspModel *model, uint8_t *window, size_t length)
                  * parameter was 0 in every run so far (the cue at the start);
                  * CD frames like +0x7c10 is the assumption.
                  */
-                uint32_t frames = ldl_le_p(window + 0x7c84);
+                /*
+                 * +0x7c84 is not a position but a SLOT: the DSP's handlers
+                 * (0x80043ea8 for 0x11/0x12, 0x80043f20 for 0x21/0x22) take
+                 * +0x7c84 + 5 * bit 1 of the code as the slot and jump to
+                 * what it holds (0x8002cfb0).  Slot 0 is the cue point: at
+                 * the track's start after a load, and where a jump to a cue
+                 * landed (the stream-open start plus the jobs, see
+                 * cdj_dsp_model_stream_seek) -- after the jobs converged on
+                 * a memory cue MAIN sends 0x11 with slot 0 (cue-12).  Other
+                 * slots (the hot cues, set by +0x7c9c) are not modelled yet:
+                 * a jump to one leaves the position where it is.
+                 */
+                uint32_t slot = ldl_le_p(window + 0x7c84) + ((word & 2) ? 5 : 0);
 
-                model->pos_ms = (int64_t)frames * 1000 / 75;
+                if (slot == 0) {
+                    model->pos_ms = model->cue_ms;
+                }
                 model->pos_last_ns = now;
                 if (word == 0x21 && !model->pos_standby) {
                     model->pos_state = 3;
                 } else {
                     model->pos_state = 2;
                 }
-                fprintf(stderr, "cdj2000-dsp: +0x7c80 = 0x%x at frame %u -> position state %u "
-                        "at %" PRId64 " ms%s t=%.3f\n", word, frames, model->pos_state,
-                        model->pos_ms, model->pos_standby ? " (standby)" : "", now / 1e9);
+                fprintf(stderr, "cdj2000-dsp: +0x7c80 = 0x%x slot %u%s -> position state %u "
+                        "at %" PRId64 " ms%s t=%.3f\n", word, slot,
+                        slot ? " (not modelled, position kept)" : " (the cue)",
+                        model->pos_state, model->pos_ms,
+                        model->pos_standby ? " (standby)" : "", now / 1e9);
             }
             if (req->offset == 0x7c9c && model->pos_report && length >= 0x7cb0) {
                 /*
@@ -1005,6 +1414,9 @@ void cdj_dsp_model_tick(CdjDspModel *model, uint8_t *window, size_t length)
                  * an unload (trackload-104, 113, 117).
                  */
                 model->pos_standby = word == 4;
+                if (word != 4) {
+                    model->seek_armed = false;
+                }
                 if (word == 3) {
                     model->pos_state = 3;
                     model->pos_last_ns = now;
@@ -1027,6 +1439,68 @@ void cdj_dsp_model_tick(CdjDspModel *model, uint8_t *window, size_t length)
                     cdj_dsp_model_slot_report(model, window, length, 3, now);
                 }
             }
+        }
+    }
+    if (model->job_answer && model->running && !model->absent && window
+        && length >= 0x7bb0 && model->control_cleared
+        && (int32_t)ldl_le_p(window + 0x7ba4) > 0 && ldl_le_p(window + 0x7ba0) == 0) {
+        model->jobs++;
+        model->seek_armed = false;
+        fprintf(stderr, "cdj2000-dsp: job +0x7ba4 = %d (count +0x7ba8 = %d, +0x7bac = %d) "
+                "answered done, #%" PRIu64 " t=%.3f\n", (int32_t)ldl_le_p(window + 0x7ba4),
+                (int32_t)ldl_le_p(window + 0x7ba8), (int32_t)ldl_le_p(window + 0x7bac),
+                model->jobs, now / 1e9);
+        stl_le_p(window + 0x7ba4, 0);
+        if (model->job_consume) {
+            /* +0x7cd0 is the audio ahead of the position and +0x7ccc the
+               audio behind it (0x041b6a0e: a job backwards takes its count
+               from +0x7ccc, forwards from +0x7cd0), both in CD frames; a
+               job's count is in half frames. */
+            int32_t count = (int32_t)ldl_le_p(window + 0x7ba8);
+            int32_t take = (count < 0 ? -count + 1 : count + 1) / 2;
+            unsigned from = count < 0 ? DSP_LEVEL_BUFFER2 : DSP_LEVEL_BUFFER1;
+            unsigned to = count < 0 ? DSP_LEVEL_BUFFER1 : DSP_LEVEL_BUFFER2;
+            int32_t have = (int32_t)ldl_le_p(window + from);
+
+            take = take < have ? take : have;
+            stl_le_p(window + from, have - take);
+            stl_le_p(window + to, (int32_t)ldl_le_p(window + to) + take);
+            /* The buffer's status word counts what the DSP has used of it
+               (trackload-69/70: the worker streams from +0x81a0 on), so
+               the stream worker sees room for more. */
+            if (length >= 0x81c0) {
+                unsigned used = count < 0 ? 0x8180 : 0x81a0;
+
+                stl_le_p(window + used, ldl_le_p(window + used) + take);
+            }
+        }
+        if (model->job_advance) {
+            int32_t count = (int32_t)ldl_le_p(window + 0x7ba8);
+            int32_t param = (int32_t)ldl_le_p(window + 0x7bac);
+
+            if (param == 0 && count != 0) {
+                /* In whole half frames, as MAIN compares them: the first ms
+                   of half frame h is ceil(h * 1000 / 150), and the report
+                   (+0x7c10 * 2 + (+0x7bf4 >= 294)) reads it back as h. */
+                int64_t half = model->pos_ms * 150 / 1000 + count;
+
+                if (half < 0) {
+                    half = 0;
+                }
+                model->pos_ms = (half * 1000 + 149) / 150;
+                model->cue_ms = model->pos_ms;      /* a jump's landing is the new cue */
+                model->pos_last_ns = now;
+                fprintf(stderr, "cdj2000-dsp: job moved the position %d half frames "
+                        "to %" PRId64 " ms t=%.3f\n", count, model->pos_ms, now / 1e9);
+            } else {
+                fprintf(stderr, "cdj2000-dsp: job with +0x7bac = %d, count %d: position "
+                        "left at %" PRId64 " ms t=%.3f\n", param, count, model->pos_ms,
+                        now / 1e9);
+            }
+        }
+        if (model->events) {
+            fprintf(stderr, "cdj2000-dsp: event 5 after the job t=%.3f\n", now / 1e9);
+            cdj_dsp_model_post(model, window, length, 0x0500, now);
         }
     }
     if (model->pos_report && model->running && !model->absent && window) {

@@ -146,6 +146,7 @@
 #define PKT_BUF_SIZE    1024        /* a high-speed bulk packet is 512 */
 #define NAK_RETRY_NS    1000000     /* a frame */
 #define KICK_NS         20000       /* long enough for the arming ISR to return */
+#define MICROFRAME_NS   125000      /* a high-speed microframe */
 
 typedef struct CdjUsbhPipe {
     unsigned nr;
@@ -159,6 +160,7 @@ typedef struct CdjUsbhPipe {
     GByteArray *tx;                 /* written by the CPU or the DMAC */
     unsigned tx_pos;
     bool tx_valid;                  /* BVAL: the buffer may go on the wire */
+    int64_t tx_hold_until;          /* a DMA-filled buffer waits for the schedule */
     bool stopped;                   /* no more IN tokens until PID is rewritten */
     uint32_t in_total;              /* DCP: data-stage bytes since the SETUP */
     unsigned retries;
@@ -207,6 +209,9 @@ struct CdjUsbhState {
     bool setup_pending;
     uint64_t packet_id;
     bool trace;
+    bool trace_scsi;                    /* CDJ_USBH_TRACE=scsi */
+    bool trace_on_write;                /* =scsi+write: full trace after a WRITE */
+    unsigned trace_left;                /* lines of that full trace still to go */
 
     CdjUsbhDmaDone dma_done;
     void *dma_opaque;
@@ -231,8 +236,11 @@ static void cdj_usbh_trace(CdjUsbhState *s, const char *fmt, ...)
 {
     va_list ap;
 
-    if (!s->trace) {
+    if (!s->trace && !s->trace_scsi) {
         return;
+    }
+    if (s->trace_left && !--s->trace_left) {
+        s->trace = false;           /* the window after a WRITE is over */
     }
     fprintf(stderr, "cdj2000-usbh %.3f: ",
             qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / 1e9);
@@ -273,11 +281,13 @@ static void cdj_usbh_update_irq(CdjUsbhState *s)
 
     if (level != s->irq_level) {
         s->irq_level = level;
-        cdj_usbh_trace(s, "irq %d (INTSTS0 %#06x INTENB0 %#06x INTSTS1 %#06x "
+        if (s->trace) {
+            cdj_usbh_trace(s, "irq %d (INTSTS0 %#06x INTENB0 %#06x INTSTS1 %#06x "
                        "INTENB1 %#06x BRDY %#05x NRDY %#05x BEMP %#05x)",
                        level, cdj_usbh_intsts0(s), rd(s, R_INTENB0),
                        rd(s, R_INTSTS1), rd(s, R_INTENB1), rd(s, R_BRDYSTS),
                        rd(s, R_NRDYSTS), rd(s, R_BEMPSTS));
+        }
         qemu_set_irq(s->irq, level);
     }
 }
@@ -373,6 +383,17 @@ static CdjUsbhPipe *fifo_pipe(CdjUsbhState *s, unsigned fifo)
                                             R_D1FIFOSEL };
     unsigned nr = rd(s, sel[fifo]) & FIFOSEL_CURPIPE;
 
+    /*
+     * The DCP is reached through the CFIFO port only; on D0FIFO/D1FIFO
+     * CURPIPE = 0 selects no pipe (the Renesas USB modules' convention; the
+     * SH7764 section was not re-read for this).  The driver
+     * sets DREQE with CURPIPE still 0 (D0FIFOSEL = 0x1800) and picks the
+     * pipe only after the DMAC is running (0x1802); a transfer served in
+     * between went into the DCP's buffer and left the bulk pipe empty.
+     */
+    if (fifo != 0 && nr == 0) {
+        return NULL;
+    }
     return nr < NR_PIPES ? &s->pipe[nr] : NULL;
 }
 
@@ -441,7 +462,19 @@ static void cdj_usbh_dma_service(CdjUsbhState *s, unsigned fifo)
             dma->remaining -= n;
             dma->moved += n;
             p->tx_valid = true;
-            cdj_usbh_kick(s, KICK_NS);
+            /*
+             * The DMAC is done the moment the last byte has left memory; the
+             * host puts the packet on the bus only in its schedule, and the
+             * driver's DMA-end path runs in between: it NAKs the pipe, writes
+             * BVAL (0x8000 to D0FIFOCTR) and lets it go again.  On the board
+             * that BVAL meets the full buffer and adds nothing; sent at once,
+             * the buffer was already empty, the BVAL went out as a
+             * zero-length packet, the stick STALLed it, and every WRITE(10)
+             * was retried every 50 ms for good -- a USB LOAD never started
+             * its stream (E-8302 3611).  So the buffer waits a microframe.
+             */
+            p->tx_hold_until = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + MICROFRAME_NS;
+            cdj_usbh_kick(s, MICROFRAME_NS);
         }
     } else {
         unsigned avail = pipe_rx_avail(p);
@@ -536,10 +569,12 @@ static void cdj_usbh_issue(CdjUsbhState *s, CdjUsbhPipe *p, int pid,
     usb_packet_setup(&p->packet, pid, ep, 0, ++s->packet_id, false, false);
     usb_packet_addbuf(&p->packet, p->pkt_buf, len);
     p->inflight = true;
-    cdj_usbh_trace(s, "pipe%u: %s addr %u ep %u len %u", p->nr,
-                   pid == USB_TOKEN_SETUP ? "SETUP"
-                   : pid == USB_TOKEN_IN ? "IN" : "OUT",
-                   pipe_devsel(s, p), pipe_epnum(p), len);
+    if (s->trace) {
+        cdj_usbh_trace(s, "pipe%u: %s addr %u ep %u len %u", p->nr,
+                       pid == USB_TOKEN_SETUP ? "SETUP"
+                       : pid == USB_TOKEN_IN ? "IN" : "OUT",
+                       pipe_devsel(s, p), pipe_epnum(p), len);
+    }
     usb_handle_packet(dev, &p->packet);
     if (p->packet.status == USB_RET_ASYNC) {
         return;
@@ -627,6 +662,11 @@ static void cdj_usbh_packet_done(CdjUsbhState *s, CdjUsbhPipe *p)
     if (pid == USB_TOKEN_IN) {
         unsigned maxp = pipe_maxp(s, p);
 
+        if (s->trace_scsi && actual == 13 && !memcmp(p->pkt_buf, "USBS", 4)) {
+            cdj_usbh_trace(s, "pipe%u: CSW tag %08x residue %u status %u",
+                           p->nr, ldl_le_p(p->pkt_buf + 4),
+                           ldl_le_p(p->pkt_buf + 8), p->pkt_buf[12]);
+        }
         if (s->trace) {
             char hex[3 * 32 + 1];
             unsigned i, n = MIN(actual, 32);
@@ -676,7 +716,9 @@ static void cdj_usbh_packet_done(CdjUsbhState *s, CdjUsbhPipe *p)
         cdj_usbh_pipe_status(s, R_BRDYSTS, p->nr);
         cdj_usbh_dma_service_all(s);
     } else {
-        cdj_usbh_trace(s, "pipe%u: OUT %u bytes done", p->nr, actual);
+        if (s->trace) {
+            cdj_usbh_trace(s, "pipe%u: OUT %u bytes done", p->nr, actual);
+        }
         p->tx_pos += actual;
         if (p->tx_pos >= p->tx->len) {
             pipe_tx_clear(p);
@@ -711,13 +753,37 @@ static void cdj_usbh_run_pipe(CdjUsbhState *s, CdjUsbhPipe *p)
     }
     if (pipe_transmits(s, p)) {
         unsigned len;
+        int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
 
         if (!p->tx_valid) {
+            return;
+        }
+        if (now < p->tx_hold_until) {
+            if (s->trace) {
+                cdj_usbh_trace(s, "pipe%u: %u bytes held %" PRId64 " ns for the schedule",
+                               p->nr, p->tx->len - p->tx_pos, p->tx_hold_until - now);
+            }
+            cdj_usbh_kick(s, p->tx_hold_until - now);
             return;
         }
         len = MIN(p->tx->len - p->tx_pos, pipe_maxp(s, p));
         len = MIN(len, PKT_BUF_SIZE);
         memcpy(p->pkt_buf, p->tx->data + p->tx_pos, len);
+        if (s->trace_scsi && len == 31 && !memcmp(p->pkt_buf, "USBC", 4)) {
+            const uint8_t *cb = p->pkt_buf + 15;
+
+            /* READ/WRITE(10): LBA and blocks; anything else by opcode. */
+            cdj_usbh_trace(s, "pipe%u: CBW tag %08x %u bytes %s op %02x lba %u "
+                           "blocks %u", p->nr, ldl_le_p(p->pkt_buf + 4),
+                           ldl_le_p(p->pkt_buf + 8),
+                           p->pkt_buf[12] & 0x80 ? "in" : "out", cb[0],
+                           ldl_be_p(cb + 2), lduw_be_p(cb + 7));
+            if (s->trace_on_write && cb[0] == 0x2a && !s->trace_left) {
+                s->trace = true;
+                s->trace_left = 1500;
+                s->trace_on_write = false;      /* the first WRITE only */
+            }
+        }
         if (s->trace && len) {
             char hex[3 * 32 + 1];
             unsigned i, n = MIN(len, 32);
@@ -1121,7 +1187,9 @@ static void cdj_usbh_write(void *opaque, hwaddr offset, uint64_t value,
         v = (offset & 1) ? (old & 0x00ff) | (v << 8) : (old & 0xff00) | (v & 0xff);
     }
     offset &= ~1;
-    cdj_usbh_trace(s, "write %#05" HWADDR_PRIx " (%u) = %#06x", offset, size, v);
+    if (s->trace) {
+        cdj_usbh_trace(s, "write %#05" HWADDR_PRIx " (%u) = %#06x", offset, size, v);
+    }
 
     switch (offset) {
     case R_SYSCFG:
@@ -1283,7 +1351,13 @@ static void cdj_usbh_realize(DeviceState *dev, Error **errp)
     SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
     unsigned nr;
 
-    s->trace = getenv("CDJ_USBH_TRACE") != NULL;
+    /* CDJ_USBH_TRACE=scsi: only the mass-storage commands and their
+       statuses, failures and DMA -- the full trace prints every register
+       read, hundreds of megabytes over a stick's library. */
+    s->trace_scsi = !g_strcmp0(getenv("CDJ_USBH_TRACE"), "scsi")
+        || !g_strcmp0(getenv("CDJ_USBH_TRACE"), "scsi+write");
+    s->trace_on_write = !g_strcmp0(getenv("CDJ_USBH_TRACE"), "scsi+write");
+    s->trace = getenv("CDJ_USBH_TRACE") != NULL && !s->trace_scsi;
     for (nr = 0; nr < NR_PIPES; nr++) {
         CdjUsbhPipe *p = &s->pipe[nr];
 

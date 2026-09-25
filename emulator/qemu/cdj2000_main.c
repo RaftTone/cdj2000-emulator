@@ -51,6 +51,7 @@
 #include "chardev/char-fe.h"
 
 #include "cdj2000_ata.h"
+#include "cdj2000_cosim.h"
 #include "cdj2000_dsp.h"
 #include "cdj2000_nxs_hpi.h"
 #include "cdj_nxs_iic.h"
@@ -814,6 +815,43 @@ static int cdj_dmac_role(const CdjDmacChannel *channel)
  */
 #define PANEL_XFER_NS 500000
 
+/*
+ * CDJ_PANEL_TX_TRACE: MAIN's frame to the panel (channel 4, the buffer at
+ * 0xa4501018 to SCFTDR 0xffe2000c) every time it differs from the last one,
+ * with the guest time -- the LEDs and the jog ring's display are in it, and a
+ * map of them needs the frames next to what the deck was doing.  Byte count
+ * as the channel's TCR says, at most 64.
+ */
+static void cdj_panel_tx_trace(CdjDmacChannel *channel)
+{
+    static int enabled = -1;
+    static uint8_t last[64];
+    static unsigned last_len;
+    uint8_t frame[64];
+    unsigned len = channel->tcr < sizeof(frame) ? channel->tcr : sizeof(frame);
+    unsigned i;
+
+    if (enabled < 0) {
+        enabled = getenv("CDJ_PANEL_TX_TRACE") != NULL;
+    }
+    if (!enabled || !len) {
+        return;
+    }
+    address_space_read(&address_space_memory, cdj_dma_phys(channel->sar),
+                       MEMTXATTRS_UNSPECIFIED, frame, len);
+    if (len == last_len && !memcmp(frame, last, len)) {
+        return;
+    }
+    memcpy(last, frame, len);
+    last_len = len;
+    fprintf(stderr, "cdj2000-panel-tx t=%.6f %u bytes from %#010x:",
+            qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / 1e9, len, channel->sar);
+    for (i = 0; i < len; i++) {
+        fprintf(stderr, " %02x", frame[i]);
+    }
+    fprintf(stderr, "\n");
+}
+
 static void cdj_dmac_panel_done(void *opaque)
 {
     CdjDmacState *dmac = opaque;
@@ -827,6 +865,7 @@ static void cdj_dmac_panel_done(void *opaque)
             continue;
         }
         channel->armed = false;
+        cdj_panel_tx_trace(channel);
         /* The device side is a fixed register; only the memory side advances. */
         cdj_dmac_complete(channel, channel->sar + channel->tcr, channel->dar);
         /* The request is TE && IE: a channel run without IE completes quietly. */
@@ -1810,6 +1849,7 @@ static void cdj_link_rx_next(CdjLinkState *link);
 static void cdj_link_rx_release(CdjLinkState *link);
 static bool cdj_link_rx_handover_on_answer(void);
 static void cdj_link_rx_answered(CdjLinkState *rx);
+static void cdj_link_cosim_pump(CdjLinkState *link);
 static bool cdj_link_link_rows(uint8_t *frame, unsigned len);
 
 static int64_t cdj_link_census_every(void)
@@ -1982,8 +2022,26 @@ static void cdj_link_transmit(CdjLinkState *link)
     uint8_t buffer[8 + LINK_FRAME_MAX];
 
     if (!frame || !link->buffer) {
+        /*
+         * Nothing to send, but the arm happened: complete it, as the
+         * oversized case below does.  Returning without the completion left
+         * START set and the transmit-in-progress flag 0x7db3541 at 1, and
+         * MAIN never transmitted again -- the GUI's requests kept arriving
+         * every five seconds, unanswered, and it put E-8709 on screen.  Seen
+         * on the first track load from a native browse (fix-1, t=291.8:
+         * control 0x43, length 0).  A DMA with nothing to move finishes; it
+         * does not hang the channel.
+         */
         link->n_bail++;
+        warn_report_once("cdj2000: %s: armed with %s; completed without "
+                         "sending", link->name,
+                         link->buffer ? "a zero length" : "no buffer");
+        qemu_log_mask(LOG_UNIMP, "%s: empty arm (length 0x%x r50 0x%x "
+                      "buffer 0x%08x) completed t=%.4f\n", link->name,
+                      link->length, link->r50, link->buffer,
+                      qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / 1e9);
         cdj_link_census(link);
+        cdj_link_tx_complete(link);
         return;
     }
     if (frame > LINK_FRAME_MAX) {
@@ -2005,9 +2063,17 @@ static void cdj_link_transmit(CdjLinkState *link)
     address_space_read(&address_space_memory, cdj_dma_phys(link->buffer),
                        MEMTXATTRS_UNSPECIFIED, buffer + 8, frame);
     bool send = cdj_link_link_rows(buffer + 8, frame);
-    int written = owner->connected && send
-        ? qemu_chr_fe_write_all(&owner->chr, buffer, frame + 8)
-        : (send ? -1 : (int)(frame + 8));
+    int written;
+
+    if (send && cdj_cosim_active()) {
+        /* One guest time with the GUI: the frame goes out stamped. */
+        cdj_cosim_send_record(buffer + 8, frame);
+        written = frame + 8;
+    } else {
+        written = owner->connected && send
+            ? qemu_chr_fe_write_all(&owner->chr, buffer, frame + 8)
+            : (send ? -1 : (int)(frame + 8));
+    }
 
     link->n_sent++;
     if (written > 0) {
@@ -2066,10 +2132,16 @@ static void cdj_link_write(void *opaque, hwaddr offset, uint64_t value,
 
     if (offset == link->buffer_off) {
         link->buffer = value;
+        if (!link->transmit) {
+            cdj_link_cosim_pump(link);
+        }
         return;
     }
     if (offset == link->length_off) {
         link->length = value;
+        if (!link->transmit) {
+            cdj_link_cosim_pump(link);
+        }
         return;
     }
     switch (offset) {
@@ -2120,6 +2192,8 @@ static void cdj_link_write(void *opaque, hwaddr offset, uint64_t value,
             }
             if (link->transmit) {
                 cdj_link_transmit(link);
+            } else {
+                cdj_link_cosim_pump(link);
             }
             return;
         }
@@ -2892,6 +2966,56 @@ static void cdj_link_receive(void *opaque, const uint8_t *data, int size)
     link->n_rx++;
     cdj_link_census(link);
     cdj_intc2_set(link, true);
+}
+
+/*
+ * CDJ_COSIM: the GUI's request bytes reach MAIN at their guest time
+ * (cdj2000_cosim.c) and wait here until MAIN has a receive armed -- exactly
+ * what the chardev did with them, whose can_read said the same thing.
+ */
+static uint8_t cdj_link_cosim_backlog[65536];
+static unsigned cdj_link_cosim_backlog_len;
+
+static void cdj_link_cosim_pump(CdjLinkState *link)
+{
+    while (cdj_link_cosim_backlog_len) {
+        int room = cdj_link_can_receive(link);
+        unsigned n = cdj_link_cosim_backlog_len;
+
+        if (room <= 0) {
+            return;
+        }
+        if (n > (unsigned)room) {
+            n = room;
+        }
+        cdj_link_receive(link, cdj_link_cosim_backlog, n);
+        memmove(cdj_link_cosim_backlog, cdj_link_cosim_backlog + n,
+                cdj_link_cosim_backlog_len - n);
+        cdj_link_cosim_backlog_len -= n;
+    }
+}
+
+static void cdj_link_cosim_poll(void *opaque)
+{
+    cdj_link_cosim_pump(opaque);
+}
+
+static void cdj_link_cosim_request(void *opaque, const uint8_t *data,
+                                   unsigned len)
+{
+    CdjLinkState *link = opaque;
+
+    if (len > sizeof(cdj_link_cosim_backlog) - cdj_link_cosim_backlog_len) {
+        warn_report_once("cdj2000: co-simulated requests overflowed the "
+                         "backlog; the oldest are dropped");
+        cdj_link_cosim_backlog_len = 0;
+        if (len > sizeof(cdj_link_cosim_backlog)) {
+            return;
+        }
+    }
+    memcpy(cdj_link_cosim_backlog + cdj_link_cosim_backlog_len, data, len);
+    cdj_link_cosim_backlog_len += len;
+    cdj_link_cosim_pump(link);
 }
 
 static uint64_t cdj_intc2_read(void *opaque, hwaddr offset, unsigned size)
@@ -4317,6 +4441,7 @@ static void cdj_link_board_init(MemoryRegion *system, struct intc_desc *intc)
                   intc->irqs[CDJ_INTC_LINK_TX], serial_hd(1));
     tx->done_irq = intc->irqs[CDJ_INTC_LINK_DONE];
     tx->rx_peer = rx;           /* MAIN's answers pace the receive FIFO */
+    cdj_cosim_init(cdj_link_cosim_request, cdj_link_cosim_poll, rx);
     cdj_console_init(system, serial_hd(2), intc->irqs[CDJ_INTC_SCIF_RX],
                      intc->irqs[CDJ_INTC_SCIF_TX]);
 }

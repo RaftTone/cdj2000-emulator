@@ -61,6 +61,8 @@
 #include "qapi/error.h"
 #include "system/address-spaces.h"
 #include "system/memory.h"
+#include "hw/core/cpu.h"
+#include "accel/tcg/cpu-loop.h"
 
 #include "cdj2000_dsp.h"
 
@@ -87,6 +89,35 @@
 /* How often the model is given a chance to advance its own state. */
 #define DSP_TICK_NS           (10 * 1000 * 1000)
 
+/*
+ * CDJ_DSP_READ_TRACE: who reads what in the window.  The window is RAM, so
+ * MAIN's reads of it leave no trace anywhere.  With the switch set, an I/O
+ * overlay over the listed ranges -- "LO-HI[,LO-HI...]" as hex window offsets,
+ * or +0x7b80..+0x7d00 and +0x8100..+0x81e0 for any other value -- passes
+ * every access through to that same RAM and counts the reads by word and by
+ * the guest PC that made them (recovered from the translated code, which
+ * leaves the CPU state alone; "dma" for a transfer's own copy).  A pair seen
+ * for the first time is printed at once, and every second of guest time the
+ * counts of that second follow on one census line.  Writes are not counted:
+ * CDJ_DSP_TRACE's census has them.  Off by default, because the overlay puts
+ * those pages of the window on QEMU's slow path.
+ */
+#define DSP_READ_WATCH_MAX    8
+#define DSP_READ_BY_DMA       0xffffffffu
+
+typedef struct {
+    MemoryRegion region;
+    void *dsp;                          /* the CdjDspState it belongs to */
+    uint32_t offset;                    /* where in the window it starts */
+} DspReadWatch;
+
+typedef struct {
+    uint32_t offset;                    /* the word read, 4-aligned */
+    uint32_t pc;                        /* the reader, or DSP_READ_BY_DMA */
+    uint64_t second;                    /* reads in the census second */
+    uint64_t total;
+} DspReader;
+
 typedef struct {
     MemoryRegion window;
     MemoryRegion mailbox;
@@ -109,6 +140,13 @@ typedef struct {
     bool trace;
     uint64_t transfers;
     uint64_t doorbells;
+
+    /* CDJ_DSP_READ_TRACE */
+    DspReadWatch read_watch[DSP_READ_WATCH_MAX];
+    unsigned read_watches;
+    GHashTable *readers;                /* offset << 32 | pc -> DspReader */
+    int64_t read_census_ns;
+    bool in_transfer;                   /* a DMA is copying through the window */
 } CdjDspState;
 
 /* One DSP per machine, and the DMAC has to reach it from the board file. */
@@ -257,12 +295,189 @@ static const MemoryRegionOps cdj_dsp_ctl_ops = {
     .valid = { .min_access_size = 1, .max_access_size = 4 },
 };
 
+/* The guest instruction behind the access being served, 0 if it is unknown. */
+static uint32_t cdj_dsp_reader_pc(CdjDspState *dsp)
+{
+    uint64_t data[8] = { 0 };
+
+    if (dsp->in_transfer) {
+        return DSP_READ_BY_DMA;
+    }
+    if (current_cpu
+        && cpu_unwind_state_data(current_cpu, current_cpu->mem_io_pc, data)) {
+        return (uint32_t)data[0];
+    }
+    return 0;
+}
+
+/* A debugger's access (gdbstub, monitor) is served and not counted. */
+static MemTxResult cdj_dsp_watch_read(void *opaque, hwaddr offset,
+                                      uint64_t *data, unsigned size,
+                                      MemTxAttrs attrs)
+{
+    DspReadWatch *watch = opaque;
+    CdjDspState *dsp = watch->dsp;
+    uint32_t at = watch->offset + offset, pc;
+    uint64_t value, key;
+    DspReader *reader;
+
+    switch (size) {
+    case 1:  value = dsp->ram[at];                break;
+    case 2:  value = lduw_le_p(dsp->ram + at);    break;
+    default: value = ldl_le_p(dsp->ram + at);     break;
+    }
+    *data = value;
+    if (attrs.debug) {
+        return MEMTX_OK;
+    }
+    pc = cdj_dsp_reader_pc(dsp);
+    key = (uint64_t)(at & ~3u) << 32 | pc;
+    reader = g_hash_table_lookup(dsp->readers, GSIZE_TO_POINTER(key));
+    if (!reader) {
+        reader = g_new0(DspReader, 1);
+        reader->offset = at & ~3u;
+        reader->pc = pc;
+        g_hash_table_insert(dsp->readers, GSIZE_TO_POINTER(key), reader);
+        if (pc == DSP_READ_BY_DMA) {
+            fprintf(stderr, "cdj2000-dsp: new reader +0x%04x by dma "
+                    "(%u bytes) = 0x%0*" PRIx64 " t=%.3f\n", at, size,
+                    size * 2, value, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / 1e9);
+        } else {
+            fprintf(stderr, "cdj2000-dsp: new reader +0x%04x by pc 0x%08x "
+                    "(%u bytes) = 0x%0*" PRIx64 " t=%.3f\n", at, pc, size,
+                    size * 2, value, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / 1e9);
+        }
+    }
+    reader->second++;
+    reader->total++;
+    return MEMTX_OK;
+}
+
+static MemTxResult cdj_dsp_watch_write(void *opaque, hwaddr offset,
+                                       uint64_t value, unsigned size,
+                                       MemTxAttrs attrs)
+{
+    DspReadWatch *watch = opaque;
+    CdjDspState *dsp = watch->dsp;
+    uint8_t *at = dsp->ram + watch->offset + offset;
+
+    switch (size) {
+    case 1:  *at = value;            break;
+    case 2:  stw_le_p(at, value);    break;
+    default: stl_le_p(at, value);    break;
+    }
+    return MEMTX_OK;
+}
+
+static const MemoryRegionOps cdj_dsp_watch_ops = {
+    .read_with_attrs = cdj_dsp_watch_read,
+    .write_with_attrs = cdj_dsp_watch_write,
+    .endianness = DEVICE_NATIVE_ENDIAN,
+    /*
+     * An eight-byte access (fmov.d with FPSCR.SZ = 1) must not be refused
+     * where the plain RAM takes it: QEMU splits it into two words.
+     */
+    .valid = { .min_access_size = 1, .max_access_size = 8 },
+    .impl = { .min_access_size = 1, .max_access_size = 4 },
+};
+
+static gint cdj_dsp_reader_order(gconstpointer a, gconstpointer b)
+{
+    const DspReader *x = *(DspReader *const *)a, *y = *(DspReader *const *)b;
+
+    if (x->offset != y->offset) {
+        return x->offset < y->offset ? -1 : 1;
+    }
+    return x->pc < y->pc ? -1 : x->pc > y->pc;
+}
+
+/* One line per second of guest time: +OFFSET@PC=READS for that second. */
+static void cdj_dsp_read_census(CdjDspState *dsp, int64_t now)
+{
+    g_autoptr(GPtrArray) rows = g_ptr_array_new();
+    GHashTableIter iter;
+    gpointer value;
+    unsigned i;
+
+    g_hash_table_iter_init(&iter, dsp->readers);
+    while (g_hash_table_iter_next(&iter, NULL, &value)) {
+        if (((DspReader *)value)->second) {
+            g_ptr_array_add(rows, value);
+        }
+    }
+    if (!rows->len) {
+        return;
+    }
+    g_ptr_array_sort(rows, cdj_dsp_reader_order);
+    fprintf(stderr, "cdj2000-dsp: reads t=%.3f:", now / 1e9);
+    for (i = 0; i < rows->len; i++) {
+        DspReader *reader = g_ptr_array_index(rows, i);
+
+        if (reader->pc == DSP_READ_BY_DMA) {
+            fprintf(stderr, " +0x%04x@dma=%" PRIu64, reader->offset,
+                    reader->second);
+        } else {
+            fprintf(stderr, " +0x%04x@%08x=%" PRIu64, reader->offset,
+                    reader->pc, reader->second);
+        }
+        reader->second = 0;
+    }
+    fprintf(stderr, "\n");
+}
+
+/* CDJ_DSP_READ_TRACE's overlays, over the ranges SPEC lists. */
+static void cdj_dsp_read_trace_init(CdjDspState *dsp, MemoryRegion *system,
+                                    const char *spec)
+{
+    static const char defaults[] = "7b80-7d00,8100-81e0";
+    g_auto(GStrv) ranges = NULL;
+    unsigned i;
+
+    if (!*spec || !strcmp(spec, "1")) {
+        spec = defaults;
+    }
+    ranges = g_strsplit(spec, ",", -1);
+    dsp->readers = g_hash_table_new_full(g_direct_hash, g_direct_equal,
+                                         NULL, g_free);
+    for (i = 0; ranges[i] && dsp->read_watches < DSP_READ_WATCH_MAX; i++) {
+        DspReadWatch *watch = &dsp->read_watch[dsp->read_watches];
+        char *end, *name;
+        unsigned long lo = strtoul(ranges[i], &end, 16), hi;
+
+        hi = *end == '-' ? strtoul(end + 1, &end, 16) : 0;
+        lo &= ~3ul;
+        hi = (hi + 3) & ~3ul;
+        if (*end || hi <= lo || hi > DSP_MAILBOX_OFFSET) {
+            fprintf(stderr, "cdj2000-dsp: CDJ_DSP_READ_TRACE: range \"%s\" is "
+                    "not LO-HI inside +0x0000..+0x%04x, skipped\n",
+                    ranges[i], DSP_MAILBOX_OFFSET);
+            continue;
+        }
+        watch->dsp = dsp;
+        watch->offset = lo;
+        name = g_strdup_printf("cdj2000.dsp-read-watch-%04lx", lo);
+        memory_region_init_io(&watch->region, NULL, &cdj_dsp_watch_ops, watch,
+                              name, hi - lo);
+        g_free(name);
+        memory_region_add_subregion_overlap(system, CDJ_DSP_WINDOW_BASE + lo,
+                                            &watch->region, 1);
+        dsp->read_watches++;
+        fprintf(stderr, "cdj2000-dsp: read trace over +0x%04lx..+0x%04lx\n",
+                lo, hi);
+    }
+}
+
 static void cdj_dsp_tick(void *opaque)
 {
     CdjDspState *dsp = opaque;
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
 
     cdj_dsp_model_tick(dsp->model, dsp->ram, CDJ_DSP_WINDOW_SIZE);
-    timer_mod(dsp->tick, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + DSP_TICK_NS);
+    if (dsp->read_watches && now - dsp->read_census_ns >= NANOSECONDS_PER_SECOND) {
+        cdj_dsp_read_census(dsp, now);
+        dsp->read_census_ns = now;
+    }
+    timer_mod(dsp->tick, now + DSP_TICK_NS);
 }
 
 bool cdj_dsp_is_window(hwaddr address)
@@ -282,6 +497,7 @@ void cdj_dsp_transfer_start(void)
      */
     if (cdj_dsp) {
         cdj_dsp->transfers++;
+        cdj_dsp->in_transfer = true;
     }
 }
 
@@ -292,6 +508,7 @@ void cdj_dsp_transfer_done(hwaddr source, hwaddr destination, unsigned bytes)
     if (!dsp) {
         return;
     }
+    dsp->in_transfer = false;
     if (dsp->trace) {
         fprintf(stderr, "cdj2000-dsp: dma %#" HWADDR_PRIx " -> %#" HWADDR_PRIx
                 " (%u bytes)%s\n", source, destination, bytes,
@@ -331,6 +548,10 @@ void cdj_dsp_init(MemoryRegion *system, Chardev *external, qemu_irq irq,
     memory_region_init_io(&dsp->ctl, NULL, &cdj_dsp_ctl_ops, dsp,
                           "cdj2000.dsp-ctl", DSP_CTL_SIZE);
     memory_region_add_subregion(system, DSP_CTL_BASE, &dsp->ctl);
+
+    if (getenv("CDJ_DSP_READ_TRACE")) {
+        cdj_dsp_read_trace_init(dsp, system, getenv("CDJ_DSP_READ_TRACE"));
+    }
 
     /* The model is created after the window, because reset writes into it. */
     dsp->model = cdj_dsp_model_new(external);
