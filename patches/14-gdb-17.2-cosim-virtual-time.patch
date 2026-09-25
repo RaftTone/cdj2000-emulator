@@ -1,0 +1,1175 @@
+--- a/sim/bfin/interp.c
++++ b/sim/bfin/interp.c
+@@ -51,6 +51,11 @@
+ #endif
+ #else
+ #include <sys/select.h>
++#include <sys/socket.h>
++#include <netinet/in.h>
++#include <netinet/tcp.h>
++#include <arpa/inet.h>
++#include <poll.h>
+ #endif
+ 
+ /* The numbers here do not matter.  They just need to be unique.  They also
+@@ -703,7 +708,8 @@
+ struct bfin_wall
+ {
+   int init;
+-  int active;
++  int active;			/* BFIN_TIME_BASE=wall */
++  int virt;			/* BFIN_TIME_BASE=virtual */
+   double cclk_hz;
+   double t0;
+   int64_t base_ticks;
+@@ -718,6 +724,11 @@
+ static struct bfin_wall bfin_wall;
+ int bfin_idle_hint;
+ int bfin_idle_wake_pending;
++/* The run loop's simulator, for guest time outside it, and the
++   co-simulation (below the statistics).  */
++static SIM_DESC bfin_time_sd;
++static void bfin_cosim_connect (SIM_DESC sd);
++static void bfin_cosim_stats (void);
+ 
+ /* Wall-clock statistics and a clean exit, for measuring the simulator itself.
+ 
+@@ -908,6 +919,7 @@
+ 	       bfin_wall.parked_s,
+ 	       (double) bfin_wall.dropped / bfin_wall.cclk_hz * 1e3,
+ 	       bfin_wall.waits, bfin_wall.spins);
++      bfin_cosim_stats ();
+       fflush (stderr);
+       bfin_stats.last_wall = now;
+       bfin_stats.last_insns = bfin_stats.insns;
+@@ -967,13 +979,38 @@
+    piling expiries up in ILAT.
+ 
+    BFIN_TIME_BASE=insn is the upstream behaviour, for reproducing a run
+-   instruction for instruction.  */
++   instruction for instruction.
++
++   BFIN_TIME_BASE=virtual is guest time that belongs to the guest alone: every
++   instruction advances it by its cycles, as in insn, and a parked CPU jumps
++   straight to its next event instead of sleeping for it, so a second of guest
++   time is exactly the work a 400 MHz core would do in a second, however long
++   the host takes over it -- the time base two boards can share (the co-
++   simulation with the MAIN board, cosim.c).  The display and the link retry
++   are paced as on the wall clock, by BFIN_CCLK_HZ, BFIN_PPI_FPS and
++   BFIN_SPORT_RETRY_US; insn keeps upstream's scanline-per-tick display, which
++   costs a hardware event per cycle and ran this board at 3 MIPS.  */
+ 
++
++/* Guest seconds since the run loop started, for diagnostics that have to be
++   lined up with the other board's log (the co-simulation's time when it is
++   on: both start at 0).  */
++double
++bfin_guest_seconds (void)
++{
++  if (!bfin_time_sd)
++    return 0;
++  return (double) (sim_events_time (bfin_time_sd) - bfin_wall.base_ticks)
++	 / bfin_wall.cclk_hz;
++}
+ 
++/* A paced time base: the wall clock or the virtual one.  The device models
++   ask this to pace the display per frame and the link retries in guest
++   microseconds rather than per tick.  */
+ int
+ bfin_wall_active (void)
+ {
+-  return bfin_wall.active;
++  return bfin_wall.active || bfin_wall.virt;
+ }
+ 
+ unsigned
+@@ -1003,6 +1040,11 @@
+   value = getenv ("BFIN_TIME_BASE");
+   if (value && strcmp (value, "insn") == 0)
+     bfin_wall.active = 0;
++  else if ((value && strcmp (value, "virtual") == 0) || bfin_cosim_enabled ())
++    {
++      bfin_wall.active = 0;
++      bfin_wall.virt = 1;
++    }
+   value = getenv ("BFIN_CCLK_HZ");
+   if (value && *value)
+     bfin_wall.cclk_hz = strtod (value, NULL);
+@@ -1018,11 +1060,15 @@
+ 				 / 1e3);
+   bfin_wall.t0 = bfin_wall_seconds ();
+   bfin_wall.base_ticks = sim_events_time (sd);
++  bfin_time_sd = sd;
+   fprintf (stderr, "bfin: time base %s, cclk %.0f MHz, ppi %u fps,"
+ 	   " sport retry %u us, lag cap %" PRId64 " ticks\n",
+-	   bfin_wall.active ? "wall" : "insn", bfin_wall.cclk_hz / 1e6,
++	   bfin_wall.active ? "wall" : bfin_wall.virt ? "virtual" : "insn",
++	   bfin_wall.cclk_hz / 1e6,
+ 	   bfin_wall.ppi_fps, bfin_wall.sport_retry_us, bfin_wall.lag_cap);
+   fflush (stderr);
++  if (bfin_cosim_enabled ())
++    bfin_cosim_connect (sd);
+ }
+ 
+ /* Sleep for about this long, or until the MAIN link has data.  Below a
+@@ -1080,8 +1126,489 @@
+     select (fd >= 0 ? fd + 1 : 0, fd >= 0 ? &rd : NULL, NULL, NULL, &tv);
+   }
+ #endif
++}
++
++
++/* The co-simulation with the MAIN board: one guest time for both.
++
++   BFIN_COSIM=host:port connects to the MAIN machine's co-simulation port
++   (emulator/qemu/cdj2000_cosim.c, which has the whole story and the wire
++   format) and implies BFIN_TIME_BASE=virtual.  The link to MAIN then goes
++   over that one connection: MAIN's records arrive stamped with MAIN's guest
++   time and are handed to the SPORT model -- the same split into slots as
++   records off the old record socket -- at that time plus the link latency;
++   the GUI's requests leave stamped with this board's guest time.  The run
++   loop never goes further than MAIN's reported time plus the latency, and
++   reports its own time every half latency and whenever it waits, so neither
++   board ever sees the other in its future or its past.  */
++
++#define BFIN_COSIM_TIME 1
++#define BFIN_COSIM_RECORD 2
++#define BFIN_COSIM_REQUEST 3
++#define BFIN_COSIM_HELLO 4
++#define BFIN_COSIM_HEADER 20
++#define BFIN_COSIM_PAYLOAD_MAX 8192
++
++struct bfin_cosim_due
++{
++  struct bfin_cosim_due *next;
++  int64_t due;			/* guest ns it reaches this board */
++  unsigned len;
++  unsigned char data[];
++};
++
++static struct
++{
++  int enabled;			/* -1 until the environment is read */
++  int active;
++  int fd;
++  int64_t epoch;		/* the tick that is guest time 0 */
++  int64_t quantum;		/* ns: the latency and the lookahead */
++  int64_t peer;			/* MAIN's time, as far as it has told us */
++  int64_t peer_promise;		/* MAIN sends nothing before this */
++  int64_t reported;		/* ours, as far as MAIN knows */
++  int64_t promised;		/* the promise we last sent */
++  int64_t next_ticks;		/* when the run loop has to step */
++  struct bfin_cosim_due *head, *tail;
++  void (*inject) (void *, const unsigned char *, unsigned);
++  void *inject_ctx;
++  SIM_DESC sd;
++  unsigned char in[BFIN_COSIM_HEADER + BFIN_COSIM_PAYLOAD_MAX + 65536];
++  size_t in_len;
++  unsigned long steps, waits, records, requests, early, late;
++  double wait_s;
++} bfin_cosim = { .enabled = -1, .fd = -1 };
++
++int
++bfin_cosim_enabled (void)
++{
++  if (bfin_cosim.enabled < 0)
++    {
++      const char *spec = getenv ("BFIN_COSIM");
++
++      bfin_cosim.enabled = spec != NULL && *spec != '\0';
++    }
++  return bfin_cosim.enabled;
+ }
+ 
++static int64_t
++bfin_cosim_ns (int64_t ticks)
++{
++  return (int64_t) ((double) (ticks - bfin_cosim.epoch) * 1e9
++		    / bfin_wall.cclk_hz);
++}
++
++/* The first tick at or after guest time NS.  */
++static int64_t
++bfin_cosim_ticks (int64_t ns)
++{
++  double ticks = (double) ns * bfin_wall.cclk_hz / 1e9;
++  int64_t whole = (int64_t) ticks;
++
++  return bfin_cosim.epoch + whole + ((double) whole < ticks);
++}
++
++/* MAIN is gone -- the link closed, was reset or failed.  In one guest time
++   there is nothing left to run against, so exit normally: the atexit work
++   happens, the flash dump (BFIN_CFI_DUMP) of an update run in particular.
++   Only a malformed message keeps the GUI running, alone, for a post-mortem. */
++static void bfin_cosim_stats (void);
++
++static void
++bfin_cosim_lost (const char *why)
++{
++  if (!bfin_cosim.active)
++    return;
++  bfin_cosim.active = 0;
++  bfin_cosim.next_ticks = INT64_MAX;
++  if (strstr (why, "malformed") == NULL)
++    {
++      fprintf (stderr, "bfin-cosim: %s at guest t=%.6f; exiting\n", why,
++	       bfin_cosim_ns (sim_events_time (bfin_cosim.sd)) / 1e9);
++      bfin_cosim.active = 1;
++      bfin_cosim_stats ();
++      fflush (stderr);
++      exit (0);
++    }
++  fprintf (stderr, "bfin-cosim: %s at guest t=%.6f; the GUI runs on alone\n",
++	   why, bfin_cosim_ns (sim_events_time (bfin_cosim.sd)) / 1e9);
++  fflush (stderr);
++}
++
++#ifdef _WIN32
++static void
++bfin_cosim_write (const unsigned char *data, size_t len)
++{
++  (void) data;
++  (void) len;
++}
++
++static void
++bfin_cosim_connect (SIM_DESC sd)
++{
++  (void) sd;
++  fprintf (stderr, "bfin-cosim: BFIN_COSIM is not supported on Windows yet\n");
++  exit (2);
++}
++#else
++static void
++bfin_cosim_write (const unsigned char *data, size_t len)
++{
++  while (len && bfin_cosim.active)
++    {
++      ssize_t put = send (bfin_cosim.fd, data, len, 0);
++
++      if (put > 0)
++	{
++	  data += put;
++	  len -= (size_t) put;
++	}
++      else if (put < 0 && errno == EINTR)
++	continue;
++      else
++	bfin_cosim_lost (put < 0 ? strerror (errno) : "the link closed");
++    }
++}
++#endif
++
++static void
++bfin_cosim_send (unsigned type, int64_t t, const unsigned char *payload,
++		 unsigned len)
++{
++  unsigned char header[BFIN_COSIM_HEADER] = { 'C', 'D', 'J', 'C' };
++  int i;
++
++  if (!bfin_cosim.active)
++    return;
++  header[4] = (unsigned char) type;
++  for (i = 0; i < 8; i++)
++    header[8 + i] = (unsigned char) ((uint64_t) t >> (8 * i));
++  for (i = 0; i < 4; i++)
++    header[16 + i] = (unsigned char) (len >> (8 * i));
++  bfin_cosim_write (header, sizeof (header));
++  if (len)
++    bfin_cosim_write (payload, len);
++  if (t > bfin_cosim.reported)
++    bfin_cosim.reported = t;
++}
++
++#ifndef _WIN32
++static void
++bfin_cosim_connect (SIM_DESC sd)
++{
++  const char *spec = getenv ("BFIN_COSIM");
++  const char *quantum = getenv ("BFIN_COSIM_QUANTUM_US");
++  const char *colon = strrchr (spec, ':');
++  struct sockaddr_in address;
++  char host[64] = "127.0.0.1";
++  unsigned port;
++  int tries, one = 1;
++
++  if (colon)
++    {
++      size_t n = (size_t) (colon - spec);
++
++      if (n && n < sizeof (host))
++	{
++	  memcpy (host, spec, n);
++	  host[n] = '\0';
++	}
++      port = (unsigned) strtoul (colon + 1, NULL, 0);
++    }
++  else
++    port = (unsigned) strtoul (spec, NULL, 0);
++  memset (&address, 0, sizeof (address));
++  address.sin_family = AF_INET;
++  address.sin_port = htons (port);
++  inet_pton (AF_INET, host, &address.sin_addr);
++
++  /* MAIN listens from the moment its machine is built; give it a minute.  */
++  for (tries = 0; tries < 600; tries++)
++    {
++      bfin_cosim.fd = (int) socket (AF_INET, SOCK_STREAM, 0);
++      if (bfin_cosim.fd >= 0
++	  && connect (bfin_cosim.fd, (struct sockaddr *) &address,
++		      sizeof (address)) == 0)
++	break;
++      if (bfin_cosim.fd >= 0)
++	close (bfin_cosim.fd);
++      bfin_cosim.fd = -1;
++      usleep (100000);
++    }
++  if (bfin_cosim.fd < 0)
++    {
++      fprintf (stderr, "bfin-cosim: nothing listens on %s:%u\n", host, port);
++      exit (2);
++    }
++  setsockopt (bfin_cosim.fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof (one));
++  bfin_cosim.sd = sd;
++  bfin_cosim.active = 1;
++  bfin_cosim.quantum = (int64_t) (quantum && *quantum
++				  ? strtoll (quantum, NULL, 0) : 100) * 1000;
++  bfin_cosim.epoch = sim_events_time (sd);
++  bfin_cosim.peer = bfin_cosim.reported = 0;
++  bfin_cosim.peer_promise = bfin_cosim.promised = 0;
++  bfin_cosim_send (BFIN_COSIM_HELLO, 0, NULL, 0);
++  bfin_cosim.next_ticks = bfin_cosim_ticks (bfin_cosim.quantum / 2);
++  fprintf (stderr, "bfin-cosim: on with MAIN at %s:%u, link latency %"
++	   PRId64 " us, guest time 0 = tick %" PRId64 "\n", host, port,
++	   bfin_cosim.quantum / 1000, bfin_cosim.epoch);
++  fflush (stderr);
++}
++#endif
++
++static void
++bfin_cosim_parse (void)
++{
++  size_t at = 0;
++
++  while (bfin_cosim.active && bfin_cosim.in_len - at >= BFIN_COSIM_HEADER)
++    {
++      const unsigned char *head = bfin_cosim.in + at;
++      unsigned type = head[4];
++      unsigned len = head[16] | (head[17] << 8) | (head[18] << 16)
++		     | ((unsigned) head[19] << 24);
++      uint64_t t = 0;
++      int i;
++
++      for (i = 7; i >= 0; i--)
++	t = (t << 8) | head[8 + i];
++      if (memcmp (head, "CDJC", 4) != 0 || len > BFIN_COSIM_PAYLOAD_MAX)
++	{
++	  bfin_cosim_lost ("a malformed message from MAIN");
++	  return;
++	}
++      if (bfin_cosim.in_len - at < BFIN_COSIM_HEADER + len)
++	break;
++      if (type == BFIN_COSIM_RECORD && len)
++	{
++	  struct bfin_cosim_due *due = xmalloc (sizeof (*due) + len);
++
++	  due->next = NULL;
++	  due->due = (int64_t) t + bfin_cosim.quantum;
++	  /* A record due before this board's time broke a promise.  Counted,
++	     and handed over at once.  */
++	  if (due->due < bfin_cosim_ns (sim_events_time (bfin_cosim.sd)))
++	    bfin_cosim.late++;
++	  due->len = len;
++	  memcpy (due->data, head + BFIN_COSIM_HEADER, len);
++	  if (bfin_cosim.tail)
++	    bfin_cosim.tail->next = due;
++	  else
++	    bfin_cosim.head = due;
++	  bfin_cosim.tail = due;
++	  bfin_cosim.records++;
++	}
++      /* Every message says how far MAIN has got; a TIME with a payload also
++	 says MAIN sends nothing before that time.  */
++      if ((int64_t) t > bfin_cosim.peer)
++	bfin_cosim.peer = (int64_t) t;
++      {
++	int64_t promise = (int64_t) t;
++
++	if (type == BFIN_COSIM_TIME && len == 8)
++	  {
++	    uint64_t v = 0;
++
++	    for (i = 7; i >= 0; i--)
++	      v = (v << 8) | head[BFIN_COSIM_HEADER + i];
++	    promise = (int64_t) v;
++	  }
++	if (promise > bfin_cosim.peer_promise)
++	  bfin_cosim.peer_promise = promise;
++      }
++      at += BFIN_COSIM_HEADER + len;
++    }
++  memmove (bfin_cosim.in, bfin_cosim.in + at, bfin_cosim.in_len - at);
++  bfin_cosim.in_len -= at;
++}
++
++static void
++bfin_cosim_drain (void)
++{
++#ifndef _WIN32
++  while (bfin_cosim.active)
++    {
++      ssize_t got;
++
++      if (bfin_cosim.in_len == sizeof (bfin_cosim.in))
++	{
++	  bfin_cosim_parse ();
++	  if (bfin_cosim.in_len == sizeof (bfin_cosim.in))
++	    {
++	      bfin_cosim_lost ("a message larger than the input buffer");
++	      break;
++	    }
++	}
++      got = recv (bfin_cosim.fd, bfin_cosim.in + bfin_cosim.in_len,
++		  sizeof (bfin_cosim.in) - bfin_cosim.in_len, MSG_DONTWAIT);
++      if (got > 0)
++	bfin_cosim.in_len += (size_t) got;
++      else if (got == 0)
++	bfin_cosim_lost ("MAIN closed the link");
++      else if (errno == EINTR)
++	continue;
++      else if (errno == EAGAIN || errno == EWOULDBLOCK)
++	break;
++      else
++	bfin_cosim_lost (strerror (errno));
++    }
++#endif
++  bfin_cosim_parse ();
++}
++
++/* MAIN's records whose time has come, to the SPORT model.  Records that come
++   before the firmware has touched the link wait for it -- the old record
++   socket kept them the same way, in its buffer.  */
++static void
++bfin_cosim_deliver (int64_t now)
++{
++  while (bfin_cosim.head && bfin_cosim.head->due <= now)
++    {
++      struct bfin_cosim_due *due = bfin_cosim.head;
++
++      if (!bfin_cosim.inject)
++	{
++	  bfin_cosim.early++;
++	  break;
++	}
++      bfin_cosim.head = due->next;
++      if (!bfin_cosim.head)
++	bfin_cosim.tail = NULL;
++      bfin_cosim.inject (bfin_cosim.inject_ctx, due->data, due->len);
++      free (due);
++    }
++}
++
++void
++bfin_cosim_attach_link (void (*inject) (void *, const unsigned char *,
++					unsigned),
++			void *ctx)
++{
++  bfin_cosim.inject = inject;
++  bfin_cosim.inject_ctx = ctx;
++  if (bfin_cosim.active)
++    bfin_cosim_deliver (bfin_cosim_ns (sim_events_time (bfin_cosim.sd)));
++}
++
++void
++bfin_cosim_send_request (const unsigned char *data, unsigned len)
++{
++  if (!bfin_cosim.active)
++    return;
++  bfin_cosim.requests++;
++  bfin_cosim_send (BFIN_COSIM_REQUEST,
++		   bfin_cosim_ns (sim_events_time (bfin_cosim.sd)), data, len);
++}
++
++static void
++bfin_cosim_stats (void)
++{
++  if (bfin_cosim.active)
++    fprintf (stderr, "STATS cosim steps=%lu waits=%lu wait_s=%.2f"
++	     " records=%lu requests=%lu early=%lu late=%lu main_t=%.6f"
++	     " main_promise=%.6f\n",
++	     bfin_cosim.steps, bfin_cosim.waits, bfin_cosim.wait_s,
++	     bfin_cosim.records, bfin_cosim.requests, bfin_cosim.early,
++	     bfin_cosim.late, bfin_cosim.peer / 1e9,
++	     bfin_cosim.peer_promise / 1e9);
++}
++
++/* The earliest guest time this board could send anything.  While the core
++   runs, now.  While it is parked, not before its next event, a record due
++   from MAIN, or the earliest a message from MAIN could arrive -- the
++   lookahead that lets MAIN run on to it (cdj2000_cosim.c has the story).  */
++static int64_t
++bfin_cosim_promise (SIM_DESC sd, int64_t now, int parked)
++{
++  int64_t promise, next_event;
++
++  if (!parked)
++    return now;
++  next_event = STATE_EVENTS (sd)->time_from_event;
++  promise = next_event > 0
++    ? bfin_cosim_ns (sim_events_time (sd) + next_event) : now;
++  if (bfin_cosim.head && bfin_cosim.inject && bfin_cosim.head->due < promise)
++    promise = bfin_cosim.head->due;
++  if (bfin_cosim.peer_promise + bfin_cosim.quantum < promise)
++    promise = bfin_cosim.peer_promise + bfin_cosim.quantum;
++  return promise > now ? promise : now;
++}
++
++static void
++bfin_cosim_report (int64_t now, int64_t promise)
++{
++  unsigned char payload[8];
++  int i;
++
++  for (i = 0; i < 8; i++)
++    payload[i] = (unsigned char) ((uint64_t) promise >> (8 * i));
++  bfin_cosim_send (BFIN_COSIM_TIME, now, payload, sizeof (payload));
++  bfin_cosim.promised = promise;
++}
++
++/* Take what MAIN sent, hand over the records that are due, tell MAIN where
++   this board is and what it promises, and wait while it is a whole latency
++   ahead of what MAIN has promised.  */
++static void
++bfin_cosim_step (SIM_DESC sd, int parked)
++{
++  int64_t now = bfin_cosim_ns (sim_events_time (sd));
++  int64_t next, promise;
++  double wall = 0;
++
++  bfin_cosim.steps++;
++  bfin_cosim_drain ();
++  bfin_cosim_deliver (now);
++  if (bfin_cosim.head && bfin_cosim.head->due <= now)
++    parked = 0;			/* a record is being handed over: awake */
++  promise = bfin_cosim_promise (sd, now, parked);
++  if (now - bfin_cosim.reported >= bfin_cosim.quantum / 2
++      || promise > bfin_cosim.promised)
++    bfin_cosim_report (now, promise);
++  while (bfin_cosim.active
++	 && now >= bfin_cosim.peer_promise + bfin_cosim.quantum)
++    {
++#ifndef _WIN32
++      struct pollfd wait = { .fd = bfin_cosim.fd, .events = POLLIN };
++
++      promise = bfin_cosim_promise (sd, now, parked);
++      if (bfin_cosim.reported != now || promise != bfin_cosim.promised)
++	bfin_cosim_report (now, promise);
++      if (wall == 0)
++	{
++	  wall = bfin_wall_seconds ();
++	  bfin_cosim.waits++;
++	}
++      if (poll (&wait, 1, 1000) == 0)
++	continue;
++#endif
++      bfin_cosim_drain ();
++      bfin_cosim_deliver (now);
++    }
++  if (wall != 0)
++    bfin_cosim.wait_s += bfin_wall_seconds () - wall;
++  if (!bfin_cosim.active)
++    return;
++  next = bfin_cosim.peer_promise + bfin_cosim.quantum;
++  promise = bfin_cosim_promise (sd, now, parked);
++  if (promise > bfin_cosim.promised)
++    bfin_cosim_report (now, promise);
++  /* running: report every half latency; parked: at the promise */
++  if (promise == now)
++    {
++      if (bfin_cosim.reported + bfin_cosim.quantum / 2 < next)
++	next = bfin_cosim.reported + bfin_cosim.quantum / 2;
++    }
++  else if (promise < next)
++    next = promise;
++  if (bfin_cosim.head && bfin_cosim.inject && bfin_cosim.head->due < next)
++    next = bfin_cosim.head->due;
++  bfin_cosim.next_ticks = bfin_cosim_ticks (next);
++  if (bfin_cosim.next_ticks <= sim_events_time (sd))
++    bfin_cosim.next_ticks = sim_events_time (sd) + 1;
++}
++
+ /* Deliver up to `rest` ticks.  sim_events_tick fires at time_from_event == 0
+    and sim_events_tickn only when the chunk is larger than time_from_event,
+    so a chunk is never larger than the distance to the next event, and the
+@@ -1200,6 +1727,15 @@
+   }
+ }
+ 
++/* The virtual time base's parked time, for the STATS line: guest time the
++   CPU skipped rather than executed.  */
++static void
++bfin_virt_parked (SIM_DESC sd, int64_t ticks)
++{
++  bfin_wall.parked_s += (double) ticks / bfin_wall.cclk_hz;
++  bfin_wall.waits++;
++}
++
+ void
+ sim_engine_run (SIM_DESC sd,
+ 		int next_cpu_nr, /* ignore  */
+@@ -1253,6 +1789,41 @@
+ 	  if (parked || (bfin_stats.insns & 0xff) == 0)
+ 	    bfin_wall_sync (sd, cpu, parked);
+ 	}
++      else if (bfin_wall.virt)
++	{
++	  /* Parked: straight to the next event -- which is where an IDLE's
++	     CYCLE_DELAY points as well -- in one delivery rather than tick by
++	     tick.  Otherwise the instruction's own cycles.  */
++	  int parked = ((PCREG == oldpc && BFIN_CPU_STATE.did_jump
++			 && LCREG (0) == 0 && LCREG (1) == 0)
++			|| bfin_idle_hint);
++
++	  bfin_idle_hint = 0;
++	  if (bfin_cosim.active && sim_events_time (sd) >= bfin_cosim.next_ticks)
++	    bfin_cosim_step (sd, parked);
++	  if (parked)
++	    {
++	      int64_t next = STATE_EVENTS (sd)->time_from_event;
++
++	      if (next <= 0)
++		next = 1;
++	      /* Never past the co-simulation's next step.  */
++	      if (bfin_cosim.active
++		  && bfin_cosim.next_ticks - sim_events_time (sd) < next)
++		next = bfin_cosim.next_ticks - sim_events_time (sd);
++	      if (next <= 0)
++		next = 1;
++	      bfin_virt_parked (sd, next);
++	      bfin_wall_deliver (sd, cpu, next);
++	    }
++	  else
++	    for (ticks = 0; ticks < CYCLE_DELAY; ++ticks)
++	      if (sim_events_tick (sd))
++		{
++		  sim_events_process (sd);
++		  ++bfin_stats.events;
++		}
++	}
+       else
+ 	{
+ 	  /* Process any events -- can't use tickn because it may
+--- a/sim/bfin/dv-bfin_dma.c
++++ b/sim/bfin/dv-bfin_dma.c
+@@ -503,6 +503,13 @@
+     }
+   }
+ 
++  /* The first line of a 2D block is the top of a display frame: the PPI's
++     frame sync.  */
++  if (!(dma->config & WNR) && (dma->config & DMA2D)
++      && dma->curr_x_count == dma->x_count && dma->curr_y_count == dma->y_count
++      && strstr (hw_name (peer), "bfin_ppi") != NULL)
++    bfin_ppi_frame_sync (peer);
++
+   /* Pumping a chunk!  */
+   bfin_peer->dma_master = me;
+   bfin_peer->acked = false;
+--- a/sim/bfin/dv-bfin_ppi.c
++++ b/sim/bfin/dv-bfin_ppi.c
+@@ -204,6 +204,15 @@
+   return 0;
+ }
+ 
++/* The display DMA is at the top of a frame (dv-bfin_dma.c).  */
++void
++bfin_ppi_frame_sync (struct hw *me)
++{
++  struct bfin_ppi *ppi = hw_data (me);
++
++  bfin_gui_frame_sync (ppi->gui_state);
++}
++
+ static unsigned
+ bfin_ppi_dma_write_buffer (struct hw *me, const void *source,
+ 			   int space, unsigned_word addr,
+@@ -608,6 +617,9 @@
+ /* BFIN_MAIN_LINK=host:port.  Opened lazily so the MAIN machine has time to
+    come up and start listening; a failed attempt is retried on the next
+    transfer rather than being fatal.  */
++
++static void bfin_sport_cosim_inject (void *ctx, const unsigned char *frame,
++				     unsigned len);
+ 
+ static void
+ bfin_sport_link_open (struct bfin_sport *sport)
+@@ -617,6 +629,15 @@
+   const char *colon;
+   unsigned port;
+ 
++  /* BFIN_COSIM: the link is the co-simulation's connection, opened by the run
++     loop (interp.c); the two sockets below stay closed.  */
++  if (bfin_cosim_enabled ())
++    {
++      sport->link_opened = 1;
++      bfin_cosim_attach_link (bfin_sport_cosim_inject, sport);
++      bfin_sport_peer_trace (sport, "link-open", 0);
++      return;
++    }
+   if (spec == NULL || *spec == '\0')
+     return;
+ 
+@@ -1277,9 +1298,10 @@
+ 	{
+ 	  const unsigned char *b = head + 8;
+ 
+-	  fprintf (stderr, "link-split len %u%s\n", length,
++	  fprintf (stderr, "link-split len %u%s g=%.5f\n", length,
+ 		   length == sizeof (sport->link_last)
+-		   ? ((b[58] | (b[59] << 8)) ? " announce" : " plain") : "");
++		   ? ((b[58] | (b[59] << 8)) ? " announce" : " plain") : "",
++		   bfin_guest_seconds ());
+ 	  fflush (stderr);
+ 	}
+ 
+@@ -1448,6 +1470,39 @@
+       }
+       sport->link_in_len += (size_t) got;
+     }
++  bfin_sport_link_split (sport);
++}
++
++/* BFIN_COSIM: one of MAIN's records, at its time on this board, into the
++   staging buffer exactly as the record socket used to deliver it.  */
++static void
++bfin_sport_cosim_inject (void *ctx, const unsigned char *frame, unsigned len)
++{
++  struct bfin_sport *sport = ctx;
++  unsigned char *at;
++
++  if (8 + (size_t) len > sizeof (sport->link_in) - sport->link_in_len)
++    {
++      bfin_sport_link_split (sport);
++      if (8 + (size_t) len > sizeof (sport->link_in) - sport->link_in_len)
++	{
++	  sport->link_rx_stall++;
++	  return;
++	}
++    }
++  at = sport->link_in + sport->link_in_len;
++  memcpy (at, "CDJL", 4);
++  at[4] = (unsigned char) len;
++  at[5] = (unsigned char) (len >> 8);
++  at[6] = (unsigned char) (len >> 16);
++  at[7] = (unsigned char) (len >> 24);
++  memcpy (at + 8, frame, len);
++  sport->link_in_len += 8 + (size_t) len;
++  sport->link_rx_bytes += 8 + len;
++  {
++    extern unsigned long bfin_stat_link_rx_bytes;
++    bfin_stat_link_rx_bytes += 8 + len;
++  }
+   bfin_sport_link_split (sport);
+ }
+ 
+@@ -2288,7 +2343,8 @@
+   sport->rx_initialized = true;
+   sport->rx_records = getenv ("BFIN_SPORT_RX_RECORDS") != NULL;
+   sport->peer_enabled = getenv ("BFIN_MAIN_PEER") != NULL;
+-  sport->link_enabled = getenv ("BFIN_MAIN_LINK") != NULL;
++  sport->link_enabled = (getenv ("BFIN_MAIN_LINK") != NULL
++			|| bfin_cosim_enabled ());
+   sport->link_request_fd = sport->link_record_fd = -1;
+ 
+   if (path && *path)
+@@ -2373,10 +2429,38 @@
+   return nr_bytes;
+ }
+ 
++static unsigned bfin_sport_dma_read_buffer_1 (struct hw *me, void *dest,
++					      int space, unsigned_word addr,
++					      unsigned nr_bytes);
++
++/* BFIN_SPORT_RX_ADDR_TRACE also reports what each receive was given.  */
+ static unsigned
+ bfin_sport_dma_read_buffer (struct hw *me, void *dest, int space,
+ 			    unsigned_word addr, unsigned nr_bytes)
+ {
++  unsigned got = bfin_sport_dma_read_buffer_1 (me, dest, space, addr,
++					       nr_bytes);
++
++  if (got && BFIN_PPI_ENV (rx_addr_trace))
++    {
++      const unsigned char *b = dest;
++
++      fprintf (stderr, "sport rx gave %u of %u to 0x%08x: %02x%02x %02x%02x"
++	       " %02x%02x %02x%02x g=%.5f\n", got, nr_bytes, (unsigned) addr,
++	       b[1], b[0], b[3], b[2], b[5], b[4], b[7], b[6],
++	       bfin_guest_seconds ());
++      fflush (stderr);
++    }
++  return got;
++}
++
++/* Where the GUI's receive descriptor puts a 64-byte status record.  */
++#define BFIN_LINK_STATUS_BUFFER 0x00f00000
++
++static unsigned
++bfin_sport_dma_read_buffer_1 (struct hw *me, void *dest, int space,
++			      unsigned_word addr, unsigned nr_bytes)
++{
+   struct bfin_sport *sport = hw_data (me);
+   size_t remaining;
+ 
+@@ -2400,8 +2484,9 @@
+ 	 this byte is what a delivery would have to look at to stay out of that
+ 	 window.  */
+       sim_read (hw_system (me), 0x005880b8, &busy, 1);
+-      fprintf (stderr, "sport rx addr 0x%08x len %u rxstate %u busy %u\n",
+-	       (unsigned) addr, nr_bytes, state, busy);
++      fprintf (stderr, "sport rx addr 0x%08x len %u rxstate %u busy %u"
++	       " g=%.5f\n", (unsigned) addr, nr_bytes, state, busy,
++	       bfin_guest_seconds ());
+       fflush (stderr);
+     }
+ 
+@@ -2443,6 +2528,7 @@
+               && bfin_sport_link_hold_announce ()
+ 	      && !bfin_sport_link_announce_sticky ()
+ 	      && nr_bytes == sizeof (sport->link_last)
++	      && addr == BFIN_LINK_STATUS_BUFFER
+ 	      && sport->link_have_last
+ 	      && sport->link_announce_pending)
+ 	    {
+@@ -2495,7 +2581,18 @@
+ 		  memmove (sport->link_in, sport->link_in + nr_bytes,
+ 			   sport->link_in_len);
+ 		}
+-	      if (nr_bytes == sizeof (sport->link_last))
++	      /* A status record is received into 0x00f00000 and an announced
++		 payload into 0x00f00040 (see bfin_sport_dma_read_buffer_1), so
++		 the length alone does not say which it is: a list answer of
++		 exactly 32 words -- "SndSize=32W, DBsize=62B" -- is 64 bytes
++		 like a record.  Taken as a record, it had the announcement
++		 carried onto its bytes 58..63 and its CRC rewritten, it became
++		 the "last record", and the announcement stayed pending: the GUI
++		 never finished the receive, MAIN waited 5 s on every exchange
++		 from then on ("bAnsReceive ... (Cmd=0x0)") -- the TAG LIST stall
++		 of NEW FIRMWARE's B9, and the first browse on aconcert-1g.  */
++	      if (nr_bytes == sizeof (sport->link_last)
++		  && addr == BFIN_LINK_STATUS_BUFFER)
+ 		{
+ 		  unsigned char *bytes = dest;
+ 
+@@ -2565,7 +2662,8 @@
+ 	  /* Between MAIN's transmissions the wire still carries its last
+ 	     record, so repeat it rather than stalling the GUI.  */
+ 	  if (!bfin_sport_link_fresh_only ()
+-              && nr_bytes == sizeof (sport->link_last) && sport->link_have_last)
++              && nr_bytes == sizeof (sport->link_last)
++	      && addr == BFIN_LINK_STATUS_BUFFER && sport->link_have_last)
+ 	    {
+ 	      memcpy (dest, sport->link_last, nr_bytes);
+ 	      sport->link_rx_repeat++;
+@@ -2822,7 +2920,11 @@
+ 	bfin_sport_link_open (sport);
+       if (sport->link_opened)
+ 	{
+-	  send (sport->link_request_fd, (const char *) source, (int) nr_bytes, 0);
++	  if (bfin_cosim_enabled ())
++	    bfin_cosim_send_request (source, nr_bytes);
++	  else
++	    send (sport->link_request_fd, (const char *) source,
++		  (int) nr_bytes, 0);
+ 	  bfin_sport_peer_trace (sport, "link-tx", nr_bytes);
+ 	}
+     }
+--- a/sim/bfin/bfin-sim.h
++++ b/sim/bfin/bfin-sim.h
+@@ -325,6 +325,14 @@
+ unsigned bfin_wall_ticks_us (unsigned us);
+ unsigned bfin_wall_frame_gap_ticks (unsigned lines_already);
+ int bfin_sport_link_wait_fd (void);
++double bfin_guest_seconds (void);
++void bfin_ppi_frame_sync (struct hw *ppi);
++/* The co-simulation with the MAIN board (interp.c, BFIN_COSIM).  */
++int bfin_cosim_enabled (void);
++void bfin_cosim_attach_link (void (*inject) (void *, const unsigned char *,
++					     unsigned),
++			     void *ctx);
++void bfin_cosim_send_request (const unsigned char *data, unsigned len);
+ void bfin_sport_clock_report (struct hw *sport);
+ void bfin_trace_framebuffer_store_slow (SIM_CPU *cpu, bu32 addr, bu32 value,
+ 					unsigned bytes);
+--- a/sim/bfin/bfin-sim.c
++++ b/sim/bfin/bfin-sim.c
+@@ -8829,10 +8829,11 @@
+ 	      cw_seen++;
+ 	      fprintf (stderr,
+ 		       "CALLWATCH pc=%#x R0=%#x R1=%#x R2=%#x R3=%#x "
+-		       "P0=%#x P1=%#x P2=%#x rets=%#x seen=%u disp=%lu\n",
++		       "P0=%#x P1=%#x P2=%#x rets=%#x seen=%u disp=%lu"
++		       " g=%.5f\n",
+ 		       pc, DREG (0), DREG (1), DREG (2), DREG (3),
+ 		       PREG (0), PREG (1), PREG (2), RETSREG,
+-		       cw_seen, pc_ring_total);
++		       cw_seen, pc_ring_total, bfin_guest_seconds ());
+ 	      /* A register value alone is not enough when the interesting
+ 		 thing is a struct being handed on.  BFIN_CALL_WATCH_DUMP=<n>
+ 		 also prints n bytes from wherever R1 points, which is where
+--- a/sim/bfin/gui.c
++++ b/sim/bfin/gui.c
+@@ -790,7 +790,111 @@
+       fclose (stream);
+     }
+ }
++
++/* A frame is complete: count it, publish it if it changed, and start the
++   next one at the top.  */
++static void
++bfin_gui_frame_complete (struct gui_state *gui)
++{
++  {
++    extern unsigned long bfin_stat_frames;
++    ++bfin_stat_frames;
++  }
++  /* BFIN_GUI_FRAME_TRACE: how many frames the compositor has *completed*,
++     which is the one thing a frame sampler cannot see.  A screen whose
++     bytes stop changing and a compositor that has stopped publishing look
++     identical from outside -- r105 and r106 both stand still from ~t180
++     while MAIN keeps taking 7 000 requests, and a late press of the one bit
++     known to redraw (18.3, r096) moved nothing.  This line separates "the
++     picture is static" from "the drawing task is gone" without a
++     breakpoint.  */
++  {
++    extern double bfin_sim_seconds (void);	/* dv-bfin_cec.c */
++    static int enabled = -1;
++    static unsigned long frames;
++    static double next;
++
++    if (enabled < 0)
++      enabled = (getenv ("BFIN_GUI_FRAME_TRACE") != NULL);
++    if (enabled)
++      {
++	double now = bfin_sim_seconds ();
+ 
++	frames++;
++	if (now >= next)
++	  {
++	    fprintf (stderr, "gui frames %lu completed at t%.1f\n",
++		frames, now);
++	    fflush (stderr);
++	    next = now + 20.0;
++	  }
++      }
++  }
++  gui->curr_line = 0;
++  bfin_gui_handle_jog (gui);
++  /* Only publish a picture that is not the one already on disk.  A viewer
++     watching the file for changes sees exactly the same sequence of
++     images; what it stops seeing is the same image over and over.
++     BFIN_GUI_WRITE_EVERY_FRAME=1 restores the unconditional write for a
++     run that wants every scan on disk.  */
++  {
++    size_t bytes = (size_t) gui->width * gui->height * 3;
++    static int always = -1;
++
++    if (always < 0)
++      {
++	const char *env = getenv ("BFIN_GUI_WRITE_EVERY_FRAME");
++
++	always = env && *env;
++      }
++    if (always || !gui->have_published
++	|| (gui->frame_changed
++	    && memcmp (gui->rgb, gui->published, bytes) != 0))
++      {
++	memcpy (gui->published, gui->rgb, bytes);
++	gui->have_published = 1;
++	{
++	  extern unsigned long bfin_stat_frames_published;
++	  ++bfin_stat_frames_published;
++	}
++	bfin_gui_write_frame_to (gui, gui->output_path);
++	bfin_gui_write_raw_frame (gui);
++      }
++  }
++  /* No RGB writes occurred on an unchanged scan: avoid comparing the
++     entire published frame again. Scoring conversions still mark it. */
++  gui->frame_changed = 0;
++  if (gui->best_output_path && gui->frame_score > gui->best_score)
++    {
++      gui->best_score = gui->frame_score;
++      bfin_gui_write_frame_to (gui, gui->best_output_path);
++    }
++  if (gui->detail_output_path && gui->frame_detail > gui->best_detail)
++    {
++      gui->best_detail = gui->frame_detail;
++      bfin_gui_write_frame_to (gui, gui->detail_output_path);
++    }
++  gui->frame_score = 0;
++  gui->frame_detail = 0;
++}
++
++/* Frame sync: the display DMA is at the first line of its 2D block.  Lines
++   used to be placed by a counter that only wrapped at the picture's height,
++   so the picture sat wherever the first line after start-up happened to
++   land -- 15 lines higher on the virtual time base than on the wall clock,
++   with the browser's title row off the top.  The PPI marks the start of a
++   frame on the chip; this is that mark.  */
++void
++bfin_gui_frame_sync (void *state)
++{
++  struct gui_state *gui = state;
++
++  /* A block shorter than the picture (the late "/2" board's DMA is 250
++     lines, the picture 255) ends a frame too: publish what it drew.  */
++  if (gui && gui->curr_line)
++    bfin_gui_frame_complete (gui);
++}
++
+ unsigned
+ bfin_gui_update (void *state, const void *source, unsigned nr_bytes)
+ {
+@@ -827,89 +931,8 @@
+       }
+   }
+   if (++gui->curr_line == gui->height)
+-    {
+-      {
+-	extern unsigned long bfin_stat_frames;
+-	++bfin_stat_frames;
+-      }
+-      /* BFIN_GUI_FRAME_TRACE: how many frames the compositor has *completed*,
+-	 which is the one thing a frame sampler cannot see.  A screen whose
+-	 bytes stop changing and a compositor that has stopped publishing look
+-	 identical from outside -- r105 and r106 both stand still from ~t180
+-	 while MAIN keeps taking 7 000 requests, and a late press of the one bit
+-	 known to redraw (18.3, r096) moved nothing.  This line separates "the
+-	 picture is static" from "the drawing task is gone" without a
+-	 breakpoint.  */
+-      {
+-	extern double bfin_sim_seconds (void);	/* dv-bfin_cec.c */
+-	static int enabled = -1;
+-	static unsigned long frames;
+-	static double next;
++    bfin_gui_frame_complete (gui);
+ 
+-	if (enabled < 0)
+-	  enabled = (getenv ("BFIN_GUI_FRAME_TRACE") != NULL);
+-	if (enabled)
+-	  {
+-	    double now = bfin_sim_seconds ();
+-
+-	    frames++;
+-	    if (now >= next)
+-	      {
+-		fprintf (stderr, "gui frames %lu completed at t%.1f\n",
+-			 frames, now);
+-		fflush (stderr);
+-		next = now + 20.0;
+-	      }
+-	  }
+-      }
+-      gui->curr_line = 0;
+-      bfin_gui_handle_jog (gui);
+-      /* Only publish a picture that is not the one already on disk.  A viewer
+-	 watching the file for changes sees exactly the same sequence of
+-	 images; what it stops seeing is the same image over and over.
+-	 BFIN_GUI_WRITE_EVERY_FRAME=1 restores the unconditional write for a
+-	 run that wants every scan on disk.  */
+-      {
+-	size_t bytes = (size_t) gui->width * gui->height * 3;
+-	static int always = -1;
+-
+-	if (always < 0)
+-	  {
+-	    const char *env = getenv ("BFIN_GUI_WRITE_EVERY_FRAME");
+-
+-	    always = env && *env;
+-	  }
+-	if (always || !gui->have_published
+-	    || (gui->frame_changed
+-		&& memcmp (gui->rgb, gui->published, bytes) != 0))
+-	  {
+-	    memcpy (gui->published, gui->rgb, bytes);
+-	    gui->have_published = 1;
+-	    {
+-	      extern unsigned long bfin_stat_frames_published;
+-	      ++bfin_stat_frames_published;
+-	    }
+-	    bfin_gui_write_frame_to (gui, gui->output_path);
+-	    bfin_gui_write_raw_frame (gui);
+-	  }
+-      }
+-      /* No RGB writes occurred on an unchanged scan: avoid comparing the
+-         entire published frame again. Scoring conversions still mark it. */
+-      gui->frame_changed = 0;
+-      if (gui->best_output_path && gui->frame_score > gui->best_score)
+-	{
+-	  gui->best_score = gui->frame_score;
+-	  bfin_gui_write_frame_to (gui, gui->best_output_path);
+-	}
+-      if (gui->detail_output_path && gui->frame_detail > gui->best_detail)
+-	{
+-	  gui->best_detail = gui->frame_detail;
+-	  bfin_gui_write_frame_to (gui, gui->detail_output_path);
+-	}
+-      gui->frame_score = 0;
+-      gui->frame_detail = 0;
+-    }
+-
+   return nr_bytes;
+ }
+ 
+--- a/sim/bfin/gui.h
++++ b/sim/bfin/gui.h
+@@ -50,6 +50,11 @@
+ unsigned bfin_gui_update (void *state, const void *source, unsigned nr_bytes)
+   _BFIN_GUI_STUB(0)
+ 
++/* The PPI started a frame: the next line is the top one.  */
++_BFIN_GUI_INLINE
++void bfin_gui_frame_sync (void *state)
++  _BFIN_GUI_STUB()
++
+ #undef _BFIN_GUI_INLINE
+ #undef _BFIN_GUI_STUB
+ 
+--- a/sim/bfin/dv-bfin_gpio.c
++++ b/sim/bfin/dv-bfin_gpio.c
+@@ -212,6 +212,33 @@
+ 	    bu16 mask = strtoul (ready_toggle, NULL, 0);
+ 	    data = (data & ~mask) | ((ready_phase++ & 1) ? mask : 0);
+ 	  }
++	/* BFIN_GPIO_STRAP=<mask>:<value>: board straps on the PF port, read as
++	   those levels.  The GUI reads PF3 right after its board init as the
++	   panel revision -- 1 is the late "/2" board (inverted pixel clock,
++	   no timer0 PWM, a dot after the version) -- so 0x8:0x8 runs the path
++	   an original board never takes.  */
++	if (port->base == 0xffc00700)
++	  {
++	    static int strap_read;
++	    static bu16 strap_mask, strap_value;
++
++	    if (!strap_read)
++	      {
++		const char *strap = getenv ("BFIN_GPIO_STRAP");
++		char *end;
++
++		strap_read = 1;
++		if (strap && *strap)
++		  {
++		    strap_mask = strtoul (strap, &end, 0);
++		    strap_value = *end == ':' ? strtoul (end + 1, NULL, 0)
++					      : strap_mask;
++		    fprintf (stderr, "gpio: PF straps 0x%04x read as 0x%04x\n",
++			     strap_mask, strap_value & strap_mask);
++		  }
++	      }
++	    data = (data & ~strap_mask) | (strap_value & strap_mask);
++	  }
+ 	dv_store_2 (dest, data);
+       }
+       break;

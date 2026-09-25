@@ -447,3 +447,89 @@ receive-capture lifetime contract. `tests/test_bfin_sport_tx_capture.py`
 checks one-open descriptor reuse, visibility before close, and byte-exact
 normal/abrupt output. `tools/cdj_gui/benchmark_sport_tx.py` measures the
 capture path against the previous open/write/close implementation.
+
+## 13: no canned bootstrap records once the live link has spoken
+
+The file-based peer and the `--packet` stream exist to start the GUI before MAIN
+has sent anything. Under `BFIN_LINK_FRESH_ONLY=1` the live path returns nothing
+whenever MAIN has sent nothing new, and the read then fell through to those
+canned sources: the GUI firmware received the bootstrap status record ("nothing
+mounted", halfwords 29/30 zero) on top of a live one, and thousands of canned
+deliveries for announced payload lengths. A record without the announcement
+landing while the firmware waits for the announced payload is exactly the fault
+at `0x00b7cb50` (halfword 30 reads 0, `(0-1)*2`, the checksum walks off the CPLB
+map) and the double fault at `0x00b99196` behind it: `BFIN_SPORT_RX_ADDR_TRACE`
+showed 5 033 224-byte deliveries into `0x00f00040` for one or two MAIN
+transmissions, and the fault dump showed a record the live trace never saw.
+
+Once the link is open and has delivered a record, a read with nothing fresh now
+returns 0 -- a quiet wire -- and the DMA waits for MAIN. Legacy delivery never
+reaches that point (it repeats the last live record first), so its behaviour is
+unchanged. With this patch the stock CDJ-2000 GUI 4.20 browses natively on
+fresh-only delivery (encoder click 100-150 ms: categories, playlists, a
+playlist's track list with artist, length, BPM and key) without the double
+fault; the earlier NXS observation under patch 05 (E-8709, the announced payload
+never consumed) may share this cause and has not been re-run.
+
+## 14: one guest time with MAIN, a virtual time base, frame sync
+
+The GUI simulator executes about thirty million instructions a second where
+the BF531 executes four hundred, and on the wall-clock time base that speed was
+part of the protocol: MAIN gives the GUI 3 ms to answer a record, a GUI that is
+late on the wall clock is late in MAIN's time too, and MAIN falls back to
+forced sends and finally resets the GUI (E-8709). This patch makes the GUI's
+time its own and keeps it together with MAIN's (the QEMU half is
+`emulator/qemu/cdj2000_cosim.c`, which describes the protocol and the wire):
+
+* `BFIN_TIME_BASE=virtual` (`interp.c`): every instruction advances guest time
+  by its cycles, as `insn` does, and a parked CPU (the self-jump idle loop,
+  `IDLE`) jumps straight to its next event in one delivery. The display and
+  the link retry are paced as on the wall clock (`bfin_wall_active` now means
+  "a paced time base"): `insn` keeps upstream's scanline-per-tick display,
+  which is a hardware event, a malloc and a line compare per cycle and ran
+  this board at 3.3 MIPS (profiled with macOS `sample`: 10 % of the time in
+  the interpreter, the rest in `memcmp`, malloc/free and `memmove` under the
+  DMA). Standalone on an M1 Pro: 32 MIPS busy, 96 % of guest time skipped,
+  guest time at 3.1x real time, the same picture as on the wall clock.
+* `BFIN_COSIM=host:port` (`interp.c`, `dv-bfin_ppi.c`): implies the virtual
+  time base, connects to MAIN's co-simulation port, and carries the link over
+  that one connection -- MAIN's records are handed to the SPORT model's
+  existing split into slots at their time plus the link latency, the GUI's
+  requests leave stamped with its time -- and the run loop never goes past
+  MAIN's reported time plus the latency. `BFIN_COSIM_QUANTUM_US` (100) is the
+  latency; `STATS cosim` reports steps, waits and the wall time spent waiting.
+* Frame sync (`dv-bfin_dma.c`, `dv-bfin_ppi.c`, `gui.c`): the first line of a
+  2D block of the display DMA is the top of the picture. Lines were placed by
+  a counter that only wrapped at the picture's height, so the picture sat
+  wherever the first line after start-up landed -- 15 lines high on the
+  virtual time base, the browser's title row off the top.
+* `BFIN_GPIO_STRAP=<mask>:<value>` (`dv-bfin_gpio.c`): board straps on the PF
+  port. PF3 is the panel revision the GUI reads after its board init; `0x8:0x8`
+  runs the late "/2" board's path. Measured with GUI 4.20: the strap is read,
+  the path runs and draws the same picture as the original board's. Its
+  display DMA is a 250-line block where the original's is 255, which is why
+  the frame sync publishes a frame at the start of every block, not only when
+  the picture's height is reached (a first cut did only the latter and the
+  "/2" board never published a frame).
+* The GUI exits when MAIN's side of the co-simulation link goes away (closed,
+  reset or failed): a normal exit, so `BFIN_CFI_DUMP` writes the flash --
+  what `tools/cdj_main/gui_update_check.py` needs after an update run.
+* A 64-byte receive is a status record only when it goes into the record
+  buffer 0x00f00000; into 0x00f00040 it is a payload, delivered untouched and
+  closing the announcement. A 32-word list answer is 64 bytes, and taken as a
+  record it stalled the link for good (TAG LIST; the first browse on a big card).
+* Diagnostics: `bfin_guest_seconds()` stamps `BFIN_SPORT_RX_ADDR_TRACE`, the
+  `link-split` trace and `BFIN_CALL_WATCH` with guest time, and the receive
+  trace also says what each receive was given (`sport rx gave N of M`). That
+  is what found the three-second pause below.
+
+Not a patch, but found with it: `tools/cdj_gui/run_headless.py` sets
+`BFIN_SPORT_RX_ZERO_200=1`, which answers the GUI's 200-byte reads with zeros.
+Those reads are the GUI draining the line after every record (`0xb7ef40`: arm
+200 bytes, re-arm while they keep completing, stop when the DMA count stands
+still), and zeros every millisecond made the line never go quiet: after each
+payload the GUI drained for about three seconds before it armed the payload's
+receive, while MAIN waited for the answer -- the "3.7 s per step" of every
+native browse, and a key press made in that window was lost or read as a long
+press. `boot_vm --cosim` removes it; the live-link runs without co-simulation
+still have it.

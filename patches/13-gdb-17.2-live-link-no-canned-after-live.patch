@@ -1,0 +1,21 @@
+--- a/sim/bfin/dv-bfin_ppi.c
++++ b/sim/bfin/dv-bfin_ppi.c
+@@ -2581,6 +2581,18 @@
+ 	 answer and the two would deadlock.  The bootstrap record is replaced
+ 	 by MAIN's own the moment one arrives.  */
+       if (!sport->peer_enabled)
++	return 0;
++      /* ... and only *before* one arrives.  Under BFIN_LINK_FRESH_ONLY the
++	 live path above returns nothing whenever MAIN has sent nothing new,
++	 and falling through here then handed the firmware the canned
++	 bootstrap record -- "nothing mounted", no announcement -- on top of a
++	 live one.  A record without halfwords 29/30 landing while the
++	 firmware waits for an announced payload is exactly the fault at
++	 0x00b7cb50 (w30 reads 0, (0-1)*2, the checksum walks off the CPLB map)
++	 and the double fault at 0x00b99196 behind it; the same fall-through
++	 fed announced-length payload reads thousands of canned deliveries.
++	 A quiet wire delivers nothing: once MAIN has spoken, wait for it.  */
++      if (sport->link_opened && sport->link_have_last)
+ 	return 0;
+     }
+ 
