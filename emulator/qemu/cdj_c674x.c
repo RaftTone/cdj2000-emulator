@@ -529,6 +529,7 @@ void cdj_c674x_reset(CdjC674x *cpu, uint32_t entry)
     cpu->control[1] = 0x14000100;
     cpu->control[4] = 1;
     cpu->control[5] = 0x00700000;
+    cpu->control[24] = 0x0700001du; /* GFPGFR SIZE=7, POLY=1Dh. */
     cpu->pc = entry;
 }
 
@@ -2750,6 +2751,12 @@ static bool match_mpy2_gmpy4(const CdjC674xArm *x)
            op == 0x11;                   /* GMPY4, printed page 272 */
 }
 
+static bool match_gmpy_word(const CdjC674xArm *x)
+{
+    unsigned op = (x->w >> 6) & 31u;
+    return op == 0x1bu || op == 0x1fu; /* XORMPY / GMPY, Figure E-3 */
+}
+
 /* Queue one already-computed delayed result, rejecting a same-cycle overlap
  * with another delayed write to the same registers exactly as the existing .M
  * arms do.  count is 1 for a scalar result and 2 for a register pair. */
@@ -2770,6 +2777,21 @@ static bool queue_delayed_result(CdjC674xArm *x, uint64_t due, uint64_t value,
         .due = due, .value = value, .bank = x->side, .dst = dst,
         .size = count == 2 ? 16u : 0u
     };
+    return true;
+}
+
+static bool arm_gmpy_word(CdjC674xArm *x)
+{
+    /* Figure E-3's unconditional GMPY and XORMPY use the M1/M2 polynomial
+     * register (GPLYA/GPLYB) or zero respectively.  Both write in E4. */
+    unsigned op = (x->w >> 6) & 31u;
+    x->reg_write = false;
+    if (x->enabled) {
+        uint32_t poly = op == 0x1fu ? x->cpu->control[22 + x->side] : 0u;
+        uint32_t value = cdj_c674x_gmpy_word(x->cpu->r[x->side][x->a],
+                                              x->cpu->r[x->cross][x->b], poly);
+        return queue_delayed_result(x, x->cpu->cycles + 4, value, x->dst, 1);
+    }
     return true;
 }
 
@@ -2831,28 +2853,22 @@ static bool arm_mpy2_gmpy4(CdjC674xArm *x)
      * emits 0 there for "GMPY4 .M1 A4, A6, A5" (02988470h), so that 1 is a
      * transcription artifact and bit 28 is the ordinary z of Table 3-9.
      *
-     * GFPGFR selects GMPY4's field size and polynomial (printed page 272), and
-     * "GFPGFR can only be set via the MVC instruction" (printed page 32).  This
-     * core does not model control register 24:
-     * cdj_c674x_control_write_supported rejects MVC to it, so GFPGFR provably
-     * still holds its reset value - field size 7h and polynomial 1Dh (printed
-     * page 32, and Figure 2-6 on printed page 40 marks the fields R/W-7h and
-     * R/W-1Dh) - for any program this core can execute.  The guard below keeps
-     * that reasoning honest if control[24] ever becomes writable. */
+     * GFPGFR selects GMPY4's field size and polynomial (printed page 272).
+     * Section 2.7.1 says an MVC change controls GMPY4 in the next execute
+     * packet, which the transactional E1 MVC write already provides. */
     unsigned op = (x->w >> 6) & 31;
     bool pair = op == 0x00;
     x->reg_write = false;
     if (pair && (x->dst & 1))
         return stop(x->cpu, x->pc, x->insn->word,
                     "invalid multiply result register pair");
-    if (!pair && x->cpu->control[24])
-        return stop(x->cpu, x->pc, x->insn->word,
-                    "GMPY4 with a non-reset GFPGFR not implemented");
     if (x->enabled) {
         uint32_t src1 = x->cpu->r[x->side][x->a];
         uint32_t src2 = x->cpu->r[x->cross][x->b];
+        uint32_t gfpgfr = x->cpu->control[24];
         uint64_t value = pair ? cdj_c674x_mpy2(src1, src2)
-                              : cdj_c674x_gmpy4(src1, src2, 0x1du, 7u);
+                              : cdj_c674x_gmpy4(src1, src2, gfpgfr & 0xffu,
+                                                (gfpgfr >> 24) & 7u);
         return queue_delayed_result(x, x->cpu->cycles + 4, value, x->dst,
                                     pair ? 2 : 1);
     }
@@ -2904,6 +2920,29 @@ static bool arm_sat40(CdjC674xArm *x)
                 .size = CDJ_C674X_DELAYED_SAT
             };
         }
+    }
+    return true;
+}
+
+static bool arm_rpack2(CdjC674xArm *x)
+{
+    /* SPRUFE8B pp.416-417: saturate each signed source after a one-bit
+     * shift, then pack their high halfwords.  The worked example's FDBA
+     * conflicts with its execution rule (FEDCBA98 << 1 gives FDB9). */
+    bool sat1, sat2;
+    uint32_t src1 = saturate32((int64_t)(int32_t)x->cpu->r[x->side][x->a] * 2,
+                               &sat1);
+    uint32_t src2 = saturate32((int64_t)(int32_t)x->cpu->r[x->cross][x->b] * 2,
+                               &sat2);
+    x->value = (src1 & 0xffff0000u) | (src2 >> 16);
+    if (x->enabled && (sat1 || sat2)) {
+        if (x->out->load_count == 40)
+            return stop(x->cpu, x->pc, x->insn->word,
+                        "delayed-status queue full");
+        x->out->loads[x->out->load_count++] = (CdjC674xLoad){
+            .due = x->cpu->cycles + 2, .address = 1u << (2 + x->side),
+            .size = CDJ_C674X_DELAYED_SAT
+        };
     }
     return true;
 }
@@ -3372,7 +3411,9 @@ static const CdjC674xArmEntry cdj_c674x_arms[] = {
     /* wave5-rows: 32-bit multiply, Galois, dual-result and 40-bit long forms */
     { 0x0000007c, 0x00000000, match_mpyi,            arm_mpyi },
     { 0x0000083c, 0x00000030, match_mpy2_gmpy4,      arm_mpy2_gmpy4 },
+    { 0xf000083c, 0x10000030, match_gmpy_word,       arm_gmpy_word },
     { 0x00000ffc, 0x00000ef0, NULL,                  arm_dmv },
+    { 0xf0000ffc, 0x10000ef0, NULL,                  arm_rpack2 },
     { 0x0003effc, 0x00000818, NULL,                  arm_sat40 },
     { 0x00000ffc, 0x00000978, NULL,                  arm_subc },
     { 0x0003effc, 0x00000358, NULL,                  arm_abs },
@@ -4124,6 +4165,10 @@ bool cdj_c674x_execute(CdjC674x *cpu, const CdjC674xPacket *packet,
                 /* CSR.PGIE and ITSR.GIE are also one physical bit. */
                 out.control[27] = (out.control[27] & ~1u) |
                                   ((value >> 1) & 1u);
+            } else if (dst == 24) {
+                /* GFPGFR reserves bits 31-27 and 23-8.  Its SIZE and POLY
+                 * fields are ordinary MVC R/W bits (Figure 2-6, page 40). */
+                out.control[24] = value & 0x070000ffu;
             } else if (dst == 18 || dst == 19 || dst == 20) {
                 /* FADCR/FAUCR/FMCR bits 31-27 and 15-11: "A value written to
                  * this field has no effect" (SPRUFE8B Tables 2-25/2-26/2-27,

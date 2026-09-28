@@ -52,10 +52,8 @@ static int m_unit_op(unsigned op)
     switch (op) {
     case 0x1b: /* XORMPY,   printed page 566 */
     case 0x1f: /* GMPY,     printed page 270 */
-        return M_UNIMPLEMENTED;
-    /* These eight have semantics in cdj_c674x_dotp.c and a dispatch row of
-     * their own, so they are routed to the caller's arm table rather than
-     * refused. */
+        return M_ARM_TABLE;
+    /* The remaining implemented .M operations also route to their arm rows. */
     case 0x0a: /* CMPY,     printed page 215 */
     case 0x0b: /* CMPYR,    printed page 217 */
     case 0x0c: /* CMPYR1,   printed page 219 */
@@ -106,9 +104,9 @@ CdjC674xUncondKind cdj_c674x_uncond_classify(uint32_t word)
         }
         /* Figure F-14 (printed page 749), .S unit nonconditional: bits 11-10
          * are 11, op is bits 9-6.  RPACK2 (printed page 416) is its only
-         * member. */
+         * member and has a dispatch-table arm. */
         if (extent == 3u && ((word >> 6) & 0xfu) == 0xbu)
-            return CDJ_C674X_UNCOND_UNIMPLEMENTED;
+            return CDJ_C674X_UNCOND_ARM_TABLE;
     }
     /* Figure H-1 (printed page 765): every bit outside op (16-13) and p is 0.
      * op 0000 is SWE (printed page 557) and 0001 SWENR (558). */

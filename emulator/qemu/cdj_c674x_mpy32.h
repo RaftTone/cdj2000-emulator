@@ -35,6 +35,11 @@ uint64_t cdj_c674x_mpy2(uint32_t src1, uint32_t src2);
 uint32_t cdj_c674x_gmpy4(uint32_t src1, uint32_t src2, unsigned poly,
                          unsigned size);
 
+/* GMPY/XORMPY (printed pages 270 and 566): nine low bits of src2 multiply
+ * src1 over GF(2), reducing each 32-bit left shift with the side's GPLY
+ * polynomial.  XORMPY passes zero for poly. */
+uint32_t cdj_c674x_gmpy_word(uint32_t src1, uint32_t src2, uint32_t poly);
+
 /* SAT (printed page 437): a signed 40-bit src2 clamped to 32 bits.
  * *saturated reports whether the clamp fired, which the caller turns into the
  * delayed CSR.SAT / SSR write one cycle after dst. */

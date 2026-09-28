@@ -2,8 +2,8 @@
 /* TI SPRUFE8B: SADD pp422-424, SSHL pp493-494, SSUB pp499-500;
  * SMPY p461, SMPYH p463, SMPYHL p464, SMPYLH p466, SMPY2 p468;
  * CSR Table 2-9, SSR 2.9.13, compact Figures D-4/E-5/F-22/F-25/F-26.
- * Covers scalar32 and signed40 SADD/SSUB and the saturating 16x16 multiply
- * family, not the packed 2x16 / 4x8 saturating arithmetic. */
+ * Covers scalar32 and signed40 SADD/SSUB, RPACK2, and the saturating 16x16
+ * multiply family, not the packed 2x16 / 4x8 saturating arithmetic. */
 #include <assert.h>
 #include <limits.h>
 #include <stdio.h>
@@ -43,6 +43,33 @@ static const uint32_t values[] = {
     0, 1, 0xffffffffu, 0x7fffffffu, 0x80000000u, 0x40000000u,
     0xc0000000u, 15, 0xfffffff0u,
 };
+
+static void rpack2(void)
+{
+    /* These operand/result pairs also appear in ghidra-c6000's independent
+     * RPACK2 fixtures. The first follows the manual's execution rule; its
+     * printed example has an inconsistent upper halfword. */
+    static const struct {
+        uint32_t src1, src2, result;
+        unsigned side, cross;
+        bool saturated;
+    } rows[] = {
+        {0xfedcba98u, 0x12345678u, 0xfdb92468u, 0, 0, false},
+        {0x87654321u, 0x12345678u, 0x80002468u, 1, 1, true},
+        {0x40000000u, 0xc0000000u, 0x7fff8000u, 0, 0, true},
+    };
+    for (unsigned i = 0; i < sizeof(rows) / sizeof(rows[0]); ++i) {
+        const unsigned side = rows[i].side, cross = rows[i].cross;
+        CdjC674x c; cdj_c674x_reset(&c, 0x1000);
+        c.r[side][1] = rows[i].src1;
+        c.r[side ^ cross][2] = rows[i].src2;
+        uint32_t word = 0x10000ef0u | 3u << 23 | 2u << 18 |
+                        1u << 13 | cross << 12 | side << 1;
+        issue(&c, word, false, 0);
+        assert(c.r[side][3] == rows[i].result);
+        delayed_flags(&c, rows[i].saturated, 1u << (2 + side));
+    }
+}
 
 static void full_arithmetic(void)
 {
@@ -482,7 +509,7 @@ static void compact_multiplies(void)
 
 int main(void)
 {
-    full_arithmetic(); full_shifts(); long_arithmetic();
+    full_arithmetic(); full_shifts(); long_arithmetic(); rpack2();
     compact_arithmetic(); compact_shifts();
     mpy_saturating(); compact_multiplies();
     status_interactions();

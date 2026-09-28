@@ -382,17 +382,8 @@ static void nonconditional_m_group(void)
         assert(c.r[1][8] == 0x7fff0000u && c.r[1][9] == 0x7fffffffu);
     }
 
-    /* An opfield in this shape that is NOT implemented must still halt by
-     * name rather than be executed: XORMPY (0x1b) and GMPY (0x1f) stay
-     * classified UNIMPLEMENTED. */
-    {
-        static const unsigned unimplemented[] = { 0x1b, 0x1f };
-        for (unsigned i = 0; i < 2; ++i) {
-            const char *fault;
-            assert(rejects(E3(8, 6, 4, 0, unimplemented[i], 0), &fault));
-            assert(fault && !strcmp(fault, "instruction not implemented"));
-        }
-    }
+    /* GMPY and XORMPY now use the same E-3 shape; their arithmetic and
+     * polynomial selection are covered in c674x-mpy32.c. */
     #undef E3
 }
 

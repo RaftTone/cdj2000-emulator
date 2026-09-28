@@ -5,7 +5,7 @@
  * formats that carry creg; TI reuses the same bit pattern as a literal opcode
  * field in Figure C-3 (printed page 724), Figure D-3 (735), Figure E-3 (743),
  * Figure F-14 (749) and Figure H-1 (765).  These assertions fix three things:
- * the 19 documented-but-unimplemented extensions reject by name, the three
+ * the documented-but-unimplemented extensions reject by name, the three
  * ADDAB/ADDAH/ADDAW long-immediate forms execute, and everything else in the
  * creg/z hole still rejects as a reserved predicate.
  *
@@ -114,15 +114,11 @@ static void unimplemented_extensions(void)
     static const struct { uint32_t word; const char *asm_line; } rows[] = {
         /* Figure D-3, .L unit: op = bits 11-5, bits 4-2 = 110. */
         /* Figure E-3, .M unit: bit 11 = 0, op = bits 10-6, bits 5-2 = 1100. */
-        {0x118826F0u, "XORMPY   .M1 A1,A2,A3     op 0x1b, printed page 566"},
-        {0x118827F0u, "GMPY     .M1 A1,A2,A3     op 0x1f, printed page 270"},
-        /* Figure F-14, .S unit: bits 11-10 = 11, op = bits 9-6. */
-        {0x11882EF0u, "RPACK2   .S1 A1,A2,A3     op 0xb, printed page 416"},
         /* Figure H-1, no unit: op = bits 16-13, all other bits zero. */
         {0x10000000u, "SWE                       op 0x0, printed page 557"},
         {0x10002000u, "SWENR                     op 0x1, printed page 558"},
     };
-    assert(sizeof(rows) / sizeof(rows[0]) == 5);
+    assert(sizeof(rows) / sizeof(rows[0]) == 2);
     for (unsigned i = 0; i < sizeof(rows) / sizeof(rows[0]); ++i) {
         /* p = 1 (parallel) must classify identically to p = 0. */
         rejects(rows[i].word, "instruction not implemented");

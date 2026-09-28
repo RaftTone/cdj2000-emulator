@@ -50,6 +50,10 @@ static unsigned gmpy_byte(unsigned a, unsigned b, unsigned poly, unsigned size)
     unsigned generator = (1u << m) | (poly & mask);
     unsigned product = 0;
 
+    /* GF(2^m) operands are m-bit field elements, even though each lane is
+     * stored in a byte.  Upper bits do not participate for SIZE < 7. */
+    a &= mask;
+    b &= mask;
     for (unsigned i = 0; i < 8; ++i)
         if ((b >> i) & 1u) product ^= a << i;
     /* Carry-less 8x8 product occupies bits 14-0; reduce from the top down. */
@@ -71,6 +75,22 @@ uint32_t cdj_c674x_gmpy4(uint32_t src1, uint32_t src2, unsigned poly,
                              0xffu) << shift;
     }
     return result;
+}
+
+uint32_t cdj_c674x_gmpy_word(uint32_t src1, uint32_t src2, uint32_t poly)
+{
+    /* SPRUFE8B GMPY execution pseudocode, printed page 270.  Eight shifts
+     * process multiplier bits 8..1; the final XOR handles bit 0.  Unsigned
+     * shifts give the specified low 32 bits without C signed overflow. */
+    uint32_t product = 0;
+    for (unsigned bit = 8; bit != 0; --bit) {
+        if (src2 & (1u << bit)) product ^= src1;
+        bool carry = (product & 0x80000000u) != 0;
+        product <<= 1;
+        if (carry) product ^= poly;
+    }
+    if (src2 & 1u) product ^= src1;
+    return product;
 }
 
 uint32_t cdj_c674x_sat40(uint64_t src2, bool *saturated)

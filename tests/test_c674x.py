@@ -247,7 +247,7 @@ def test_c674x_dispatch_table_has_no_shadowed_rows(tmp_path):
     shadows = [line for line in lines if line.startswith('shadow ')]
     assert not shadows, 'shadowed dispatch rows:\n' + '\n'.join(shadows)
     assert 'hard-shadows 0' in lines, out
-    # 252 pairs overlap on mask/match alone and are separated only by an `also`
+    # Some pairs overlap on mask/match alone and are separated only by an `also`
     # predicate.  That is consistent with the table comment's sweep, which
     # evaluated `also` and found no word claimed twice; this check deliberately
     # does not evaluate `also`, so it over-reports rather than under-reports.
@@ -256,9 +256,9 @@ def test_c674x_dispatch_table_has_no_shadowed_rows(tmp_path):
     # predicated row moves this number and must be changed here deliberately,
     # together with the `also` predicate that justifies the overlap.
     predicated = [line for line in lines if line.startswith('predicated-overlaps ')]
-    # LMBD's cst5 row (0xd58) adds one legitimate overlap with the generic
-    # predicable format row; its `also` predicate keeps the claims disjoint.
-    assert predicated == ['predicated-overlaps 253'], out
+    # The GMPY/XORMPY row also overlaps one generic .M mask but its opfield
+    # predicate keeps the claims disjoint.
+    assert predicated == ['predicated-overlaps 254'], out
 
 
 def test_c674x_packed_dot_products(tmp_path):
@@ -367,7 +367,7 @@ def test_c674x_double_precision(tmp_path):
 
 
 def test_c674x_32bit_multiply_galois_and_long_forms(tmp_path):
-    """MPYI/MPYID/MPY2/GMPY4, DMV, SAT, SUBC, ABS, the 40-bit CMP*/SH* forms,
+    """MPYI/MPYID/MPY2/GMPY4/GMPY/XORMPY, DMV, SAT, SUBC, ABS, the 40-bit CMP*/SH* forms,
     B NRP and BPOS, against SPRUFE8B's own per-instruction examples."""
     cc = shutil.which('cc')
     if not cc: pytest.skip('requires C compiler')
@@ -431,7 +431,6 @@ def test_c674x_no_word_reaches_two_dispatch_rows(tmp_path):
     assert 'double-claims 0' in lines, out
     assert 'skipped 0' in lines, out
     assert 'word-only-probes 4096' in lines, out
-    # Pin the pair count so this stays tied to the mask/match check above: if
-    # that one's 251 moves, this must be updated in the same change.
-    # The LMBD cst5 dispatch row adds one mask/match pair to the sweep.
-    assert 'pairs-examined 284' in lines, out
+    # Pin the pair count so this stays tied to the mask/match check above.
+    # The unconditional GMPY/XORMPY and RPACK2 rows contribute to the count.
+    assert 'pairs-examined 308' in lines, out

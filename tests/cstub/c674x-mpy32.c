@@ -3,7 +3,8 @@
  * 32-bit multiply, Galois-field multiply and 40-bit long .L/.S semantics.
  *
  * TI SPRUFE8B July 2010, printed pages: MPYI 334, MPYID 335-336, MPY2 365-366,
- * GMPY4 272-274, DMV 234, SAT 437-439, SUBC 539-540, ABS 101-102,
+ * GMPY 270, GMPY4 272-274, XORMPY 566, DMV 234, SAT 437-439,
+ * SUBC 539-540, ABS 101-102,
  * CMPEQ 177-178, CMPGT 188-190, CMPGTU 197-198, CMPLT 202-204,
  * CMPLTU 211-212, SHL 447-448, SHR 451-452, SHRU 457-458, B NRP 157-158,
  * BPOS 170-171.
@@ -20,6 +21,7 @@
 #include <string.h>
 #include <stdio.h>
 #include "cdj_c674x.h"
+#include "cdj_c674x_mpy32.h"
 
 static void issue(CdjC674x *c, uint32_t word)
 {
@@ -187,6 +189,85 @@ static void gmpy4(void)
     issue(&e, word_of(7, 6, 5, 0, 0x470, 0));
     cycles(&e, 3);
     assert(e.r[0][7] == 0xe2e3041fu);
+}
+
+static void gmpy4_configured(void)
+{
+    CdjC674x c; cdj_c674x_reset(&c, 0x1000);
+    assert(c.control[24] == 0x0700001du);
+    c.r[1][4] = 0xffffffffu;
+    issue(&c, 24u << 23 | 4u << 18 | 0x3a2u); /* MVC B4,GFPGFR */
+    assert(c.control[24] == 0x070000ffu); /* Reserved bits ignore writes. */
+    issue(&c, 5u << 23 | 24u << 18 | 0x3e2u); /* MVC GFPGFR,B5 */
+    assert(c.r[1][5] == 0x070000ffu);
+
+    /* SPRUFE8B 2.7.1: a changed GFPGFR controls GMPY4 in the next packet.
+     * The Ghidra fixture independently supplies both non-reset expected
+     * results; one varies POLY and the other also changes SIZE. */
+    c.r[1][4] = 0x0700001bu;
+    issue(&c, 24u << 23 | 4u << 18 | 0x3a2u);
+    c.r[0][5] = 0x57830102u; c.r[0][6] = 0x83125783u;
+    issue(&c, word_of(7, 6, 5, 0, 0x470, 0));
+    cycles(&c, 3);
+    assert(c.r[0][7] == 0xc1f5571du);
+
+    c.r[1][4] = 0x03000003u;
+    issue(&c, 24u << 23 | 4u << 18 | 0x3a2u);
+    c.r[0][5] = 0x0f070201u; c.r[0][6] = 0x0e03010fu;
+    issue(&c, word_of(7, 6, 5, 0, 0x470, 0));
+    cycles(&c, 3);
+    assert(c.r[0][7] == 0x0509020fu);
+    assert(cdj_c674x_gmpy4(0xf1f1f1f1u, 0x11111111u, 3u, 3u) ==
+           0x01010101u); /* Upper lane bits lie outside GF(2^4). */
+}
+
+static void gmpy_word(void)
+{
+    /* Published GMPY/XORMPY examples, followed by the Ghidra fixture's
+     * side, cross-path, high-bit masking and identity cases. */
+    static const struct {
+        unsigned side, cross, op;
+        uint32_t src1, src2, poly_a, poly_b, expected;
+    } cases[] = {
+        {0, 0, 0x1f, 0x12345678u, 0x126u, 0x87654321u, 0, 0xc721a0efu},
+        {1, 0, 0x1f, 0x12345678u, 0x126u, 0, 0x87654321u, 0xc721a0efu},
+        {1, 1, 0x1f, 0x12345678u, 0x126u, 0x87654321u, 0, 0x1e654210u},
+        {0, 0, 0x1b, 0x12345678u, 0x126u, 0xffffffffu, 0, 0x1e654210u},
+        {1, 1, 0x1b, 0x12345678u, 0x126u, 0, 0xffffffffu, 0x1e654210u},
+        {0, 0, 0x1f, 0x12345678u, 0xffff0126u, 0x87654321u, 0, 0xc721a0efu},
+        {1, 0, 0x1f, 0xdeadbeefu, 1, 0, 0xabcdef01u, 0xdeadbeefu},
+        {0, 0, 0x1b, 0xdeadbeefu, 0, 0xffffffffu, 0, 0},
+        {0, 1, 0x1f, 0, 0x1ffu, 0xffffffffu, 0, 0},
+    };
+    CdjC674x c; cdj_c674x_reset(&c, 0x1000);
+    assert(c.control[22] == 0 && c.control[23] == 0);
+    c.r[1][4] = 0x87654321u;
+    issue(&c, 22u << 23 | 4u << 18 | 0x3a2u); /* MVC B4,GPLYA */
+    issue(&c, 5u << 23 | 22u << 18 | 0x3e2u); /* MVC GPLYA,B5 */
+    assert(c.r[1][5] == 0x87654321u);
+    issue(&c, 23u << 23 | 4u << 18 | 0x3a2u); /* MVC B4,GPLYB */
+    issue(&c, 5u << 23 | 23u << 18 | 0x3e2u); /* MVC GPLYB,B5 */
+    assert(c.r[1][5] == 0x87654321u);
+
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        const unsigned side = cases[i].side;
+        const unsigned cross = cases[i].cross;
+        cdj_c674x_reset(&c, 0x1000);
+        c.control[22] = cases[i].poly_a;
+        c.control[23] = cases[i].poly_b;
+        c.r[side][1] = cases[i].src1;
+        c.r[side ^ cross][2] = cases[i].src2;
+        c.r[side][3] = 0x11111111u;
+        issue(&c, 0x10000000u | word_of(3, 2, 1, cross,
+                                       cases[i].op << 6 | 0x30u, side));
+        assert(c.r[side][3] == 0x11111111u);
+        cycles(&c, 2);
+        assert(c.r[side][3] == 0x11111111u);
+        cycles(&c, 1);
+        assert(c.r[side][3] == cases[i].expected);
+    }
+    assert(cdj_c674x_gmpy_word(0x12345678u, 0x126u, 0x87654321u) ==
+           0xc721a0efu);
 }
 
 /* ---- DMV, printed page 234 ---------------------------------------------- */
@@ -749,6 +830,8 @@ int main(void)
     mpyid();
     mpy2();
     gmpy4();
+    gmpy4_configured();
+    gmpy_word();
     dmv();
     sat();
     subc();

@@ -13,12 +13,10 @@
  * SSUB2 502-503, SADDSU2 431-432, SADDUS2 433-434, MAX2 306-308,
  * MIN2 311-313, AVG2 147-148, SHR2 453-454, SHRU2 459-460, CMPEQ2 179-180,
  * CMPGT2 191-192, CMPLT2 205-206, SPACK2 472-473, SSHVL 495-496,
- * SSHVR 497-498.  RPACK2 (416-417) is deliberately NOT covered: it is a
- * nonconditional encoding and still reports "instruction not implemented",
- * which this file asserts.  */
+ * SSHVR 497-498.  RPACK2 (416-417) and its delayed saturation flags are
+ * covered by c674x-saturation.c. */
 #include <assert.h>
 #include <stdio.h>
-#include <string.h>
 #include "cdj_c674x.h"
 
 static void issue(CdjC674x *c, uint32_t word)
@@ -197,17 +195,6 @@ static void predication_and_refusals(void)
     c.r[0][2] = 0xdeadbeef;
     issue(&c, 0x010404f0u | 1u << 29 | 1u << 28);
     assert(!c.load_count && c.r[0][2] == 0xdeadbeefu);
-
-    /* RPACK2 .S1 A4,A6,A5 (printed page 416) is a nonconditional encoding
-     * reached before the conditional dispatch table, and is not
-     * implemented: it must fault rather than produce an invented result. */
-    cdj_c674x_reset(&c, 0x1000);
-    CdjC674xPacket p = {
-        .instructions = {{.word = 0x12988ef0u, .pc = c.pc}},
-        .count = 1, .next_pc = c.pc + 4,
-    };
-    assert(!cdj_c674x_execute(&c, &p, NULL, NULL, NULL));
-    assert(!strcmp(c.fault, "instruction not implemented"));
 }
 
 int main(void)
@@ -221,8 +208,7 @@ int main(void)
      *   Example 3 on printed page 498 - the same operands, shifted the other
      *   way - agrees with its own pseudocode.  Rather than assert a value we
      *   re-derived against a printed one, the case is left untested; the
-     *   right-shift path it would exercise is covered by p496 Example 1.
-     * - RPACK2, which fails closed above. */
+     *   right-shift path it would exercise is covered by p496 Example 1. */
     puts("C674x packed 16-bit arithmetic, compares and shifts passed");
     return 0;
 }
