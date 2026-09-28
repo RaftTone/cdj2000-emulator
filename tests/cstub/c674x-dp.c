@@ -1021,6 +1021,34 @@ static void test_adddp_subdp_warn_in_fadcr_not_faucr(void)
     }
 }
 
+/* TI asm6x and older GNU tic6x encode the unused src1 field differently for
+ * DPSP/DPINT/DPTRUNC when the source pair is not A1:A0 or B1:B0.  Both encodings
+ * name the same pair through src2.  A distinct pair at registers 0/1 makes a
+ * mistaken src1 read visible; the result and FADCR must still be identical. */
+static void test_conversion_source_pair_encoding_variants(void)
+{
+    static const struct { unsigned encoding, expected; } forms[] = {
+        {DPSP, 0x4109999au}, {DPINT, 9u}, {DPTRUNC, 8u},
+    };
+    for (unsigned side = 0; side < 2; ++side) {
+        for (unsigned variant = 0; variant < 2; ++variant) {
+            for (unsigned i = 0; i < sizeof forms / sizeof forms[0]; ++i) {
+                CdjC674x c;
+                load(&c, dp_word(8, 5, variant ? 4 : 0, 0,
+                                 forms[i].encoding, side));
+                set_pair(&c, side, 0, DP_8_6 | UINT64_C(0x8000000000000000));
+                set_pair(&c, side, 4, DP_8_6);
+                c.r[side][8] = 0xdeadbeefu;
+                run(&c, 3);
+                assert(c.r[side][8] == 0xdeadbeefu);
+                run(&c, 1);
+                assert(c.r[side][8] == forms[i].expected);
+                assert(c.control[18] == (0x80u << (side ? 16 : 0)));
+            }
+        }
+    }
+}
+
 int main(void)
 {
     test_encodings_match_ti_assembler();
@@ -1032,6 +1060,7 @@ int main(void)
     test_rejections();
     test_predication_and_stickiness();
     test_adddp_subdp_warn_in_fadcr_not_faucr();
+    test_conversion_source_pair_encoding_variants();
     printf("c674x double-precision tests passed\n");
     return 0;
 }

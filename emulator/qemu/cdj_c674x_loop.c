@@ -94,6 +94,48 @@ bool cdj_c674x_loop_issue_filtered(CdjC674xLoop *loop, uint32_t tags[8], unsigne
     return true;
 }
 
+bool cdj_c674x_loop_issue_reload(CdjC674xLoop *loop, uint64_t current_start,
+                                 uint64_t old_start, uint64_t old_end,
+                                 uint64_t post_end, uint32_t tags[8],
+                                 unsigned *count, bool *post_fetch,
+                                 bool *drained,
+                                 bool (*allow)(void *, uint32_t), void *opaque)
+{
+    uint32_t result[8];
+    unsigned n = 0;
+    if (!loop->sealed || !loop->ii || !loop->length ||
+        current_start > loop->cycle ||
+        (old_end && (old_end < old_start ||
+                     old_end - old_start < loop->length)))
+        return false;
+    uint64_t starts[2] = {old_start, current_start};
+    uint64_t ends[2] = {old_end, loop->end_cycle};
+    for (unsigned invocation = 0; invocation < 2; ++invocation) {
+        if (!ends[invocation] || loop->cycle < starts[invocation] ||
+            loop->cycle >= ends[invocation]) continue;
+        uint64_t local = loop->cycle - starts[invocation];
+        uint64_t iterations = invocation ? loop->iterations :
+            (ends[invocation] - starts[invocation] - loop->length) / loop->ii + 1;
+        for (uint64_t origin = local % loop->ii;
+             origin < loop->length && origin <= local; origin += loop->ii) {
+            if ((local - origin) / loop->ii >= iterations) continue;
+            for (unsigned j = 0; j < loop->count[origin]; ++j) {
+                uint32_t tag = loop->tags[origin][j];
+                if (allow && !allow(opaque, tag)) continue;
+                if (n == 8) return false;
+                result[n++] = tag;
+            }
+        }
+    }
+    if (n) memcpy(tags, result, n * sizeof(*tags));
+    *count = n;
+    *post_fetch = loop->cycle >= loop->post_cycle && loop->cycle < post_end;
+    *drained = loop->end_cycle && loop->cycle >= loop->end_cycle - 1 &&
+               (!old_end || loop->cycle >= old_end - 1);
+    ++loop->cycle;
+    return true;
+}
+
 bool cdj_c674x_loop_interrupt_drain(CdjC674xLoop *loop)
 {
     if (!loop || !loop->sealed || !loop->ii ||

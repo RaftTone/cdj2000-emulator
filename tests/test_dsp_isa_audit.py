@@ -146,10 +146,11 @@ def test_compact_decode_gap_is_exactly_the_measured_set(tmp_path):
     # encodings the architecture never defines (which the core is right to refuse),
     # s = 0 twins of forms whose figure hardwires s = 1 (ditto), the software-loop
     # family (implemented, but needing a loop this one-instruction probe cannot
-    # provide), and real gaps.  6,944 is that upper bound; the genuine gap is 32
-    # and is asserted separately below.
-    assert result["not_implemented_raw"] == 6944
-    assert result["defensible_coverage_figure"]["value"] == 6944
+    # provide), and real gaps.  6,880 is that upper bound after the 64 compact
+    # SPMASKR forms gained their documented outside-loop NOP behavior; the
+    # genuine gap is 32 and is asserted separately below.
+    assert result["not_implemented_raw"] == 6880
+    assert result["defensible_coverage_figure"]["value"] == 6880
     # Nothing may be rejected for reasons that are properties of the probe.
     assert set(result["rejection_reasons"]) == {
         "compact instruction not implemented",
@@ -165,6 +166,9 @@ def test_compact_decode_gap_is_exactly_the_measured_set(tmp_path):
         if len(parts) >= 2:
             verdicts[int(parts[0], 16)] = parts[1]
     assert len(verdicts) == 0x10000
+    spmaskr = {w for w in range(0x10000) if w & 0x3c7e == 0x3c66}
+    assert len(spmaskr) == 64
+    assert all(verdicts[w] == "accept" for w in spmaskr)
     sx2op = {w for w in range(0x10000) if w & 0x047e == 0x002e}
     sx1b_s0 = {w for w in range(0x10000) if w & 0x187f == 0x006e}
     assert len(sx2op) == 512 and len(sx1b_s0) == 128
@@ -301,11 +305,11 @@ def test_compact_not_implemented_separates_undefined_from_real_gaps(tmp_path):
     assert buckets == {
         "undefined-encoding": 6616,
         "deliberately-fail-closed": 128,
-        "software-loop-family": 96,
+        "software-loop-family": 32,
         "unit-restricted-encoding": 72,
         "genuine-gap": 32,
     }, buckets
-    assert sum(buckets.values()) == result["not_implemented_raw"] == 6944
+    assert sum(buckets.values()) == result["not_implemented_raw"] == 6880
     assert result["defensible_coverage_figure"]["value"] == 32
     # Each reclassified word is accounted for by an encoding mask, not by a name:
     # Figure C-19 Dx5p s = 0 has bits 12-10 = 011 and bits 6-0 = 1110110 with

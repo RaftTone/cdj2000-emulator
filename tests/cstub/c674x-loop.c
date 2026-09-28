@@ -86,9 +86,43 @@ static void compare_schedulers(void)
     }
 }
 
+static void test_immediate_reload_trace(void)
+{
+    /* TI Example 7-15's seven-cycle source: LDW, NOP 4, MV, STW.
+     * Ghidra's independent C6000ImmediateReloadTest records the old STW
+     * alongside the new MV at cycle 12 and the final STW at cycle 19. */
+    CdjC674xLoop loop;
+    assert(cdj_c674x_loop_init(&loop, 1, 7));
+    loop.length = 7; loop.sealed = true;
+    loop.count[0] = loop.count[5] = loop.count[6] = 1;
+    loop.tags[0][0] = 1; loop.tags[5][0] = 2; loop.tags[6][0] = 4;
+    loop.post_cycle = UINT64_MAX; loop.end_cycle = 13;
+    uint64_t start = 0, old_start = 0, old_end = 0, post_end = 0;
+    for (unsigned t = 0; t < 20; ++t) {
+        uint32_t tags[8] = {0};
+        unsigned count = 0;
+        bool post = false, drained = false;
+        assert(cdj_c674x_loop_issue_reload(&loop, start, old_start,
+                                           old_end, post_end, tags, &count,
+                                           &post, &drained, NULL, NULL));
+        assert(post == (t >= 7));
+        if (t == 12) assert(count == 3 && tags[0] == 4 && tags[1] == 1 &&
+                             tags[2] == 2);
+        if (t == 13) assert(count == 3 && tags[0] == 1 && tags[1] == 2 &&
+                             tags[2] == 4);
+        if (t == 19) assert(count == 1 && tags[0] == 4 && drained);
+        if (t == 6) {
+            old_start = 0; old_end = 13; start = 7;
+            loop.end_cycle = 20; loop.post_cycle = 7; post_end = 14;
+        }
+        if (t == 13) { loop.post_cycle = 14; post_end = 21; }
+    }
+}
+
 int main(void)
 {
     compare_schedulers();
+    test_immediate_reload_trace();
     CdjC674xLoop loop;
     uint32_t out[8], tag;
     unsigned n;

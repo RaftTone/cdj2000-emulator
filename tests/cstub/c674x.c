@@ -304,6 +304,70 @@ static void test_equal_count_parallel_nops(void)
     assert(c.cycles == 0);
 }
 
+/* SPRUFE8B 3.8.11.5/9 prohibit NOP n (n > 1) alongside SPMASK.
+ * Both orders must fail before an earlier packet member changes the CPU. */
+static void test_multicycle_nop_spmask_conflict(void)
+{
+    CdjC674x c;
+    for (unsigned order = 0; order < 2; ++order) {
+        memset(memory, 0, sizeof(memory));
+        cdj_c674x_reset(&c, 0x1000);
+        memory[order] = 0x00030000u | (order ? 0u : 1u); /* SPMASK 0 */
+        memory[order ^ 1] = 0x00006000u | (order ? 1u : 0u); /* NOP 4 */
+        assert(!cdj_c674x_step(&c, read_word, write_memory, NULL));
+        assert(c.fault && !strcmp(c.fault,
+                                  "NOP n cannot share SPMASK(R) packet"));
+        assert(c.cycles == 0 && c.pc == 0x1000);
+    }
+    memset(memory, 0, sizeof(memory));
+    cdj_c674x_reset(&c, 0x1000);
+    memory[0] = 0x00030001u; /* SPMASK 0 || */
+    memory[1] = 0;           /* NOP 1 */
+    assert(cdj_c674x_step(&c, read_word, write_memory, NULL));
+    assert(c.cycles == 1 && c.pc == 0x1008);
+}
+
+/* SPRUFE8B SPMASKR, printed page 489: an SPMASKR outside the software-loop
+ * mechanism is a NOP; an active-loop reload must not be silently discarded. */
+static void test_spmaskr_outside_loop(void)
+{
+    CdjC674x c;
+    memset(memory, 0, sizeof(memory));
+    cdj_c674x_reset(&c, 0x1000);
+    memory[0] = 0x00032000u; /* SPMASKR 0 */
+    assert(cdj_c674x_step(&c, read_word, write_memory, NULL));
+    assert(c.cycles == 1 && c.pc == 0x1004 && !c.loop_active);
+
+    memset(memory, 0, sizeof(memory));
+    cdj_c674x_reset(&c, 0x1000);
+    memory[0] = 0x00032001u; /* SPMASKR 0 || NOP 1 */
+    memory[1] = 0;
+    assert(cdj_c674x_step(&c, read_word, write_memory, NULL));
+    assert(c.cycles == 1 && c.pc == 0x1008);
+
+    for (unsigned order = 0; order < 2; ++order) {
+        memset(memory, 0, sizeof(memory));
+        cdj_c674x_reset(&c, 0x1000);
+        memory[order] = 0x00032000u | (order ? 0u : 1u);
+        memory[order ^ 1] = 0x00006000u | (order ? 1u : 0u); /* NOP 4 */
+        assert(!cdj_c674x_step(&c, read_word, write_memory, NULL));
+        assert(c.fault && !strcmp(c.fault,
+                                  "NOP n cannot share SPMASK(R) packet"));
+        assert(c.cycles == 0 && c.pc == 0x1000);
+    }
+
+    memset(memory, 0, sizeof(memory));
+    cdj_c674x_reset(&c, 0x1000);
+    c.control[13] = 3;
+    memory[0] = 0x00038000u; /* SPLOOP 1 */
+    memory[1] = 0x00032000u; /* active-loop SPMASKR reload */
+    assert(cdj_c674x_step(&c, read_word, write_memory, NULL));
+    assert(!cdj_c674x_step(&c, read_word, write_memory, NULL));
+    assert(c.fault && !strcmp(c.fault,
+                              "SPMASKR reload not implemented"));
+    assert(c.cycles == 1);
+}
+
 /* SPRUFE8B IDLE, printed page 274: opcode bits 16-13 = 1111 with every other
  * bit zero except p, i.e. 0001E000 - confirmed by asm6x, which assembles IDLE
  * to 0001E000 and IDLE || NOP to 0001E001 / 00000000.  Description, verbatim:
@@ -395,13 +459,225 @@ static void test_idle_waits_for_an_interrupt_or_a_branch(void)
     }
 }
 
+static void test_immediate_spkernelr_reload(void)
+{
+    /* SPRUFE8B 7.9.6 and Ghidra's assembled Example 7-15 fixture: an
+     * invocation starts the cycle after the last kernel boundary while the
+     * preceding epilog continues to issue. Use independent .L1/.L2 adds so
+     * the overlap is observable without relying on delayed load effects. */
+    CdjC674x c;
+    memset(memory, 0, sizeof(memory));
+    cdj_c674x_reset(&c, 0x1000);
+    c.control[13] = c.control[14] = 5;
+    c.r[0][1] = 1;
+    memory[0] = (4u << 29) | 0x38000u; /* [A1] SPLOOP 1 */
+    memory[1] = (4u << 23) | (4u << 18) | (1u << 13) | 0x58u;
+    memory[2] = 0;                    /* one idle source cycle */
+    memory[3] = 0x36001u;             /* SPKERNELR || */
+    memory[4] = (4u << 23) | (4u << 18) | (1u << 13) | 0x5au;
+    assert(cdj_c674x_step(&c, read_word, write_memory, NULL));
+    assert(c.loop_active);
+    for (unsigned t = 0; t < 5; ++t) {
+        assert(cdj_c674x_step(&c, read_word, write_memory, NULL));
+        if (t == 4) {
+            assert(c.control[13] == 4 && c.loop.iterations == 5);
+            c.r[0][1] = 0; /* sample false four cycles before second end */
+        }
+    }
+    assert(c.loop_active && c.control_ready[30] == 5);
+    for (unsigned t = 5; t < 12; ++t) {
+        assert(cdj_c674x_step(&c, read_word, write_memory, NULL));
+        if (t == 5) assert(c.r[0][4] == 6 && c.r[1][4] == 4);
+    }
+    assert(c.r[0][4] == 10 && c.r[1][4] == 10);
+    assert(c.control[13] == 0);
+    assert(!c.loop_active);
+
+    /* A post-body branch holds its target PC when its delay slots expire,
+     * while the second invocation keeps running from the loop buffer. */
+    memset(memory, 0, sizeof(memory));
+    cdj_c674x_reset(&c, 0x1000);
+    c.control[13] = 5; c.control[14] = 10; c.r[0][1] = 1;
+    memory[0] = (4u << 29) | 0x38000u;
+    memory[1] = (4u << 23) | (4u << 18) | (1u << 13) | 0x58u;
+    memory[3] = 0x36001u;
+    memory[4] = (4u << 23) | (4u << 18) | (1u << 13) | 0x5au;
+    memory[5] = (6u << 7) | 0x10u; /* B 0x1018, five delay slots */
+    assert(cdj_c674x_step(&c, read_word, write_memory, NULL));
+    for (unsigned t = 0; t <= 11; ++t) {
+        assert(cdj_c674x_step(&c, read_word, write_memory, NULL));
+        if (t == 4) c.r[0][1] = 0;
+    }
+    assert(c.loop_active && (c.control[26] & (1u << 14)));
+    assert(c.pc == 0x1018 && c.control_ready[27] == 8);
+    for (unsigned t = 12; t <= 14; ++t) {
+        assert(cdj_c674x_step(&c, read_word, write_memory, NULL));
+        assert(c.pc == 0x1018);
+    }
+    assert(c.loop_active);
+    assert(cdj_c674x_step(&c, read_word, write_memory, NULL));
+    assert(c.pc == 0x101c);
+
+    /* Two successive reloads retain exactly one predecessor epilog each.
+     * The outer predicate falls before the third termination boundary. */
+    memset(memory, 0, sizeof(memory));
+    cdj_c674x_reset(&c, 0x1000);
+    c.control[13] = c.control[14] = 5; c.r[0][1] = 1;
+    memory[0] = (4u << 29) | 0x38000u;
+    memory[1] = (4u << 23) | (4u << 18) | (1u << 13) | 0x58u;
+    memory[3] = 0x36001u;
+    memory[4] = (4u << 23) | (4u << 18) | (1u << 13) | 0x5au;
+    assert(cdj_c674x_step(&c, read_word, write_memory, NULL));
+    for (unsigned t = 0; t < 17; ++t) {
+        assert(cdj_c674x_step(&c, read_word, write_memory, NULL));
+        if (t == 9) c.r[0][1] = 0;
+    }
+    assert(c.control_ready[30] == 10 && !c.loop_active);
+    assert(c.r[0][4] == 15 && c.r[1][4] == 15 && c.control[13] == 0);
+
+    /* A post-body MVC can replace RILC for the next reload after its four
+     * cycle availability latency. The second reload uses three iterations. */
+    memset(memory, 0, sizeof(memory));
+    cdj_c674x_reset(&c, 0x1000);
+    c.control[13] = c.control[14] = 5;
+    c.r[0][1] = 1; c.r[1][2] = 3;
+    memory[0] = (4u << 29) | 0x38000u;
+    memory[1] = (4u << 23) | (4u << 18) | (1u << 13) | 0x58u;
+    memory[3] = 0x36001u;
+    memory[4] = (4u << 23) | (4u << 18) | (1u << 13) | 0x5au;
+    memory[5] = (14u << 23) | (2u << 18) | 0x3a2u;
+    assert(cdj_c674x_step(&c, read_word, write_memory, NULL));
+    for (unsigned t = 0; t < 15; ++t) {
+        assert(cdj_c674x_step(&c, read_word, write_memory, NULL));
+        if (t == 9) {
+            assert(c.loop.iterations == 3 && c.control[13] == 2 &&
+                   c.control[14] == 3);
+        }
+        if (t == 7) c.r[0][1] = 0;
+    }
+    assert(!c.loop_active && c.r[0][4] == 13 && c.r[1][4] == 13);
+
+    /* At a four-cycle first boundary, the sampled predicate belongs to the
+     * SPLOOP packet itself. A same-boundary MVC updates RILC for later use;
+     * the current reload takes its pre-packet visible value. */
+    memset(memory, 0, sizeof(memory));
+    cdj_c674x_reset(&c, 0x1000);
+    c.control[13] = c.control[14] = 4;
+    c.r[0][1] = 1; c.r[1][2] = 6;
+    memory[0] = (4u << 29) | 0x38000u;
+    memory[1] = (4u << 23) | (4u << 18) | (1u << 13) | 0x58u;
+    memory[4] = 0x36001u;
+    memory[5] = (4u << 23) | (4u << 18) | (1u << 13) | 0x5au;
+    memory[9] = (14u << 23) | (2u << 18) | 0x3a2u;
+    assert(cdj_c674x_step(&c, read_word, write_memory, NULL));
+    for (unsigned t = 0; t < 8; ++t) {
+        assert(cdj_c674x_step(&c, read_word, write_memory, NULL));
+        if (t == 4) c.r[0][1] = 0;
+        if (t == 7) {
+            assert(c.loop.iterations == 4 && c.control[13] == 3 &&
+                   c.control[14] == 6);
+        }
+    }
+
+    /* A false outer condition executes one invocation and falls through. */
+    memset(memory, 0, sizeof(memory));
+    cdj_c674x_reset(&c, 0x1000);
+    c.control[13] = c.control[14] = 5;
+    memory[0] = (4u << 29) | 0x38000u;
+    memory[1] = (4u << 23) | (4u << 18) | (1u << 13) | 0x58u;
+    memory[3] = 0x36001u;
+    memory[4] = (4u << 23) | (4u << 18) | (1u << 13) | 0x5au;
+    assert(cdj_c674x_step(&c, read_word, write_memory, NULL));
+    for (unsigned t = 0; t < 7; ++t)
+        assert(cdj_c674x_step(&c, read_word, write_memory, NULL));
+    assert(!c.loop_active && c.r[0][4] == 5 && c.r[1][4] == 5);
+
+    /* II=2, five source cycles: the old epilog and new prolog index the
+     * buffer from different LBC origins during the same global cycle. */
+    memset(memory, 0, sizeof(memory));
+    cdj_c674x_reset(&c, 0x1000);
+    c.control[13] = c.control[14] = 3; c.r[0][1] = 1;
+    memory[0] = (4u << 29) | (1u << 23) | 0x38000u;
+    memory[1] = (4u << 23) | (4u << 18) | (1u << 13) | 0x58u;
+    memory[5] = 0x36001u;
+    memory[6] = (4u << 23) | (4u << 18) | (1u << 13) | 0x5au;
+    assert(cdj_c674x_step(&c, read_word, write_memory, NULL));
+    for (unsigned t = 0; t < 15; ++t) {
+        assert(cdj_c674x_step(&c, read_word, write_memory, NULL));
+        if (t == 5) c.r[0][1] = 0;
+        if (t == 6) assert(c.r[0][4] == 4 && c.r[1][4] == 2);
+    }
+    assert(!c.loop_active && c.r[0][4] == 6 && c.r[1][4] == 6);
+
+    /* A source shorter than II still holds SPLX until its last stage
+     * boundary. Reload begins there, even though its lone operation issued
+     * four cycles earlier. */
+    memset(memory, 0, sizeof(memory));
+    cdj_c674x_reset(&c, 0x1000);
+    c.control[13] = c.control[14] = 1; c.r[0][1] = 1;
+    memory[0] = (4u << 29) | (4u << 23) | 0x38000u; /* [A1] SPLOOP 5 */
+    memory[1] = 0x36001u;
+    memory[2] = (4u << 23) | (4u << 18) | (1u << 13) | 0x5au;
+    assert(cdj_c674x_step(&c, read_word, write_memory, NULL));
+    for (unsigned t = 0; t < 10; ++t) {
+        assert(cdj_c674x_step(&c, read_word, write_memory, NULL));
+        if (t == 4) c.r[0][1] = 0;
+        if (t < 9) assert(c.loop_active);
+    }
+    assert(!c.loop_active && c.control_ready[30] == 5 && c.r[1][4] == 2);
+
+    /* A zero RILC would skip the next invocation, which this subset does
+     * not model. The final-boundary packet must fail before it commits. */
+    memset(memory, 0, sizeof(memory));
+    cdj_c674x_reset(&c, 0x1000);
+    c.control[13] = 5; c.r[0][1] = 1;
+    memory[0] = (4u << 29) | 0x38000u;
+    memory[1] = (4u << 23) | (4u << 18) | (1u << 13) | 0x58u;
+    memory[3] = 0x36001u;
+    memory[4] = (4u << 23) | (4u << 18) | (1u << 13) | 0x5au;
+    assert(cdj_c674x_step(&c, read_word, write_memory, NULL));
+    for (unsigned t = 0; t < 4; ++t)
+        assert(cdj_c674x_step(&c, read_word, write_memory, NULL));
+    uint64_t before = c.cycles;
+    assert(!cdj_c674x_step(&c, read_word, write_memory, NULL));
+    assert(c.fault && !strcmp(c.fault,
+        "SPKERNELR reload count or overlap unsupported"));
+    assert(c.cycles == before && c.loop.cycle == 4 && c.r[0][4] == 4);
+
+    /* Eligible interrupts during reload require a separate restart model. */
+    memset(memory, 0, sizeof(memory));
+    cdj_c674x_reset(&c, 0x1000);
+    c.control[13] = c.control[14] = 5; c.r[0][1] = 1;
+    c.control[1] |= 1; c.control[4] = (1u << 4) | 3u;
+    memory[0] = (4u << 29) | 0x38000u;
+    assert(cdj_c674x_step(&c, read_word, write_memory, NULL));
+    assert(!cdj_c674x_interrupt(&c, 1u << 4));
+    assert(c.fault && !strcmp(c.fault,
+        "SPKERNELR interrupt restart not implemented"));
+
+    /* SPKERNELR has meaning only after a predicated SPLOOP setup. */
+    memset(memory, 0, sizeof(memory));
+    cdj_c674x_reset(&c, 0x1000);
+    c.control[13] = 5;
+    memory[0] = 0x38000u;
+    memory[1] = 0x36000u;
+    assert(cdj_c674x_step(&c, read_word, write_memory, NULL));
+    before = c.cycles;
+    assert(!cdj_c674x_step(&c, read_word, write_memory, NULL));
+    assert(c.fault && !strcmp(c.fault, "unsupported SPLOOP reload boundary"));
+    assert(c.cycles == before && !c.loop.sealed);
+}
+
 int main(void)
 {
+    test_immediate_spkernelr_reload();
     test_fetch_headers();
     test_packet_preserves_loop_storage();
     test_protected_fetch_packet_expands_once();
     test_protected_loop_body_expands_once();
     test_equal_count_parallel_nops();
+    test_multicycle_nop_spmask_conflict();
+    test_spmaskr_outside_loop();
     test_idle_waits_for_an_interrupt_or_a_branch();
     CdjC674x c;
     /* Board clocks advance on every cycle, including PROT/NOP delays;

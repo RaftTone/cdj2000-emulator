@@ -734,6 +734,21 @@ the connected boards after material progress. Unsupported execution still stops.
 
 ### SPMASK and predicate batch
 
+Immediate `SPKERNELR` reload is supported for predicated full-width `SPLOOP`
+when the initial ILC and each true-reload RILC can finish the loading stage.
+The first termination boundary must occur at buffered cycle 3 or later so its
+four-cycle-old predicate sample is available.
+The core samples the outer predicate four cycles before the last kernel stage
+boundary, starts a new buffer invocation on the following cycle, and issues
+its prolog alongside the preceding epilog. Post-body fetch ends after the
+reloading interval or a taken branch's final delay slot, while the buffered
+invocation continues. The implementation uses the existing checkpointed CPU
+layout. `tests/cstub/c674x-loop.c` checks the seven-cycle TI Example 7-15
+schedule also exercised by ghidra-c6000; `tests/cstub/c674x.c` checks one and
+two reloads, an II=2 overlap, ILC/RILC state, a post-body branch and the
+unsupported-count boundary. Predicated `SPLOOPD`, `SPMASKR`, zero or short
+RILC values, and interrupt restart across reload still stop explicitly.
+
 Full and compact SPMASK decode to the eight unit-mask bits (compact has six).
 During loading, masked program-memory instructions execute once and are not
 buffered. During loading/draining, masked buffered instructions are suppressed
