@@ -258,6 +258,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", dest="as_json",
                         help="emit the complete machine-readable report")
     args = parser.parse_args(argv)
+    if not args.run.is_dir():
+        parser.error(f"run directory does not exist: {args.run}")
     report = build_report(args.run)
     print(json.dumps(report, indent=2, sort_keys=True) if args.as_json
           else _text(report))

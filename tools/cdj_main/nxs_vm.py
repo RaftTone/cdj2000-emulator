@@ -674,8 +674,10 @@ def main():
             parser.error('--gui-link must be HOST:PORT with port 1024..65535')
     if not 0 <= args.panel_hold_ms <= 60000:
         parser.error('--panel-hold-ms must be 0..60000')
-    if args.source_key_at is not None and not 0 <= args.source_key_at <= 86400:
-        parser.error('--source-key-at must be 0..86400 virtual seconds')
+    if args.source_key_at is not None and (
+            not math.isfinite(args.source_key_at) or
+            not 0 <= args.source_key_at <= 86400):
+        parser.error('--source-key-at must be finite and within 0..86400 virtual seconds')
     if not 0 <= args.source_key_retries <= 15:
         parser.error('--source-key-retries must be 0..15')
     if (not math.isfinite(args.source_key_retry_interval) or
@@ -689,6 +691,19 @@ def main():
         parser.error('--debug-paused requires --debug')
     if not math.isfinite(args.frame_interval) or args.frame_interval < 0:
         parser.error('--frame-interval must be finite and nonnegative')
+    source_key = args.source_key or ('sd' if (args.sd or args.test_track) else 'none')
+    contact = None
+    if source_key != 'none':
+        contact = NXS_SOURCE_KEYS.get(source_key)
+        if contact is None:
+            byte, _, mask = source_key.partition(':')
+            try:
+                contact = (int(byte, 10), int(mask, 16))
+            except ValueError:
+                pass
+            if contact is None or not (0 <= contact[0] <= 21) or not (1 <= contact[1] <= 255):
+                parser.error('--source-key must be sd, usb, link, disc, '
+                             'rekordbox, none or BYTE:MASK')
     run = automatic_run_path() if args.timestamp_run or args.run is None else (ROOT / args.run).resolve()
     if run.exists():
         parser.error(f'run directory already exists: {run}')
@@ -839,18 +854,7 @@ def main():
     # for NXS media-manager readiness: the filesystem can be mounted while
     # the browser still answers NO CARD. See NXS_BROWSE_BLOCKER.md. Explicit
     # options are necessary because inherited CDJ_ variables are sanitized.
-    source_key = args.source_key or ('sd' if (args.sd or args.test_track) else 'none')
     if source_key != 'none':
-        contact = NXS_SOURCE_KEYS.get(source_key)
-        if contact is None:
-            byte, _, mask = source_key.partition(':')
-            try:
-                contact = (int(byte, 10), int(mask, 16))
-            except ValueError:
-                contact = None
-            if contact is None or not (0 <= contact[0] <= 21) or not (1 <= contact[1] <= 255):
-                parser.error("--source-key must be sd, usb, link, disc, "
-                             "rekordbox, none or BYTE:MASK")
         insert_at = args.sd_insert_seconds if args.sd_insert_seconds is not None else 20
         at = args.source_key_at if args.source_key_at is not None else insert_at + 2.0
         main_env['CDJ_PANEL_KEYS'] = source_schedule(

@@ -190,6 +190,23 @@ def test_test_track_and_sd_conflict_before_inputs_or_launch(tmp_path, monkeypatc
     assert not (tmp_path / 'run').exists()
 
 
+@pytest.mark.parametrize('extra, message', [
+    (['--source-key', 'bad-key'], '--source-key must be'),
+    (['--source-key', '22:01'], '--source-key must be'),
+    (['--source-key-at', 'nan'], '--source-key-at must be finite'),
+    (['--source-key-at', 'inf'], '--source-key-at must be finite'),
+])
+def test_invalid_source_options_leave_run_name_available(
+        tmp_path, monkeypatch, capsys, extra, message):
+    monkeypatch.setattr(nxs_vm, 'ROOT', tmp_path)
+    monkeypatch.setattr(nxs_vm.sys, 'argv', ['nxs_vm', 'run', *extra])
+    with pytest.raises(SystemExit) as error:
+        nxs_vm.main()
+    assert error.value.code == 2
+    assert message in capsys.readouterr().err
+    assert not (tmp_path / 'run').exists()
+
+
 def test_agent_commands_include_status_report_panel_and_debug(capsys, tmp_path, monkeypatch):
     monkeypatch.setattr(nxs_vm, 'ROOT', tmp_path)
     nxs_vm.print_agent_commands(tmp_path / 'runs' / 'dev', 6200, True)

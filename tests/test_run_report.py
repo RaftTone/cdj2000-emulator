@@ -1,6 +1,7 @@
 import json
+import pytest
 
-from tools.cdj_main.run_report import build_report
+from tools.cdj_main.run_report import build_report, main
 
 
 def _record(body: bytes) -> bytes:
@@ -51,6 +52,15 @@ def test_report_handles_an_incomplete_run(tmp_path):
     assert report["link"]["status"] == "missing"
     assert report["media"]["wav_entries"] == []
     assert not report["interpretation"]["track_list_observed"]
+
+
+def test_report_cli_rejects_missing_run_instead_of_claiming_empty_evidence(
+        tmp_path, capsys):
+    missing = tmp_path / "missing-run"
+    with pytest.raises(SystemExit) as error:
+        main([str(missing), "--json"])
+    assert error.value.code == 2
+    assert "run directory does not exist" in capsys.readouterr().err
 
 
 def test_report_exposes_fault_only_dsp_capture_metadata(tmp_path):

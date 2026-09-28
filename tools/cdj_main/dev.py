@@ -748,7 +748,8 @@ def wait_playback(run: Path, timeout: float = 120, poll: float = 0.25,
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("run", type=Path)
     sub = parser.add_subparsers(dest="command", required=True)
     state = sub.add_parser("status")
