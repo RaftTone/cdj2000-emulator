@@ -575,6 +575,19 @@ static void cdj_usbh_issue(CdjUsbhState *s, CdjUsbhPipe *p, int pid,
                        : pid == USB_TOKEN_IN ? "IN" : "OUT",
                        pipe_devsel(s, p), pipe_epnum(p), len);
     }
+    /*
+     * Firmware may write BVAL again after the DMA-filled bulk OUT packet
+     * has completed.  The microframe hold handles BVAL during DMA; when
+     * BVAL arrives after an exact-size packet, it must not put a second,
+     * empty packet into an already completed usb-storage BOT data stage.
+     * Control-pipe zero-length packets are real status stages.
+     */
+    if (pid == USB_TOKEN_OUT && len == 0 && !pipe_is_dcp(p)) {
+        p->packet.status = USB_RET_SUCCESS;
+        p->packet.actual_length = 0;
+        cdj_usbh_packet_done(s, p);
+        return;
+    }
     usb_handle_packet(dev, &p->packet);
     if (p->packet.status == USB_RET_ASYNC) {
         return;
