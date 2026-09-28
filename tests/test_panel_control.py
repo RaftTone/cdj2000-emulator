@@ -965,3 +965,31 @@ def test_jog_backwards_reaches_a_negative_target(monkeypatch):
 
     Fake().jog(-5, timeout=1.0)
     assert sent == ["down 15 80", "rotary 4 -360", "up 15 80"]
+
+
+def _bend(state: str, reverse: bool) -> list[str]:
+    sent: list[str] = []
+
+    class Fake(panel_control.PanelControl):
+        def send(self, line: str) -> str:
+            sent.append(line.strip())
+            return "ok"
+
+        def state(self) -> str:
+            return state
+
+    Fake().bend(0.05, reverse=reverse)
+    return sent
+
+
+def test_bend_sets_the_period_spins_and_rests():
+    sent = _bend("ok state frames=1 a4=100/100", reverse=True)
+    assert sent[:2] == ["down 15 80", "analog 5 %d" % panel_control.JOG_BEND_PERIOD]
+    assert sent[2] == "analog 4 %d" % (100 - panel_control.JOG_BEND_STEP)
+    assert sent[-2:] == ["analog 5 0", "up 15 80"]
+
+
+def test_bend_starts_from_a_negative_count():
+    # After jog(-N) the ring counter is negative; the bend continues from it.
+    sent = _bend("ok state frames=1 a4=-360/-360", reverse=False)
+    assert sent[2] == "analog 4 %d" % ((-360 + panel_control.JOG_BEND_STEP) & 0xFFFF)

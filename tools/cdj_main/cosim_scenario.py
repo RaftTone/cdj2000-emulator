@@ -31,7 +31,8 @@ NEW FIRMWARE's nf_cosim.py.  Besides keys: aF=V sets analogue field F to V
 (a2=0x8000: the TEMPO slider position, a3 its centre), rF+N / rF-N ramps
 field F by N, and sd-eject / sd-insert / usb-detach / usb-attach take a
 medium out and put it back; jog+N / jog-N turns the jog ring N steps
-(frame steps while paused).
+(frame steps while paused); bend+S / bend-S spins it for S wall seconds
+(a pitch bend while playing).
 
 and writes a table of what passed at which guest second, the frame at each
 step (PNG) and the logs, into --out.  A step that times out ends the run: the
@@ -449,6 +450,9 @@ def then_keys(run: Run, spec: str, name: str = "then") -> None:
             run.panel(*key.split("-"))
         elif re.fullmatch(r"jog[+-]\d+", key):
             run.panel("jog", key[3:], timeout=150)
+        elif re.fullmatch(r"bend[+-]\d+(\.\d+)?", key):
+            run.panel("bend", key[5:], *(["--reverse"] if key[4] == "-" else []),
+                      timeout=float(key[5:]) + 60)
         else:
             key, _, hold = key.partition("@")
             run.press(key, int(hold or 100))
