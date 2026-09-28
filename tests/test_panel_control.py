@@ -948,3 +948,20 @@ def test_jog_holds_the_enable_bit_and_walks_the_ring_counter():
 
     Fake().jog(5)
     assert sent == ["down 15 80", "rotary 4 360", "up 15 80"]
+
+
+def test_bend_sets_the_period_spins_and_rests():
+    sent: list[str] = []
+
+    class Fake(panel_control.PanelControl):
+        def send(self, line: str) -> str:
+            sent.append(line.strip())
+            return "ok"
+
+        def state(self) -> str:
+            return "ok state frames=1 a4=-100/100"
+
+    Fake().bend(0.05, reverse=True)
+    assert sent[:2] == ["down 15 80", "analog 5 %d" % panel_control.JOG_BEND_PERIOD]
+    assert sent[2] == "analog 4 %d" % (100 - panel_control.JOG_BEND_STEP)
+    assert sent[-2:] == ["analog 5 0", "up 15 80"]

@@ -102,6 +102,18 @@ ANALOG_TOUCH_FIELD = 6
 JOG_FIELD = 4
 JOG_ENABLE = "15.7"
 JOG_COUNTS_PER_STEP = 72
+
+# **The bend while playing** needs the ring's pulse period as well: analogue
+# field 5 (bytes 10/11), copied to 0x04fdc554.  MAIN's jog handler 0x0426d8f0
+# takes the counter change as a delta (0x0426d718 -> 0x04fddde0, kept only with
+# 15.7 held, 0x0426dad8), and the delta's readers 0x04279c46.. go on only when
+# the period is neither 0 nor 0xffff, with a speed of (0x87a28 / period + 5) / 10
+# above 15.  MAIN then bends the rate word it hands the DSP (+0x7bc0 via deck
+# X+0x694): with period 500 and 96 counts per 10 ms (jb-1) +7.32 % forward,
+# -7.32 % backward, back to 1.0 when 15.7 is released.  Period 3000 bent nothing.
+JOG_PERIOD_FIELD = 5
+JOG_BEND_PERIOD = 500
+JOG_BEND_STEP = 96
 ANALOG_TOUCH_MASK = 0x8000
 ANALOG_POSITION_MASK = 0x01FF
 
@@ -815,6 +827,28 @@ class PanelControl:
 
     def rotary(self, field: int, delta: int) -> str:
         return self.send(encode_rotary(field, delta))
+
+    def bend(self, seconds: float, reverse: bool = False,
+             period: int = JOG_BEND_PERIOD, step: int = JOG_BEND_STEP) -> str:
+        """Spin the jog ring for SECONDS of wall clock: a pitch bend while
+        playing (JOG_PERIOD_FIELD).  Field 4 moves by STEP every 10 ms with
+        JOG_ENABLE held and the pulse period in field 5, as a turning ring
+        reports it; both go back to rest afterwards."""
+        value, _, _ = parse_state(self.state()).get(
+            "a%d" % JOG_FIELD, "0/0").lstrip("-").partition("/")
+        count = int(value or 0)
+        self.hold(JOG_ENABLE, True)
+        try:
+            self.analog(JOG_PERIOD_FIELD, period)
+            end = time.time() + seconds
+            while time.time() < end:
+                count = (count + (-step if reverse else step)) & 0xFFFF
+                self.analog(JOG_FIELD, count)
+                time.sleep(0.01)
+        finally:
+            self.analog(JOG_PERIOD_FIELD, 0)
+            self.hold(JOG_ENABLE, False)
+        return "ok bend"
 
     def jog(self, steps: int, timeout: float = 120.0) -> str:
         """Turn the jog ring by STEPS (negative = backwards); see JOG_*.
@@ -1571,6 +1605,15 @@ def main(argv: list[str] | None = None) -> int:
                          "(frame steps while paused)")
     jog.add_argument("steps", type=int)
 
+    bend = sub.add_parser("bend", help="spin the jog ring for SECONDS (pitch bend "
+                          "while playing)")
+    bend.add_argument("seconds", type=float)
+    bend.add_argument("--reverse", action="store_true", help="spin backwards (slower)")
+    bend.add_argument("--period", type=int, default=JOG_BEND_PERIOD,
+                      help="ring pulse period in field 5 (smaller = faster)")
+    bend.add_argument("--step", type=int, default=JOG_BEND_STEP,
+                      help="counts per 10 ms")
+
     rotary = sub.add_parser("rotary", help="move an analogue field by a delta")
     rotary.add_argument("field", type=int, choices=range(len(ANALOG_FIELDS)))
     rotary.add_argument("delta", type=int)
@@ -1745,6 +1788,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(panel.rotary(args.field, args.delta))
             elif args.command == "jog":
                 print(panel.jog(args.steps))
+            elif args.command == "bend":
+                print(panel.bend(args.seconds, args.reverse, args.period, args.step))
             elif args.command == "analog":
                 print(panel.analog(args.field, args.value))
             elif args.command == "step":
