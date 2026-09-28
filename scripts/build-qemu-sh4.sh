@@ -47,17 +47,31 @@ if [ ! -f "$QEMU_SRC/hw/sh4/meson.build" ]; then
     exit 1
 fi
 
-# SH-4 interrupt and timer fixes; see patches/README.md. Apply in order, with
-# --forward so re-running the script on an already-patched tree is a no-op.
-for patch in \
+# SH-4 interrupt and timer fixes; see patches/README.md. They form a stack:
+# the priority-order patch edits lines the IMASK patch wrote, so once it is in,
+# the IMASK patch checks neither forward nor reverse. Find the last patch that
+# is already applied, take everything before it as applied too, and apply the
+# rest in order, so re-running the script on a patched tree is a no-op.
+set -- \
     "$REPO/patches/qemu-sh-intc-priority-imask.patch" \
     "$REPO/patches/qemu-sh-intc-priority-order.patch" \
-    "$REPO/patches/qemu-sh-tmu-stop-reset.patch"; do
-    if patch -d "$QEMU_SRC" -p1 --forward --silent --dry-run < "$patch" >/dev/null 2>&1; then
+    "$REPO/patches/qemu-sh-tmu-stop-reset.patch"
+applied=0
+index=0
+for patch in "$@"; do
+    index=$((index + 1))
+    if patch -d "$QEMU_SRC" -p1 --reverse --force --silent --dry-run < "$patch" >/dev/null 2>&1; then
+        applied=$index
+    fi
+done
+index=0
+for patch in "$@"; do
+    index=$((index + 1))
+    if [ "$index" -le "$applied" ]; then
+        echo "$(basename "$patch") already applied"
+    elif patch -d "$QEMU_SRC" -p1 --forward --silent --dry-run < "$patch" >/dev/null 2>&1; then
         echo "applying $(basename "$patch")"
         patch -d "$QEMU_SRC" -p1 --forward < "$patch"
-    elif patch -d "$QEMU_SRC" -p1 --reverse --force --silent --dry-run < "$patch" >/dev/null 2>&1; then
-        echo "$(basename "$patch") already applied"
     else
         echo "patch does not apply cleanly: $patch" >&2
         exit 1

@@ -7,8 +7,13 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "emulator/qemu/cdj2000_main.c"
 
 
+def _source():
+    # UTF-8 and LF whatever the platform's locale and checkout line endings.
+    return SOURCE.read_text(encoding="utf-8").replace("\r\n", "\n")
+
+
 def test_tmu1_has_sh7764_vector_priority_and_timer_route():
-    source = SOURCE.read_text()
+    source = _source()
     assert "#define TMU1_IRQ        0x2d" in source
     assert "#define INTEVT_TMU1     (TMU1_IRQ * 0x20)   /* 0x5a0 */" in source
     assert "INTC_VECT(CDJ_INTC_TMU1, INTEVT_TMU1)" in source
@@ -18,7 +23,7 @@ def test_tmu1_has_sh7764_vector_priority_and_timer_route():
 
 
 def test_tmu1_is_distinct_from_stock_tick_and_loader_timers():
-    source = SOURCE.read_text()
+    source = _source()
     enum = source[source.index("enum {\n    CDJ_INTC_UNUSED"):]
     enum = enum[:enum.index("};")]
     for name in ("CDJ_INTC_TMU0", "CDJ_INTC_TMU1", "CDJ_INTC_TMU3",

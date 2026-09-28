@@ -7,6 +7,7 @@ from pathlib import Path
 import socket
 import struct
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -16,12 +17,19 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 QEMU = Path(os.environ.get('CDJ_TEST_QEMU', ROOT / 'build/qemu/build/qemu-system-sh4'))
 
+# qtest and QMP are reached over Unix sockets.
+pytestmark = pytest.mark.skipif(
+    sys.platform == 'win32' or not hasattr(socket, 'AF_UNIX'),
+    reason='needs Unix-domain sockets for qtest/QMP')
+
 
 @contextmanager
 def machine(rom: bytes, *, virtual_clock: bool = False):
     if not QEMU.is_file():
         pytest.skip('requires the custom QEMU build')
-    with tempfile.TemporaryDirectory(prefix='cdj-sh4-tmu-', dir='/tmp') as directory:
+    # A short directory: Unix socket paths are limited to about 104 bytes.
+    short = '/tmp' if os.path.isdir('/tmp') else None
+    with tempfile.TemporaryDirectory(prefix='cdj-sh4-tmu-', dir=short) as directory:
         root = Path(directory)
         image = root / 'reset.bin'
         image.write_bytes(rom)
@@ -79,7 +87,7 @@ def machine(rom: bytes, *, virtual_clock: bool = False):
             process.stderr.close()
 
 
-def test_tmu_stop_and_reset_clear_underflow_and_restore_registers():
+def test_tmu_stop_keeps_underflow_and_reset_restores_registers():
     with machine(bytes(64), virtual_clock=True) as (request, execute):
         request('writel 0xffd80008 2')  # TMU0 TCOR
         request('writel 0xffd8000c 2')  # TMU0 TCNT
@@ -88,8 +96,16 @@ def test_tmu_stop_and_reset_clear_underflow_and_restore_registers():
         request('clock_step 1000000')
         assert request('readw 0xffd80010') & 0x100  # TCR.UNF
 
+        # Stopping the count does not clear UNF; software writes it to 0.
         request('writeb 0xffd80004 0')
+        assert request('readw 0xffd80010') & 0x100
+        request('writew 0xffd80010 0x20')
         assert not request('readw 0xffd80010') & 0x100
+
+        # A pending underflow must not survive a reset either.
+        request('writeb 0xffd80004 1')
+        request('clock_step 1000000')
+        assert request('readw 0xffd80010') & 0x100
 
         execute('system_reset')
         assert request('readl 0xffd80008') == 0xffffffff

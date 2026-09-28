@@ -8,20 +8,7 @@
  
  #define TIMER_TCR_TPSC          (7 << 0)
  #define TIMER_TCR_CKEG          (3 << 3)
-@@ -216,6 +217,12 @@
-     }
-     ptimer_transaction_commit(s->timer);
-     s->enabled = !!enable;
-+    if (!s->enabled) {
-+        /* A stopped channel must not keep a level-sensitive IRQ asserted. */
-+        s->int_level = 0;
-+        s->old_level = 0;
-+        qemu_set_irq(s->irq, 0);
-+    }
- }
- 
- static void sh_timer_tick(void *opaque)
-@@ -344,6 +351,36 @@
+@@ -344,6 +345,36 @@
      .endianness = DEVICE_NATIVE_ENDIAN,
  };
  
@@ -58,7 +45,7 @@
  void tmu012_init(MemoryRegion *sysmem, hwaddr base, int feat, uint32_t freq,
                   qemu_irq ch0_irq, qemu_irq ch1_irq,
                   qemu_irq ch2_irq0, qemu_irq ch2_irq1)
-@@ -369,5 +406,6 @@
+@@ -369,5 +400,6 @@
      memory_region_init_alias(&s->iomem_a7, NULL, "timer-a7",
                               &s->iomem, 0, memory_region_size(&s->iomem));
      memory_region_add_subregion(sysmem, A7ADDR(base), &s->iomem_a7);

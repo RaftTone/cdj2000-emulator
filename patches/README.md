@@ -31,17 +31,6 @@ that masks with `SR.IMASK`.
    so existing controllers behave exactly as before, and accepts a source only
    while `prio > imask`.
 
-The follow-on `qemu-sh-intc-priority-order.patch` selects the highest-priority
-eligible source, using source order to break ties. The first patch only filtered
-by `IMASK` and still returned the first pending source. Both patches are needed
-for the board's programmed priority levels to arbitrate simultaneous requests.
-
-`qemu-sh-tmu-stop-reset.patch` clears a stopped timer's asserted IRQ and adds a
-reset callback for each three-channel TMU block. A reset stops the underlying
-ptimers, restores their count and limit, clears their interrupt levels, and
-restores the visible registers. Without this, a pending timer line can survive
-a guest reset and interrupt the new boot before it has initialized its handlers.
-
 2. **`sh_intc_write` never recorded the level a priority register carries.** It
    only asked whether the field was non-zero, i.e. whether the source was
    enabled, so with (1) in place every source stayed at the default level of 15
@@ -97,6 +86,19 @@ a guest reset and interrupt the new boot before it has initialized its handlers.
    three, until its simulator started carrying link announcements over
    (`BFIN_LINK_ANNOUNCE_STICKY`, set by the launchers); with that, three of
    three boots at the full rate were clean.
+
+The follow-on `qemu-sh-intc-priority-order.patch` selects the highest-priority
+eligible source, using source order to break ties. The first patch only filtered
+by `IMASK` and still returned the first pending source. Both patches are needed
+for the board's programmed priority levels to arbitrate simultaneous requests.
+It edits lines the IMASK patch wrote, so the two only apply as a stack.
+
+`qemu-sh-tmu-stop-reset.patch` adds a reset callback for each three-channel TMU
+block. A reset stops the underlying ptimers, restores their count and limit,
+clears their interrupt levels, and restores the visible registers. Without this,
+a pending timer line can survive a guest reset and interrupt the new boot before
+it has initialized its handlers. Stopping a channel through `TSTR` leaves
+`TCR.UNF` (and so the line) as it is, as on the chip: software clears it.
 
 ### What each one costs
 
