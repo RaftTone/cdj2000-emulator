@@ -132,6 +132,8 @@
 #define PID_BUF         1
 #define PID_STALL       3
 
+#define PIPECFG_TYPE    0xc000
+#define PIPECFG_TYPE_BULK 0x4000
 #define PIPECFG_SHTNAK  0x0080
 #define PIPECFG_DIR     0x0010
 #define PIPECFG_EPNUM   0x000f
@@ -345,6 +347,11 @@ static unsigned pipe_devsel(CdjUsbhState *s, const CdjUsbhPipe *p)
     uint16_t maxp = pipe_is_dcp(p) ? rd(s, R_DCPMAXP) : p->maxp;
 
     return (maxp & MAXP_DEVSEL) >> 12;
+}
+
+static bool pipe_is_bulk(const CdjUsbhPipe *p)
+{
+    return !pipe_is_dcp(p) && (p->cfg & PIPECFG_TYPE) == PIPECFG_TYPE_BULK;
 }
 
 static unsigned pipe_epnum(const CdjUsbhPipe *p)
@@ -580,9 +587,12 @@ static void cdj_usbh_issue(CdjUsbhState *s, CdjUsbhPipe *p, int pid,
      * has completed.  The microframe hold handles BVAL during DMA; when
      * BVAL arrives after an exact-size packet, it must not put a second,
      * empty packet into an already completed usb-storage BOT data stage.
-     * Control-pipe zero-length packets are real status stages.
+     * Control-pipe zero-length packets are real status stages, and
+     * interrupt/isochronous pipes are left alone: only bulk is covered.
      */
-    if (pid == USB_TOKEN_OUT && len == 0 && !pipe_is_dcp(p)) {
+    if (pid == USB_TOKEN_OUT && len == 0 && pipe_is_bulk(p)) {
+        cdj_usbh_trace(s, "pipe%u: empty bulk OUT acknowledged, not sent",
+                       p->nr);
         p->packet.status = USB_RET_SUCCESS;
         p->packet.actual_length = 0;
         cdj_usbh_packet_done(s, p);
