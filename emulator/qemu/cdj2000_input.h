@@ -27,6 +27,8 @@
 #ifndef CDJ2000_INPUT_H
 #define CDJ2000_INPUT_H
 
+#include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 /*
@@ -78,5 +80,30 @@ void cdj_input_apply(uint8_t *payload, unsigned len);
 /* First payload byte of analogue field `n`, and its width in bytes. */
 unsigned cdj_input_analog_byte(unsigned field);
 unsigned cdj_input_analog_width(unsigned field);
+
+/*
+ * The lamps MAIN last sent to the panel, as "NAME:on,NAME:blink,SOURCE_SD:3"
+ * ("-" when all are off), for the `state` reply.  The board computes it from
+ * the frame at 0xa4501018 (cdj_panel_lamps in cdj2000_main.c).
+ */
+void cdj_input_set_lamps(const char *summary);
+
+/*
+ * What the channel last did to the panel ("press 19.7 (id 4)", "analog 3 ->
+ * 32768", "sd out", ...) and its guest time, or NULL if nothing yet: the
+ * DSP model's rate log names it as the path that moved the rate.
+ */
+const char *cdj_input_last_event(int64_t *at_ns);
+
+/*
+ * A medium the channel can take out and put back while the machine runs:
+ * `sd eject|insert|state`, `usb detach|attach|state`.  `present` is 0 (take
+ * it out), 1 (put it back) or -1 (only report); the hook answers whether it
+ * is in now and may leave a note.  Returns false when it cannot act.
+ */
+typedef bool (*CdjInputMediumFn)(void *opaque, int present, bool *now_in,
+                                 char *note, size_t note_len);
+void cdj_input_register_medium(const char *name, CdjInputMediumFn fn,
+                               void *opaque);
 
 #endif /* CDJ2000_INPUT_H */

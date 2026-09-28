@@ -102,5 +102,20 @@ int main(void)
     before=s;
     assert(!cdj_rtl8201fl_pir_write(&s,0)); /* Unsupported register at TA falling edge. */
     assert(!memcmp(&s,&before,sizeof s));
+
+    /* The CDJ-2000's RTL8201CP: its identifier, LED0 = link at either speed
+     * (active low), and a link status that does not latch, as MAIN 4.33 reads
+     * it once per link change. */
+    cdj_rtl8201fl_reset(&s,0); s.cp=true;
+    assert(rd(&s,1,2,true)==0x0000);
+    assert(rd(&s,1,3,false)==0x8201);
+    high=false;
+    assert(cdj_rtl8201fl_led0(&s,&high) && high);            /* no link: off */
+    assert(cdj_rtl8201fl_set_peer(&s,true,0x0101,0));
+    assert(cdj_rtl8201fl_write(&s,0,0x8000));               /* reset, as 4.33 */
+    assert(cdj_rtl8201fl_advance(&s,s.now+CDJ_PHY_RESET_NS+CDJ_PHY_NEGOTIATE_NS));
+    assert(s.link && s.cp);                                 /* BMCR reset keeps it */
+    assert(cdj_rtl8201fl_led0(&s,&high) && !high);           /* 100M link: on */
+    assert(direct(&s,1) & 4);                               /* first read: link */
     return 0;
 }

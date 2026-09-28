@@ -109,6 +109,12 @@ bool cdj_dsp_model_doorbell(CdjDspModel *model, uint8_t *window, size_t length);
 void cdj_dsp_model_tick(CdjDspModel *model, uint8_t *window, size_t length);
 
 /*
+ * The position report alone, on its own finer timer (CDJ_DSP_POSITION_US):
+ * MAIN reads it every ~3 ms and times its beats against it.
+ */
+void cdj_dsp_model_position_tick(CdjDspModel *model, uint8_t *window, size_t length);
+
+/*
  * The DSP's interrupt line to MAIN.  The device raises `irq` (irq 0x7f,
  * INTEVT 0xfe0) and tells the board through `pending` so that the two status
  * bits MAIN tests -- bit 24 of 0xffd4005c in the vector stub 0x26260c, bit 4

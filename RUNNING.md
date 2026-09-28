@@ -1068,6 +1068,8 @@ twice during this work before the rule was learnt.
 
 The board itself takes a long list of its own, all read with `getenv` in
 `emulator/qemu/`: `CDJ_INPUT_PORT`, `CDJ_PANEL_KEYS`, `CDJ_SD_INSERT`,
+`CDJ_SD_READ_BPS`, `CDJ_USB_READ_BPS` and `CDJ_READ_LOG` (the media's read
+rate in guest time and a log of the reads; "Media read speed" below),
 `CDJ_DSP_ABSENT`, `CDJ_USB_ABSENT`, `CDJ_ATAPI_ABSENT`, `CDJ_BUS_TRACE`,
 `CDJ_USBH_TRACE` (the USB host module: registers, packets, DMA),
 `CDJ_PANEL_SCIF_TRACE`, `CDJ_DMAC_TRACE`, `CDJ_WATCH` (writes to a word, with
@@ -1162,6 +1164,119 @@ any of them puts the whole per-instruction probe path back, which is what the
 probes need and costs about a third of the throughput; a plain run pays one
 branch per instruction for them. The simulator says `bfin: probes on (NAME is
 set)` on its log when that happens, so a slow run can be explained.
+
+### Media read speed
+
+Both media models hand read data over as fast as the host reads the image
+file: the SD host 20 us of guest time per 512-byte block (`SDHI_XFER_NS`, which
+is there for interrupt ordering, not for speed), the USB host a bulk packet as
+soon as its IN token goes out. So the reads a medium costs (the walk of
+`export.pdb` when a card or stick is mounted, the analysis file, the FAT and
+the audio file after a LOAD) take less guest time than on a deck. Three
+variables change that; all are off by default, and off is the old timing
+exactly:
+
+| variable | does |
+|---|---|
+| `CDJ_SD_READ_BPS=N` | the card's read rate, bytes per second of guest time. Each 512-byte block reaches the SDHI buffer 512/N s after the command, or after the previous block was drained (never sooner than the model's own 20 us, so N above 25 600 000 changes nothing). Writes are not limited. `boot_vm --sd-read-bps N` sets it. |
+| `CDJ_USB_READ_BPS=N` | the stick's read rate: each bulk IN packet the stick answers is held size/N s before it lands in the pipe's buffer, and the pipe reads busy meanwhile. The 13-byte CSW is held too, as it is on the wire; control transfers on the DCP are not. `boot_vm --usb-read-bps N` sets it. |
+| `CDJ_READ_LOG=1` | one line per burst of reads on either medium, a burst ending after 50 ms of guest time without data: `cdj2000-sd: reads t=12.380224..16.337157 (3.957 s): 3739136 bytes, 794 commands, 3.593 s added by the rate`. Commands are CMD17/CMD18 on the card and READ(10) on the stick (INQUIRY and the like count bytes, not commands). `=2` also prints every read command with its block address and guest time, `cdj2000-sd: read CMD18 block 0x513796 x8 t=25.212202`; walking the image's FAT for those addresses names the file. |
+
+A value that is not a plain decimal number stops the board (`CDJ_SD_READ_BPS:
+not a number of bytes per second: 2M`): a typo that quietly meant "no limit"
+would read like a deck that is as fast as the model. The bytes delivered are
+the same with and without a rate; only the moment they arrive changes.
+
+The rate is per block (per packet on the stick), and the guest's own time
+between two blocks comes on top, as on the deck, where the SDHI has one block
+buffer and the card waits while it is full. So N is not a card's rating: it is
+the number that makes the emulator take as long as a deck, and it has to be
+measured on a deck. **No figure for a real CDJ-2000 is given here, because
+none has been measured yet.** Two ways to get one:
+
+1. **Time it on the deck with a known medium.** Write the same image the
+   emulator runs (`dd` of `card.img` to an SD card, or to a stick) so both read
+   the same `export.pdb`. Film the deck at 120 or 240 fps and count frames,
+   five times each, and take the median:
+   - *mount*: from the card going in (or the SD / USB key) to the browser
+     showing the library. In the emulator this is where `export.pdb` is read
+     in full (see the example below);
+   - *LOAD*: from the ENCODER PUSH on a track to the track's title and
+     waveform on the display.
+2. **Measure the bus.** A USB protocol analyser between deck and stick (a
+   Beagle USB 480, an Ellisys, or a Linux host with `usbmon` in the path of a
+   USB-over-IP bridge) gives the READ(10) commands, their sizes and the time
+   from each CBW to its CSW, i.e. the stick's real throughput under this
+   firmware. For the card a logic analyser on CLK, CMD and DAT0 of the slot
+   gives the clock and the gaps between blocks.
+
+Then run the emulator with `CDJ_READ_LOG=1` and adjust N until the same step
+takes the deck's time. Once the rate dominates, a step that reads B bytes
+takes about `t0 + B / N`, where t0 is its time with no limit (a little less:
+the delay absorbs the model's own 20 us per block on the card and about 15 us
+per packet on the stick), so `N = B / (T_deck - t0)` is a good first guess
+and one more run settles it.
+
+**Example, measured on the emulator only** (stock MAIN 4.33 and GUI 4.20,
+`runs/cards/aconcert/card.img`, `cosim_scenario --playlist-row 4`,
+`CDJ_READ_LOG=2`, runs `rs-3`..`rs-6` of 28.09.2026; 1 000 000 is an arbitrary
+test value, not a deck's). `export.pdb` is 2 207 744 bytes; MAIN reads
+3.12 MB of it (some pages twice) when the medium is mounted, and not again
+after a LOAD: the LOAD reads the track's `ANLZ0000.DAT` (8 KB), three
+directories, FAT sectors and the audio file.
+
+| medium, rate | mount burst (all reads) | `export.pdb` first to last read | LOAD press to load closed (`+0x7ba0 = 4`) |
+|---|---|---|---|
+| SD, no limit | 0.354 s, 3.74 MB | 0.294 s | 0.525 s |
+| SD, 1 000 000 B/s | 3.957 s (3.593 s added) | 3.296 s | 0.719 s |
+| USB, no limit | 0.409 s, 3.28 MB | 0.391 s (749 of 762 reads; 13 more 0.27 s later) | 0.542 s |
+| USB, 1 000 000 B/s | 3.590 s (3.280 s added) | 3.370 s (the same 749) | 0.737 s |
+
+The card's mount moves the scenario's later steps by 4 s (library at 16 s
+instead of 12 s); the stick is mounted during boot, before the GUI asks, so
+there the steps move by about 1 s. With no rate set, the stock scenario's step
+times are the same as before the change (12, 16, 19, 21, 25, 25, 27, 39 s).
+
+### Two CDJ-2000 decks on one Pro DJ Link
+
+The `cdj2000-main` board has the SH7764 EtherC and an RTL8201CP PHY, so stock
+4.33 brings its link up, negotiates a player number and sends Pro DJ Link
+keep-alives, status and beat packets. `tools/cdj_main/link_hub.py` is the
+segment: a hub that writes `link.pcap` (Wireshark), `events.jsonl` and
+`summary.json`. With `--sync` it also holds every deck on one guest timeline
+(`emulator/qemu/cdj2000_netsim.c`, the co-simulation's scheme applied to the
+network): each frame carries MAIN's guest time and reaches the other decks one
+latency later (`CDJ_NETSIM_QUANTUM_US`, 1000 by default), and no deck runs
+ahead of what the others have promised.
+
+```sh
+H=runs/link/two; mkdir -p $H
+cp -c runs/cards/aconcert/card.img $H/cardA.img     # a clone per deck
+cp -c runs/cards/aconcert/card.img $H/cardB.img
+python -m tools.cdj_main.link_hub --sync --decks 2 --listen unix:$PWD/$H/hub.sock $H &
+python -m tools.cdj_main.cosim_scenario --card $H/cardA.img --playlist-row 4 \
+    --out runs/cosim/deck-a --port 6380 --stop-after time --keep \
+    --boot-arg=--link-hub=sync:unix:$PWD/$H/hub.sock --boot-arg=--link-mac=02:00:00:00:00:02 &
+python -m tools.cdj_main.cosim_scenario --card $H/cardB.img --playlist-row 4 --track-row 1 \
+    --out runs/cosim/deck-b --port 6580 --stop-after loaded --keep \
+    --boot-arg=--link-hub=sync:unix:$PWD/$H/hub.sock --boot-arg=--link-mac=02:00:00:00:00:03 &
+```
+
+- `boot_vm --link-mac` gives each deck its own address (4.33 reads it from a
+  flash record at 0x3f8000; a blank flash gives every deck 00:00:00:00:00:01).
+- Deck A plays and sends beat packets (type 0x28, port 50001): beat in bar 1..4,
+  126.00 BPM, about 480 ms apart, none skipped. Its TEMPO slider changes the
+  pitch field. Deck B's MAIN fills the other player's table (0x04C13E00 +
+  n x 208) from A's status, and its beat handler 0x042899DC runs for A's beats
+  but stores them only when 0x04C0849C != 0, which stock 4.33 leaves at 0.
+  Stock 4.33 has no SYNC or MASTER keys.
+- `--replay CAPTURE.pcap` plays a real deck's traffic into the segment instead
+  of a second emulated deck (`--replay-renumber 1:2` when the capture's player
+  number collides with the emulated one). A recording cannot serve media, so
+  LINK on the emulated deck ends in E-8309.
+- The hub and `CDJ_NETSIM` use POSIX sockets and `poll()`, like `CDJ_COSIM`;
+  on Windows `CDJ_NETSIM` refuses to start. The NXS machine keeps its own
+  Ethernet (RTL8201FL) as before.
 
 ## One QEMU at a time
 

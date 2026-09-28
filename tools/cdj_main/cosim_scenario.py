@@ -14,7 +14,7 @@ seconds:
   tracks    ENCODER PUSH -> ENTER for the row, MAIN answers with the list
   load      detents to --track-row, ENCODER PUSH -> the GUI's LOAD (type 7
             cursor 1), not the long-press overlay (type 7 cursor 0)
-  loaded    the DSP model sees the load closed (+0x7ba0 = 4, then 2)
+  loaded    the DSP model sees the load closed (+0x7ba0 = 4; then 2 unless AUTO CUE is on)
   play      PLAY -> the DSP model's position runs
   time      MAIN's status records carry a running time (words 5..8)
 
@@ -27,7 +27,11 @@ and with --load2-row N, the next track while the first one plays:
 --then KEY:SECONDS[,...] then presses more keys (payload byte.bit, 20.0 =
 BROWSE; rot+N / rot-N turns the select encoder; KEY@MS holds it MS ms), each
 followed by SECONDS of guest time and a frame then-N-KEY.png -- the syntax of
-NEW FIRMWARE's nf_cosim.py.
+NEW FIRMWARE's nf_cosim.py.  Besides keys: aF=V sets analogue field F to V
+(a2=0x8000: the TEMPO slider position, a3 its centre), rF+N / rF-N ramps
+field F by N, and sd-eject / sd-insert / usb-detach / usb-attach take a
+medium out and put it back; jog+N / jog-N turns the jog ring N steps
+(frame steps while paused).
 
 and writes a table of what passed at which guest second, the frame at each
 step (PNG) and the logs, into --out.  A step that times out ends the run: the
@@ -59,6 +63,18 @@ PY = sys.executable
 # them (hardware check, 24.09.2026).  Screenshots are cropped like the viewer's
 # (tools/cdj_gui/view_ui.py PANEL_CROP); the raw PPM frames keep all 255 rows.
 PANEL_WIDTH, PANEL_HEIGHT = 480, 234
+
+
+# The browser shows six rows.  Its requests name the cursor's row on the
+# visible page, not in the list: turning down past the page scrolls the list
+# and keeps the cursor on the bottom row, so row 14 of the playlists arrives
+# as 0005 (runs/cosim/row14-1; NEW FIRMWARE cs-139 had the right playlist on
+# screen and failed only this check).
+BROWSE_PAGE_ROWS = 6
+
+
+def visible_row(row):
+    return min(row, BROWSE_PAGE_ROWS - 1)
 
 
 def save_panel(frame, target):
@@ -102,7 +118,10 @@ class Run:
         env = dict(os.environ,
                    CDJ_LINK_PORT=str(self.port), CDJ_INPUT_PORT=str(self.port + 4),
                    TEMP=str(self.temp), TMPDIR=str(self.temp),
-                   CDJ_QEMU=str(ROOT / "build/qemu/build/qemu-system-sh4"),
+                   # A CDJ_QEMU of the caller wins: a candidate build can be
+                   # tried without replacing the one other runs use.
+                   CDJ_QEMU=os.environ.get("CDJ_QEMU",
+                                           str(ROOT / "build/qemu/build/qemu-system-sh4")),
                    CDJ_DSP_ACK="1", CDJ_DSP_POSITION="1", CDJ_COSIM_CENSUS="1",
                    PYTHONUNBUFFERED="1")
         if self.args.dsp_trace:
@@ -208,9 +227,9 @@ class Run:
             time.sleep(0.5)
 
     # ---------------------------------------------------------------- input --
-    def panel(self, *words):
+    def panel(self, *words, timeout=30):
         subprocess.run([PY, "-m", "tools.cdj_main.panel_control", "--port", str(self.port + 4),
-                        *words], cwd=ROOT, capture_output=True, timeout=30)
+                        *words], cwd=ROOT, capture_output=True, timeout=timeout)
 
     def press(self, key, hold_ms=100):
         self.panel("press", key, "--hold-ms", str(hold_ms))
@@ -320,6 +339,9 @@ def scenario(run: Run, args) -> None:
         return
     run.wait("settle", lambda: run.guest() >= got[0] + args.library_settle,
              args.library_settle + 30)
+    if args.before:
+        # Deck settings a stock run cannot assume, e.g. AUTO CUE: 19.4@1500:3.
+        then_keys(run, args.before, "before")
 
     for _ in range(args.root_row):
         run.panel("rotary", "7", "+1")
@@ -336,14 +358,14 @@ def scenario(run: Run, args) -> None:
     for _ in range(args.playlist_row):
         run.panel("rotary", "7", "+1")
         time.sleep(0.3)
-    want = r"^0000 0001 000b 0007 0002 %04x" % args.playlist_row
+    want = r"^0000 0001 000b 0007 0002 %04x" % visible_row(args.playlist_row)
     got = run.wait("select", request_matching(run, mark, want), 20)
     if not run.step("select", bool(got), got[1] if got else f"no preview of row {args.playlist_row}"):
         return
     run.wait("settle", lambda: run.guest() >= got[0] + 1, 20)
 
     mark = len(run.main_lines())
-    want = r"^0000 0001 0003 0007 0001 %04x" % args.playlist_row
+    want = r"^0000 0001 0003 0007 0001 %04x" % visible_row(args.playlist_row)
     got = run.press_for("tracks", "17.0", request_matching(run, mark, want), 20)
     if not run.step("tracks", bool(got), got[1] if got else "no ENTER for the playlist"):
         return
@@ -363,9 +385,11 @@ def scenario(run: Run, args) -> None:
         return
 
     err_mark = len(run.err.read_text(errors="replace")) if run.err.exists() else 0
-    got = run.wait("loaded", err_matching(run, r"control \+0x7ba0 command 0x00000002", err_mark),
+    # MAIN closes a load with +0x7ba0 = 4 (cued), followed by 2 when AUTO
+    # CUE is off; with it on (--before 19.4@1500:3, CDJ_AUTO_CUE=1) 4 is last.
+    got = run.wait("loaded", err_matching(run, r"control \+0x7ba0 command 0x00000004", err_mark),
                    args.load_timeout)
-    if not run.step("loaded", bool(got), "load closed (+0x7ba0 = 4, 2)" if got else "load never closed"):
+    if not run.step("loaded", bool(got), "load closed (+0x7ba0 = 4)" if got else "load never closed"):
         return
     loaded_at = run.guest()
     run.wait("settle", lambda: run.guest() >= loaded_at + 2, 10)
@@ -410,22 +434,31 @@ def scenario(run: Run, args) -> None:
     then_keys(run, args.then)
 
 
-def then_keys(run: Run, spec: str) -> None:
-    """--then: more keys after the scenario, each with guest seconds after it."""
+def then_keys(run: Run, spec: str, name: str = "then") -> None:
+    """--then: more keys after the scenario, each with guest seconds after it
+    (--before: the same between the library and the first browse press)."""
     for n, item in enumerate(x for x in spec.split(",") if x):
         key, _, secs = item.rpartition(":")
         if key.startswith("rot"):
             run.panel("rotary", "7", key[3:])
+        elif re.fullmatch(r"r\d[+-]\d+", key):
+            run.panel("rotary", key[1], key[2:])
+        elif re.fullmatch(r"a\d=(0x[0-9a-fA-F]+|\d+)", key):
+            run.panel("analog", key[1], str(int(key[3:], 0)))
+        elif key in ("sd-eject", "sd-insert", "usb-detach", "usb-attach"):
+            run.panel(*key.split("-"))
+        elif re.fullmatch(r"jog[+-]\d+", key):
+            run.panel("jog", key[3:], timeout=150)
         else:
             key, _, hold = key.partition("@")
             run.press(key, int(hold or 100))
         at = run.guest()
-        run.wait("then", lambda: run.guest() >= at + float(secs or 3), float(secs or 3) + 60)
+        run.wait(name, lambda: run.guest() >= at + float(secs or 3), float(secs or 3) + 60)
         try:
-            save_panel(run.frame, run.out / f"then-{n + 1}-{key}.png")
+            save_panel(run.frame, run.out / f"{name}-{n + 1}-{key}.png")
         except Exception as error:
-            print(f"  (no frame for then {n + 1}: {error})")
-        print(f"then {n + 1}: {key}, guest {at:.1f} -> {run.guest():.1f}", flush=True)
+            print(f"  (no frame for {name} {n + 1}: {error})")
+        print(f"{name} {n + 1}: {key}, guest {at:.1f} -> {run.guest():.1f}", flush=True)
 
 
 def main(argv=None) -> int:
@@ -471,6 +504,9 @@ def main(argv=None) -> int:
                              "below (negative: above) the first one; steps load2, stream2")
     parser.add_argument("--then", default="", metavar="KEY:SECONDS[,...]",
                         help="keys after the scenario (nf_cosim.py's syntax)")
+    parser.add_argument("--before", default="", metavar="KEY:SECONDS[,...]",
+                        help="keys between the library and the first browse press, "
+                             "e.g. 19.4@1500:3 (TIME/A.CUE held: AUTO CUE)")
     parser.add_argument("--stop-after", metavar="STEP",
                         help="end the scenario after this step passes")
     parser.add_argument("--keep", action="store_true",

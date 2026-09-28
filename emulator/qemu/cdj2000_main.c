@@ -59,6 +59,7 @@
 
 static bool cdj_nxs_profile;
 #include "cdj2000_input.h"
+#include "cdj2000_media_rate.h"
 #include "cdj2000_usb.h"
 #include "cdj2000_usbh.h"
 
@@ -730,8 +731,35 @@ static void cdj_panel_frame(uint8_t *frame)
     int64_t now;
     int i;
 
+    static unsigned version;
+    static bool reverse;
+
     if (!spec_read) {
+        const char *ver = getenv("CDJ_PANEL_VERSION");
+        const char *rev = getenv("CDJ_PANEL_REV");
+
         spec = getenv("CDJ_PANEL_FRAME");
+        /*
+         * Payload bytes 0/1 are the panel's firmware version: MAIN's panel
+         * handler (0x0428cec6) copies them big-endian into 0x04c08618, and
+         * decodes RETURN (20.4) and TAG TRACK (20.5) only while that word is
+         * above 9 (NEW FIRMWARE cs-147/148/150).  The stock panel update is
+         * "CDJ-2000 PANL Ver1.03" and its first S2 record, at 0x0F0000, is
+         * 01 03, so the CDJ-2000 panel reports 0x0103.  CDJ_PANEL_VERSION
+         * overrides it (0 = the old all-zero bytes); the NXS board keeps
+         * zeros, its panel protocol is its own.
+         */
+        version = ver ? strtoul(ver, NULL, 0) : 0x0103;
+        /*
+         * Payload byte 15 bit 1 is the DIRECTION lever, active low (0x2a097c
+         * inverts it; INPUT_MANIFEST 15.1): a frame of zeros is the lever at
+         * REV.  MAIN then keeps 0x04fdc21a = 1, sets 0x04fdc5b6 at PLAY
+         * (0x0426c04a..0x0426c056) and the per-tick status 0x04286232 puts it
+         * in the deck word X + 0x690, which the DSP task's beat check
+         * (0x0419f748) takes as "no beat packets" -- a playing emulated deck
+         * sent none.  The lever stands at FWD unless CDJ_PANEL_REV is set.
+         */
+        reverse = rev && strcmp(rev, "0") != 0;
         spec_read = true;
     }
     memset(frame, 0, PANEL_FRAME_LEN);
@@ -741,6 +769,18 @@ static void cdj_panel_frame(uint8_t *frame)
             break;
         }
         frame[i] = strtoul(digits, NULL, 16);
+    }
+    /*
+     * After CDJ_PANEL_FRAME, which every launcher sets for the SD lid bit and
+     * which would otherwise zero bytes 0/1 again; a frame that names a
+     * version of its own keeps it.
+     */
+    if (!cdj_nxs_profile && !frame[0] && !frame[1]) {
+        frame[0] = version >> 8;
+        frame[1] = version & 0xff;
+    }
+    if (!cdj_nxs_profile && !reverse) {
+        frame[15] |= 0x02;
     }
     if (cdj_panel_nr_keys < 0) {
         cdj_panel_keys_parse();
@@ -855,6 +895,208 @@ static void cdj_panel_tx_trace(CdjDmacChannel *channel)
     fprintf(stderr, "\n");
 }
 
+/*
+ * The panel lamps, by name.  MAIN builds the frame at 0x0428fe92 (and from
+ * its blink copy 0x04fe2ba0 at 0x042905fc) out of the lamp state bytes at
+ * 0x04fe2b38 (L0..L7, L+8 and L+12 words, L+31), bit by bit into the staging
+ * buffer 0x04fc3010, and copies it to 0xa4501018.  The service-mode path
+ * (0x0424bc9a != 0) fills bytes 0/1 from 0x0429173e instead, three words of
+ * three bits each -- which is what groups the hot cue bits by button below.
+ *
+ * Every name here was seen to follow a key in a co-simulation run on stock
+ * 4.33 (runs/cosim/px-3..px-7; AGENT-REPORT.md has the times).  The three hot
+ * cue "loop" bits and C's "cue" bit are named from that grouping plus C's loop
+ * bit, which px-4 lit by storing a running loop in C.
+ *
+ * Byte 3 is four 2-bit source lamps (the builder copies L7 two bits at a
+ * time); SD and USB are named, each moved 1 -> 3 by its SOURCE key (px-5,
+ * px-7) and blinking while the deck reads that medium.
+ * Bytes 6 and 8 are jog ring positions (L+8, L+12) and are not lamps.
+ */
+typedef struct CdjPanelLamp {
+    uint8_t byte;
+    uint8_t mask;
+    const char *name;
+} CdjPanelLamp;
+
+static const CdjPanelLamp cdj_panel_lamp_names[] = {
+    { 0, 0x01, "HOT_CUE_A" },           /* L3.5 */
+    { 0, 0x02, "HOT_CUE_A_REC" },       /* L3.6 */
+    { 0, 0x04, "HOT_CUE_A_LOOP" },      /* L3.7 */
+    { 0, 0x08, "HOT_CUE_B" },           /* L3.2 */
+    { 0, 0x10, "HOT_CUE_B_REC" },       /* L3.3 */
+    { 0, 0x20, "HOT_CUE_B_LOOP" },      /* L3.4 */
+    { 0, 0x40, "HOT_CUE_C" },           /* L2.7 */
+    { 0, 0x80, "HOT_CUE_C_REC" },       /* L3.0 */
+    { 1, 0x01, "HOT_CUE_C_LOOP" },      /* L3.1 */
+    { 1, 0x02, "LOOP_IN" },             /* L2.0 */
+    { 1, 0x04, "LOOP_OUT" },            /* L2.1 */
+    { 1, 0x10, "CUE" },                 /* L2.3, 0x04263624 */
+    { 1, 0x20, "PLAY_PAUSE" },          /* L2.4, 0x04263562 / 0x04263578 */
+    { 1, 0x40, "RELOOP_EXIT" },         /* L2.5 */
+    { 1, 0x80, "TEMPO_RESET" },         /* L2.6 = [0x04fdc1d5], 0x04263bba */
+    { 2, 0x01, "JOG_VINYL" },           /* L1.1, [0x04fdc218] != 1 */
+    { 2, 0x02, "JOG_CDJ" },             /* L1.2, [0x04fdc218] == 1 */
+    { 2, 0x04, "SD_INDICATOR" },        /* L1.4, 0x04290ed0's blinker */
+    { 2, 0x20, "MASTER_TEMPO" },        /* L1.7 = [0x04fdc1d4], 0x04263baa */
+    { 3, 0x0c, "SOURCE_SD" },           /* L7 bits 3..2, 0x04290ae8 */
+    { 3, 0x30, "SOURCE_USB" },          /* L7 bits 5..4, 0x04290b00 */
+};
+
+#define CDJ_PANEL_LAMP_MAX 64
+/* A lamp that toggled twice within this is blinking, not switching. */
+#define CDJ_PANEL_BLINK_NS (1200 * 1000000LL)
+
+typedef struct CdjPanelLampTrack {
+    CdjPanelLamp lamp;
+    char unnamed[8];
+    unsigned value;
+    int64_t last_edge_ns;
+    int64_t prev_edge_ns;
+    int shown;                      /* -1 unknown, 0.. value, 0x100 blinking */
+} CdjPanelLampTrack;
+
+static unsigned cdj_panel_lamp_value(const CdjPanelLamp *lamp,
+                                     const uint8_t *frame)
+{
+    unsigned value = frame[lamp->byte] & lamp->mask;
+    unsigned mask = lamp->mask;
+
+    while (mask && !(mask & 1)) {
+        mask >>= 1;
+        value >>= 1;
+    }
+    return value;
+}
+
+/*
+ * CDJ_PANEL_LAMPS=1: one line per lamp change, "on"/"off" (or the 2-bit
+ * level), and "blink N ms" once a lamp toggles twice within 1.2 s -- a
+ * blinking lamp is one change, not one line per toggle.  =all also names the
+ * other bits of bytes 0..5 and 7 by byte.bit.  With the input channel open
+ * (CDJ_INPUT_PORT) the lamps are tracked either way, so `state` can show them.
+ */
+static void cdj_panel_lamps(CdjDmacChannel *channel)
+{
+    static int mode = -1;           /* 0 off, 1 track, 2 log, 3 log all */
+    static CdjPanelLampTrack track[CDJ_PANEL_LAMP_MAX];
+    static unsigned count;
+    uint8_t frame[PANEL_FRAME_LEN];
+    int64_t now;
+    GString *summary;
+    bool changed = false;
+    unsigned i;
+
+    if (mode < 0) {
+        const char *spec = getenv("CDJ_PANEL_LAMPS");
+        const char *port = getenv("CDJ_INPUT_PORT");
+
+        mode = spec && *spec && strcmp(spec, "0")
+               ? (!strcmp(spec, "all") ? 3 : 2)
+               : (port && *port ? 1 : 0);
+        if (cdj_nxs_profile) {
+            mode = 0;               /* the NXS panel protocol is its own */
+        }
+        for (i = 0; i < ARRAY_SIZE(cdj_panel_lamp_names); i++) {
+            track[count++].lamp = cdj_panel_lamp_names[i];
+        }
+        if (mode == 3) {
+            static const uint8_t bytes[] = { 0, 1, 2, 3, 4, 5, 7 };
+            unsigned b, bit, j;
+
+            for (b = 0; b < ARRAY_SIZE(bytes); b++) {
+                for (bit = 0; bit < 8 && count < CDJ_PANEL_LAMP_MAX; bit++) {
+                    bool named = false;
+
+                    for (j = 0; j < ARRAY_SIZE(cdj_panel_lamp_names); j++) {
+                        named |= cdj_panel_lamp_names[j].byte == bytes[b]
+                                 && (cdj_panel_lamp_names[j].mask & (1u << bit));
+                    }
+                    if (named) {
+                        continue;
+                    }
+                    track[count].lamp.byte = bytes[b];
+                    track[count].lamp.mask = 1u << bit;
+                    snprintf(track[count].unnamed, sizeof(track[count].unnamed),
+                             "%u.%u", bytes[b], bit);
+                    track[count].lamp.name = track[count].unnamed;
+                    count++;
+                }
+            }
+        }
+        for (i = 0; i < count; i++) {
+            track[i].shown = -1;
+            track[i].last_edge_ns = track[i].prev_edge_ns = INT64_MIN / 2;
+        }
+    }
+    if (!mode || channel->tcr < PANEL_FRAME_LEN) {
+        return;
+    }
+    address_space_read(&address_space_memory, cdj_dma_phys(channel->sar),
+                       MEMTXATTRS_UNSPECIFIED, frame, PANEL_FRAME_LEN);
+    if (frame[PANEL_FRAME_LEN - 1] != PANEL_FRAME_MARK) {
+        return;
+    }
+    now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    for (i = 0; i < count; i++) {
+        CdjPanelLampTrack *t = &track[i];
+        unsigned value = cdj_panel_lamp_value(&t->lamp, frame);
+        int shown;
+
+        if (value != t->value || t->shown < 0) {
+            if (t->shown >= 0) {
+                t->prev_edge_ns = t->last_edge_ns;
+                t->last_edge_ns = now;
+            }
+            t->value = value;
+        }
+        shown = now - t->last_edge_ns < CDJ_PANEL_BLINK_NS
+                && t->last_edge_ns - t->prev_edge_ns < CDJ_PANEL_BLINK_NS
+                ? 0x100 : (int)value;
+        if (shown == t->shown) {
+            continue;
+        }
+        changed = true;
+        if (mode >= 2 && t->shown >= 0) {
+            if (shown == 0x100) {
+                fprintf(stderr, "cdj2000-lamp t=%.3f %s blink %u ms\n",
+                        now / 1e9, t->lamp.name,
+                        (unsigned)((t->last_edge_ns - t->prev_edge_ns)
+                                   / 1000000));
+            } else if (t->lamp.mask & (t->lamp.mask - 1)) {
+                fprintf(stderr, "cdj2000-lamp t=%.3f %s %d\n", now / 1e9,
+                        t->lamp.name, shown);
+            } else {
+                fprintf(stderr, "cdj2000-lamp t=%.3f %s %s\n", now / 1e9,
+                        t->lamp.name, shown ? "on" : "off");
+            }
+        }
+        t->shown = shown;
+    }
+    if (!changed) {
+        return;
+    }
+    summary = g_string_new(NULL);
+    for (i = 0; i < count; i++) {
+        const CdjPanelLampTrack *t = &track[i];
+
+        if (t->shown == 0) {
+            continue;
+        }
+        g_string_append_printf(summary, "%s%s:", summary->len ? "," : "",
+                               t->lamp.name);
+        if (t->shown == 0x100) {
+            g_string_append(summary, "blink");
+        } else if (t->lamp.mask & (t->lamp.mask - 1)) {
+            g_string_append_printf(summary, "%d", t->shown);
+        } else {
+            g_string_append(summary, "on");
+        }
+    }
+    cdj_input_set_lamps(summary->len ? summary->str : "-");
+    g_string_free(summary, TRUE);
+}
+
 static void cdj_dmac_panel_done(void *opaque)
 {
     CdjDmacState *dmac = opaque;
@@ -869,6 +1111,7 @@ static void cdj_dmac_panel_done(void *opaque)
         }
         channel->armed = false;
         cdj_panel_tx_trace(channel);
+        cdj_panel_lamps(channel);
         /* The device side is a fixed register; only the memory side advances. */
         cdj_dmac_complete(channel, channel->sar + channel->tcr, channel->dar);
         /* The request is TE && IE: a channel run without IE completes quietly. */
@@ -3484,6 +3727,53 @@ static void cdj_main_poke_init(void)
             PRIu64 " ms\n", poke->count, seconds, period_ms);
 }
 
+/*
+ * AUTO CUE on at boot, as the owner's deck (A.CUE lit), when the DSP model
+ * can answer its search: by default only with CDJ_DSP_POSITION, whose
+ * +0x7ba0 handler sends the reply (+0x7bf8 = 8); without it MAIN would wait
+ * for an answer that never comes.  CDJ_AUTO_CUE=1 forces it on, =0 keeps the
+ * image's power-on value (off), so a LOAD ends with 4, 2 and the deck plays
+ * by itself.
+ * MAIN 4.33 keeps the setting in byte 0x04fdc1cf (1 = on; the TIME/A.CUE
+ * key held toggles it at 0x04269604..0x04269650, the lamp follows it), with
+ * a copy at 0x04831fa8 + 0x69a and bit 2 of the settings word 0x0483fe70
+ * (getter 0x041e9830 item 3).  Its power-on value is bit 2 of the word the
+ * init copies from 0xa40699a4 (0x041e7666; the image carries 0x10, off) into
+ * 0x0483fe70, and 0x04280e20 sets the byte from it.  With the byte at 1 a
+ * LOAD sends +0x7ba0 = 1, 7 (the AUTO CUE search) and ends CUED (fk-12:
+ * the three bytes written by hand at the track list).  One write, at
+ * CDJ_AUTO_CUE_AT guest seconds (default 15, after that init and the
+ * card's settings, before the first LOAD a scenario makes).
+ */
+static void cdj_auto_cue_fire(void *opaque)
+{
+    uint8_t on = 1, settings = 0;
+
+    address_space_write(&address_space_memory, 0x04fdc1cf, MEMTXATTRS_UNSPECIFIED, &on, 1);
+    address_space_write(&address_space_memory, 0x04831fa8 + 0x69a, MEMTXATTRS_UNSPECIFIED, &on, 1);
+    address_space_read(&address_space_memory, 0x0483fe70, MEMTXATTRS_UNSPECIFIED, &settings, 1);
+    settings |= 4;
+    address_space_write(&address_space_memory, 0x0483fe70, MEMTXATTRS_UNSPECIFIED, &settings, 1);
+    fprintf(stderr, "cdj2000-main: AUTO CUE on (0x04fdc1cf = 1)\n");
+}
+
+static void cdj_auto_cue_init(void)
+{
+    const char *on = getenv("CDJ_AUTO_CUE");
+    const char *at = getenv("CDJ_AUTO_CUE_AT");
+    QEMUTimer *timer;
+
+    if (cdj_nxs_profile) {
+        return;
+    }
+    if (on ? !strcmp(on, "0") : getenv("CDJ_DSP_POSITION") == NULL) {
+        return;
+    }
+    timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, cdj_auto_cue_fire, NULL);
+    timer_mod(timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL)
+              + (int64_t)(at ? strtoull(at, NULL, 0) : 15) * NANOSECONDS_PER_SECOND);
+}
+
 static void cdj_debug_console_arm(void *opaque)
 {
     uint32_t level = (uint32_t)(uintptr_t)opaque;
@@ -3670,9 +3960,13 @@ struct CdjSdhiState {
      */
     bool inserted;
     bool card_high;
+    bool ejected;                   /* taken out by the input channel */
     QEMUTimer *insert_timer;
     qemu_irq irq;
     QEMUTimer *data_timer;
+    /* CDJ_SD_READ_BPS and CDJ_READ_LOG; see cdj2000_media_rate.h. */
+    CdjMediaRate rate;
+    int64_t block_added_ns;         /* what the rate adds to the armed block */
 };
 
 /*
@@ -3684,6 +3978,30 @@ struct CdjSdhiState {
  * 512-byte SD burst is far longer than this.
  */
 #define SDHI_XFER_NS 20000
+
+/*
+ * When the armed block reaches the buffer.  CDJ_SD_READ_BPS stretches a read
+ * block to its size at that rate, counted from the command or from the moment
+ * the previous block was drained -- the SDHI has the one buffer, and the card
+ * waits while it is full.  Never shorter than SDHI_XFER_NS, so a rate above
+ * 512 bytes per 20 us (25.6 MB/s) changes nothing, and without a rate this is
+ * the old delay exactly.  Writes are not limited.
+ */
+static int64_t cdj_sdhi_block_ns(CdjSdhiState *s)
+{
+    int64_t ns = SDHI_XFER_NS;
+
+    s->block_added_ns = 0;
+    if (!s->writing) {
+        int64_t rated = cdj_media_rate_ns(&s->rate, s->buf_len);
+
+        if (rated > ns) {
+            s->block_added_ns = rated - ns;
+            ns = rated;
+        }
+    }
+    return ns;
+}
 
 /*
  * The data phase is interrupt-driven, not polled: 0x1ffd8c waits on an RTOS
@@ -3710,6 +4028,7 @@ static void cdj_sdhi_fill_block(CdjSdhiState *s)
     }
     s->buf_pos = 0;
     s->info2 |= SDHI_INFO2_RXRDY;
+    cdj_media_rate_data(&s->rate, s->buf_len, s->block_added_ns);
     cdj_sdhi_update_irq(s);
 }
 
@@ -3770,7 +4089,9 @@ static void cdj_sdhi_command(CdjSdhiState *s, uint16_t cmd)
     s->buf_pos = 0;
     s->blocks_left = 0;
 
-    len = sdbus_do_command(&s->sdbus, &request, response, sizeof(response));
+    /* A card the input channel took out answers nothing at all. */
+    len = s->ejected ? 0 : sdbus_do_command(&s->sdbus, &request, response,
+                                            sizeof(response));
 
     if (getenv("CDJ_SDHI_TRACE")) {
         fprintf(stderr, "cdj2000-sdhi: cmd %#06x (CMD%u) arg %#010x -> %u bytes\n",
@@ -3802,6 +4123,14 @@ static void cdj_sdhi_command(CdjSdhiState *s, uint16_t cmd)
         s->multi = (cmd & SDHI_CMD_MULTI) != 0;
         s->blocks_left = s->multi && s->seccnt ? s->seccnt : 1;
         s->writing = (cmd & SDHI_CMD_READ) == 0;
+        if (!s->writing && s->rate.log) {
+            char what[16];
+
+            /* Bit 6 is the firmware's own "application command" mark. */
+            snprintf(what, sizeof(what), "%sCMD%u", cmd & 0x40 ? "A" : "",
+                     request.cmd);
+            cdj_media_rate_command(&s->rate, what, request.arg, s->blocks_left);
+        }
         /*
          * Both directions are announced by the timer.  A write used to raise
          * TXRQ here, inside the store of the command register, which is the
@@ -3810,7 +4139,7 @@ static void cdj_sdhi_command(CdjSdhiState *s, uint16_t cmd)
          * consumed before there is anything waiting for it.
          */
         timer_mod(s->data_timer,
-                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + SDHI_XFER_NS);
+                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + cdj_sdhi_block_ns(s));
     }
     cdj_sdhi_update_irq(s);
 }
@@ -3859,7 +4188,7 @@ static void cdj_sdhi_block_done(CdjSdhiState *s)
     if (s->blocks_left > 1) {
         s->blocks_left--;
         timer_mod(s->data_timer,
-                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + SDHI_XFER_NS);
+                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + cdj_sdhi_block_ns(s));
     } else {
         cdj_sdhi_data_end(s);
     }
@@ -4171,6 +4500,35 @@ static void cdj_sdhi_insert(void *opaque)
     cdj_sd_media_state_report(s);
 }
 
+/*
+ * `sd eject` / `sd insert` on the input channel (cdj2000_input.c), which
+ * also opens and closes the SD door contact, payload byte 17 bit 2.  Out:
+ * INFO1 reports the slot empty and every command times out.  Back: the pin
+ * reads present again, the absent -> present edge the poller mounts on.
+ */
+static bool cdj_sdhi_medium(void *opaque, int present, bool *now_in,
+                            char *note, size_t note_len)
+{
+    CdjSdhiState *s = opaque;
+
+    if (!sdbus_get_inserted(&s->sdbus)) {
+        snprintf(note, note_len, "no card image in the slot (-sd)");
+        return false;
+    }
+    if (present == 0) {
+        timer_del(s->insert_timer);
+        s->ejected = true;
+        s->inserted = false;
+        s->buf_len = s->buf_pos = s->blocks_left = 0;
+    } else if (present == 1 && (s->ejected || !s->inserted)) {
+        timer_del(s->insert_timer);
+        s->ejected = false;
+        cdj_sdhi_insert(s);
+    }
+    *now_in = s->inserted && !s->ejected;
+    return true;
+}
+
 static void cdj_sdhi_reset(DeviceState *dev)
 {
     CdjSdhiState *s = CDJ_SDHI(dev);
@@ -4185,6 +4543,7 @@ static void cdj_sdhi_reset(DeviceState *dev)
     s->stop = 0;
     s->sizereg = 512;
     s->inserted = false;
+    s->ejected = false;
     s->card_high = getenv("CDJ_SDHI_CARD_HIGH") != NULL;
     s->info2_mask = 0xffff;
     cdj_sdhi_update_irq(s);
@@ -4211,6 +4570,7 @@ static void cdj_sdhi_realize(DeviceState *dev, Error **errp)
     qbus_init(&s->sdbus, sizeof(s->sdbus), TYPE_SD_BUS, dev, "sd-bus");
     s->insert_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, cdj_sdhi_insert, s);
     s->data_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, cdj_sdhi_data_ready, s);
+    cdj_media_rate_init(&s->rate, "sd", "CDJ_SD_READ_BPS");
 }
 
 static void cdj_sdhi_class_init(ObjectClass *klass, const void *data)
@@ -4390,6 +4750,10 @@ static void cdj_sdhi_init(MemoryRegion *system, qemu_irq irq)
     sysbus_realize_and_unref(SYS_BUS_DEVICE(host), &error_fatal);
     CDJ_SDHI(host)->irq = irq;
     cdj_sdhi_singleton = CDJ_SDHI(host);
+    if (!cdj_nxs_profile) {
+        /* The NXS lid is its own contact: `sd-lid` in cdj2000_input.c. */
+        cdj_input_register_medium("sd", cdj_sdhi_medium, cdj_sdhi_singleton);
+    }
     memory_region_add_subregion(system, SDHI_BASE,
                                 sysbus_mmio_get_region(SYS_BUS_DEVICE(host), 0));
 
@@ -4587,7 +4951,13 @@ static void cdj_intc_timer_init(MemoryRegion *system, SuperHCPU *cpu)
     cpu->env.intc_handle = intc;
 
     cdj_sdhi_init(system, intc->irqs[CDJ_INTC_SDHI]);
-    if (cdj_nxs_profile) cdj_nxs_eth_init(intc->irqs[CDJ_INTC_ETH]);
+    if (cdj_nxs_profile) {
+        cdj_nxs_eth_init(intc->irqs[CDJ_INTC_ETH]);
+    } else if (cdj2000_eth_init(intc->irqs[CDJ_INTC_ETH])) {
+        /* Pro DJ Link: only with -nic ...,model=cdj2000-ethernet (boot_vm
+         * --link-hub); without it 0xfef00000 stays unassigned as before. */
+        qemu_log("cdj2000-main: EtherC and RTL8201CP on the network\n");
+    }
     cdj_link_board_init(system, intc);
     cdj_panel_scif_init(system);
     /*
@@ -4746,6 +5116,7 @@ static void cdj2000_main_init(MachineState *machine)
     cdj_intc_timer_init(system, cpu);
     cdj_debug_console_init();
     cdj_main_poke_init();
+    cdj_auto_cue_init();
 
     if (!firmware) {
         error_report("cdj2000-main: pass the MAIN image with -bios "

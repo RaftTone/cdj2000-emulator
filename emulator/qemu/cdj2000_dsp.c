@@ -127,6 +127,8 @@ typedef struct {
     uint32_t ctl_value;
 
     QEMUTimer *tick;
+    QEMUTimer *pos_tick;                /* CDJ_DSP_POSITION_US */
+    int64_t pos_tick_ns;
     CdjDspModel *model;
 
     /* The interrupt line to MAIN (cdj_dsp_event). */
@@ -480,6 +482,25 @@ static void cdj_dsp_tick(void *opaque)
     timer_mod(dsp->tick, now + DSP_TICK_NS);
 }
 
+/*
+ * CDJ_DSP_POSITION_US (default 1000, 0 = off; only with CDJ_DSP_POSITION, so
+ * other runs keep their timer deadlines): the position report on a timer
+ * of its own.  MAIN's DSP task reads the block every ~3 ms (sk-1: 333 reads a
+ * second at 0x0419e62a/0x0424ff80) and sends a beat only while the beat's
+ * time is below its position X+0x220 plus 8 ms (0x0419f6f6..0x0419f704) and
+ * differs from the last beat it sent (0x0419f720..0x0419f73c).  On the 10 ms
+ * tick alone the position moved in 10 ms steps, and every step that crossed a
+ * beat by more than 8 ms lost it: about one beat in five (td-1).  A report at
+ * least as fresh as MAIN's reads keeps every beat.
+ */
+static void cdj_dsp_pos_tick(void *opaque)
+{
+    CdjDspState *dsp = opaque;
+
+    cdj_dsp_model_position_tick(dsp->model, dsp->ram, CDJ_DSP_WINDOW_SIZE);
+    timer_mod(dsp->pos_tick, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + dsp->pos_tick_ns);
+}
+
 bool cdj_dsp_is_window(hwaddr address)
 {
     return address >= CDJ_DSP_WINDOW_BASE
@@ -559,6 +580,13 @@ void cdj_dsp_init(MemoryRegion *system, Chardev *external, qemu_irq irq,
 
     dsp->tick = timer_new_ns(QEMU_CLOCK_VIRTUAL, cdj_dsp_tick, dsp);
     timer_mod(dsp->tick, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + DSP_TICK_NS);
+
+    dsp->pos_tick_ns = (int64_t)(getenv("CDJ_DSP_POSITION_US")
+        ? strtol(getenv("CDJ_DSP_POSITION_US"), NULL, 0) : 1000) * 1000;
+    if (dsp->pos_tick_ns > 0 && getenv("CDJ_DSP_POSITION")) {
+        dsp->pos_tick = timer_new_ns(QEMU_CLOCK_VIRTUAL, cdj_dsp_pos_tick, dsp);
+        timer_mod(dsp->pos_tick, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + dsp->pos_tick_ns);
+    }
 
     cdj_dsp = dsp;
 }

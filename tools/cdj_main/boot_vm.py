@@ -29,6 +29,7 @@ import os
 import re
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import threading
@@ -246,6 +247,14 @@ def poke_thread(port: int, pokes, at: float, hold: float, interval: float,
             return
 
 
+def parse_read_rate(text: str) -> int:
+    """A medium's read rate, bytes per second of guest time; 0 is no limit."""
+    if not (text.isascii() and text.isdigit()):
+        raise argparse.ArgumentTypeError(
+            "expected a whole number of bytes per second, got %r" % text)
+    return int(text)
+
+
 def parse_poke(text: str) -> tuple[int, int]:
     address, _, value = text.partition("=")
     if not value:
@@ -330,6 +339,55 @@ def monitor(sock: socket.socket, watch=None, settle: float = 0.1) -> dict[int, i
     return words
 
 
+# MAIN 4.33 keeps its Ethernet address in a log of three-halfword records in
+# the 8 KiB flash sector at 0x3f8000 (0x041e8946 scans it from the end for the
+# last one; 0x041ea374 makes bytes of it, high byte first), and falls back to
+# 00:00:00:00:00:01 when the sector is blank (0x041e89f8).
+MAC_SECTOR, MAC_SECTOR_SIZE, FLASH_SIZE = 0x3F8000, 0x2000, 0x400000
+
+
+def flash_with_mac(image: Path, mac: str | None, target: Path) -> Path:
+    """IMAGE, or a copy of it with MAC recorded where MAIN reads it."""
+    if not mac:
+        return image
+    octets = bytes.fromhex(mac.replace(":", "").replace("-", ""))
+    if len(octets) != 6 or octets[4:6] == b"\xff\xff":
+        raise SystemExit(f"--link-mac: not a usable address: {mac}")
+    data = bytearray(Path(image).read_bytes())
+    if len(data) > MAC_SECTOR:
+        raise SystemExit(f"--link-mac: {image} already reaches the MAC sector")
+    data += b"\xff" * (FLASH_SIZE - len(data))
+    record = struct.pack("<3H", *(octets[i] << 8 | octets[i + 1] for i in (0, 2, 4)))
+    data[MAC_SECTOR:MAC_SECTOR + len(record)] = record
+    target.write_bytes(data)
+    return target
+
+
+def link_hub_env(spec: str | None) -> dict[str, str]:
+    """CDJ_NETSIM for a synchronising hub (sync:PORT, sync:HOST:PORT, sync:unix:PATH)."""
+    if not spec or not spec.startswith("sync:"):
+        return {}
+    target = spec[5:]            # PORT, HOST:PORT or unix:PATH
+    return {"CDJ_NETSIM": target if ":" in target else f"127.0.0.1:{target}"}
+
+
+def link_hub_args(spec: str | None) -> list[str]:
+    """The QEMU arguments that connect the EtherC to a link_hub.
+
+    The board creates its EtherC only for a NIC of model cdj2000-ethernet, and
+    both netdevs below frame each Ethernet frame with a 32-bit length, which
+    is what the hub reads.
+    """
+    if not spec or spec.startswith("sync:"):
+        return []           # sync: the board talks to the hub itself (CDJ_NETSIM)
+    if spec.startswith("unix:"):
+        netdev = f"stream,id=djlink,server=off,addr.type=unix,addr.path={spec[5:]}"
+    else:
+        host, _, port = spec.rpartition(":")
+        netdev = f"socket,id=djlink,connect={host or '127.0.0.1'}:{port}"
+    return ["-netdev", netdev, "-net", "nic,model=cdj2000-ethernet,netdev=djlink"]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--seconds", type=int, default=150,
@@ -343,6 +401,19 @@ def main() -> int:
                              "a USB memory stick (QEMU's usb-storage on the "
                              "SoC's USB module); a firmware update needs the "
                              ".UPD files in its root")
+    # The two media models otherwise read as fast as the host does, and a
+    # LOAD's walk of export.pdb is over in a fraction of a deck's time.  The
+    # numbers are to be measured on a deck (RUNNING.md, "Environment").
+    parser.add_argument("--sd-read-bps", type=parse_read_rate, metavar="N",
+                        default=None,
+                        help="the card's read rate in bytes per second of "
+                             "guest time (sets CDJ_SD_READ_BPS; 0 or unset: "
+                             "no limit)")
+    parser.add_argument("--usb-read-bps", type=parse_read_rate, metavar="N",
+                        default=None,
+                        help="the stick's read rate in bytes per second of "
+                             "guest time (sets CDJ_USB_READ_BPS; 0 or unset: "
+                             "no limit)")
     parser.add_argument("--source-key", choices=sorted(SOURCE_KEYS),
                         default=None,
                         help="press a SOURCE key on the panel; defaults to "
@@ -428,6 +499,22 @@ def main() -> int:
                         help="an extra argument for qemu-system-sh4, repeatable "
                              "(--qemu-arg=-trace --qemu-arg=pflash_* logs the "
                              "flash model's commands into the -D log)")
+    parser.add_argument("--link-hub", default=os.environ.get("CDJ_LINK_HUB"),
+                        metavar="PORT|HOST:PORT|unix:PATH",
+                        help="plug the player's Ethernet (the EtherC and its "
+                             "RTL8201CP) into a Pro DJ Link segment: "
+                             "tools.cdj_main.link_hub listening there; without "
+                             "it the machine has no Ethernet, as before. "
+                             "sync:PORT, sync:HOST:PORT or sync:unix:PATH is a link_hub --sync, "
+                             "which keeps every deck on one guest time "
+                             "(emulator/qemu/cdj2000_netsim.c)")
+    parser.add_argument("--link-mac", default=os.environ.get("CDJ_LINK_MAC"),
+                        metavar="XX:XX:XX:XX:XX:XX",
+                        help="the player's own Ethernet address, stored where "
+                             "MAIN keeps it (flash 0x3f8000); a second deck "
+                             "on one --link-hub needs its own, since every "
+                             "blank flash gives 00:00:00:00:00:01 and so the "
+                             "same 169.254.0.1")
     parser.add_argument("--pmemsave", default=None, metavar="START,SIZE,FILE",
                         help="before quitting, save SIZE bytes of guest physical "
                              "memory from START to FILE through the monitor -- "
@@ -518,6 +605,12 @@ def main() -> int:
                      "in separate runs")
 
     env = qemu_environment()
+    for rate, variable in ((args.sd_read_bps, "CDJ_SD_READ_BPS"),
+                           (args.usb_read_bps, "CDJ_USB_READ_BPS")):
+        if rate is not None:
+            env[variable] = str(rate)
+            print(f"# {variable}={rate}" + (" (no limit)" if rate == 0 else
+                                            " bytes per guest second"))
     if args.cosim:
         # The canned bootstrap records are a wall-clock stand-in for MAIN;
         # in one guest time MAIN answers from its first record on.
@@ -601,7 +694,8 @@ def main() -> int:
     board = subprocess.Popen(
         [
             str(QEMU), "-M", "cdj2000-main",
-            "-bios", str(args.firmware or FIRMWARE / "main-firmware.bin"),
+            "-bios", str(flash_with_mac(args.firmware or FIRMWARE / "main-firmware.bin",
+                                        args.link_mac, TEMP / f"main-flash-mac{suffix}.bin")),
             "-display", "none", "-no-reboot", "-d", "unimp", "-D", str(main_log),
             "-serial", f"tcp:127.0.0.1:{PORT},server,nowait",
             "-serial", f"tcp:127.0.0.1:{PORT + 2},server,nowait",
@@ -620,6 +714,7 @@ def main() -> int:
             *(["-icount", f"shift={args.cosim_shift},sleep=off", "-S"]
               if args.cosim else []),
             *(args.qemu_arg or []),
+            *link_hub_args(args.link_hub),
             # The card is inserted a while after reset on purpose: the poller at
             # 0x1ff164 arms its mount gate only while the slot is empty, and the
             # gate itself comes from the panel -- payload byte 17 bit 2 is the
@@ -632,7 +727,8 @@ def main() -> int:
                "-device", "usb-storage,drive=usbstick,removable=on"]
               if args.usb_stick else []),
         ],
-        env=dict(env, CDJ_TMU_FREQ=os.environ.get("CDJ_TMU_FREQ", "54000000"),
+        env=dict(env, **link_hub_env(args.link_hub),
+                 CDJ_TMU_FREQ=os.environ.get("CDJ_TMU_FREQ", "54000000"),
                  CDJ_SD_INSERT=os.environ.get("CDJ_SD_INSERT",
                                               "10" if args.sd else "25"),
                  # A press lands only if MAIN builds a status record while

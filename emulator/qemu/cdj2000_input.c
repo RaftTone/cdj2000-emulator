@@ -32,7 +32,10 @@
  * panel_control.py, from a test, or by hand.
  *
  *   ping                      -> ok pong
- *   press <byte> <mask> [ms]  queue one down/up pulse, mask is hex
+ *   press <byte> <mask> [ms]  queue one down/up pulse, mask is hex;
+ *                             answers "ok press id=N"
+ *   ack <id>                  where press N is: queued, down since frame F, or
+ *                             done, first..last frame that carried it
  *   down <byte> <mask>        hold bits down until "up" (for chords and holds)
  *   up <byte> <mask>          release them
  *   level <byte> <mask> <0|1> persistently force literal contact levels
@@ -41,7 +44,12 @@
  *   step <n>                  steps per frame for the rotary ramp (default 1)
  *   hold <ms> / gap <ms>      default press hold and the quiet time after it
  *   clear                     release bits, level overrides and analogue fields
- *   state                     report held bits, analogue fields, queue depth
+ *   state                     report held bits, analogue fields, queue depth,
+ *                             the lamps MAIN last lit and the last press
+ *   sd eject|insert|state     take the SD card out / put it back (CDJ-2000):
+ *                             the card leaves the slot and the SD door contact
+ *                             (payload byte 17 bit 2) opens, and back
+ *   usb detach|attach|state   unplug / replug the USB stick on its port
  *   sd-lid open|closed|toggle|state  persistent NXS lid contact, not a key
  *
  * CDJ_NXS_SD_LID=open|closed opts into this contact even without a socket.
@@ -81,7 +89,61 @@ typedef struct CdjInputPress {
     unsigned byte;
     uint8_t mask;
     int64_t hold_ns;
+    unsigned id;
 } CdjInputPress;
+
+/*
+ * Where each recent press landed, so a client can ask instead of guessing
+ * from the clock: the panel frame (cdj_input_frames, one per exchange) the
+ * bit first went out in and the last one that still carried it.
+ */
+#define CDJ_INPUT_ACKS 32
+
+typedef struct CdjInputAck {
+    unsigned id;
+    uint64_t first_frame;
+    uint64_t last_frame;
+    int64_t down_ns;
+    int64_t up_ns;
+    bool down;
+    bool done;
+} CdjInputAck;
+
+static CdjInputAck cdj_input_acks[CDJ_INPUT_ACKS];
+static unsigned cdj_input_next_id = 1;
+
+/* The last thing the channel did to the panel, for other logs to name. */
+static char cdj_input_event[96];
+static int64_t cdj_input_event_ns;
+
+static void cdj_input_note_event(int64_t now, const char *format, ...)
+    G_GNUC_PRINTF(2, 3);
+
+static void cdj_input_note_event(int64_t now, const char *format, ...)
+{
+    va_list arguments;
+
+    va_start(arguments, format);
+    vsnprintf(cdj_input_event, sizeof(cdj_input_event), format, arguments);
+    va_end(arguments);
+    cdj_input_event_ns = now;
+}
+
+/* The lamps as the board last summarised them (cdj_input_set_lamps). */
+static char cdj_input_lamps[768] = "-";
+
+#define CDJ_INPUT_MEDIA 4
+
+static struct {
+    const char *name;
+    CdjInputMediumFn fn;
+    void *opaque;
+} cdj_input_media[CDJ_INPUT_MEDIA];
+
+/* The SD door contact the `sd` verb holds open while the card is out. */
+#define CDJ_INPUT_SD_DOOR_BYTE 17
+#define CDJ_INPUT_SD_DOOR_MASK 0x04
+static bool cdj_input_sd_door_open;
 
 typedef enum CdjInputPhase {
     CDJ_INPUT_IDLE,
@@ -147,6 +209,45 @@ unsigned cdj_input_analog_byte(unsigned field)
 unsigned cdj_input_analog_width(unsigned field)
 {
     return field < CDJ_INPUT_ANALOG_FIELDS ? cdj_input_analog[field].width : 0;
+}
+
+const char *cdj_input_last_event(int64_t *at_ns)
+{
+    if (!cdj_input_event[0]) {
+        return NULL;
+    }
+    if (at_ns) {
+        *at_ns = cdj_input_event_ns;
+    }
+    return cdj_input_event;
+}
+
+void cdj_input_set_lamps(const char *summary)
+{
+    snprintf(cdj_input_lamps, sizeof(cdj_input_lamps), "%s",
+             summary && *summary ? summary : "-");
+}
+
+void cdj_input_register_medium(const char *name, CdjInputMediumFn fn,
+                               void *opaque)
+{
+    unsigned i;
+
+    for (i = 0; i < CDJ_INPUT_MEDIA; i++) {
+        if (!cdj_input_media[i].name || !strcmp(cdj_input_media[i].name, name)) {
+            cdj_input_media[i].name = name;
+            cdj_input_media[i].fn = fn;
+            cdj_input_media[i].opaque = opaque;
+            return;
+        }
+    }
+}
+
+static CdjInputAck *cdj_input_ack_slot(unsigned id)
+{
+    CdjInputAck *ack = &cdj_input_acks[id % CDJ_INPUT_ACKS];
+
+    return ack->id == id ? ack : NULL;
 }
 
 /* ------------------------------------------------------------------ socket */
@@ -324,8 +425,23 @@ static void cdj_input_report_state(void)
                                cdj_input_analog_value[i],
                                cdj_input_analog_target[i]);
     }
-    g_string_append_printf(text, " sd_lid=%s\n", cdj_input_sd_lid < 0 ? "raw" :
+    g_string_append_printf(text, " sd_lid=%s", cdj_input_sd_lid < 0 ? "raw" :
                            cdj_input_sd_lid ? "closed" : "open");
+    g_string_append_printf(text, " lamps=%s", cdj_input_lamps);
+    if (cdj_input_next_id > 1) {
+        const CdjInputAck *ack = cdj_input_ack_slot(cdj_input_next_id - 1);
+
+        if (ack && ack->done) {
+            g_string_append_printf(text, " last_press=%u:%" PRIu64 "-%" PRIu64,
+                                   ack->id, ack->first_frame, ack->last_frame);
+        } else if (ack && ack->down) {
+            g_string_append_printf(text, " last_press=%u:%" PRIu64 "-",
+                                   ack->id, ack->first_frame);
+        } else if (ack) {
+            g_string_append_printf(text, " last_press=%u:queued", ack->id);
+        }
+    }
+    g_string_append(text, "\n");
     cdj_input_reply(text->str);
     g_string_free(text, TRUE);
 }
@@ -459,12 +575,16 @@ static void cdj_input_command(char *line)
         }
         if (!strcmp(verb, "down")) {
             cdj_input_held[first] |= (uint8_t)second;
+            cdj_input_note_event(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL),
+                                 "down %ld mask %#lx", first, second);
             info_report("cdj2000-input: byte %ld mask %#lx down", first, second);
             cdj_input_reply("ok down\n");
             return;
         }
         if (!strcmp(verb, "up")) {
             cdj_input_held[first] &= (uint8_t)~second;
+            cdj_input_note_event(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL),
+                                 "up %ld mask %#lx", first, second);
             info_report("cdj2000-input: byte %ld mask %#lx up", first, second);
             cdj_input_reply("ok up\n");
             return;
@@ -481,16 +601,114 @@ static void cdj_input_command(char *line)
         {
             unsigned slot = (cdj_input_queue_head + cdj_input_queue_len)
                             % CDJ_INPUT_QUEUE;
+            unsigned id = cdj_input_next_id++;
+            CdjInputAck *ack = &cdj_input_acks[id % CDJ_INPUT_ACKS];
+            char reply[48];
 
             cdj_input_queue[slot].byte = (unsigned)first;
             cdj_input_queue[slot].mask = (uint8_t)second;
             cdj_input_queue[slot].hold_ns = arg3 ? third * 1000000LL
                                                  : cdj_input_hold_ns;
+            cdj_input_queue[slot].id = id;
             cdj_input_queue_len++;
+            memset(ack, 0, sizeof(*ack));
+            ack->id = id;
+            info_report("cdj2000-input: queued press %u: byte %ld mask %#lx "
+                        "(%u waiting)", id, first, second, cdj_input_queue_len);
+            snprintf(reply, sizeof(reply), "ok press id=%u\n", id);
+            cdj_input_reply(reply);
         }
-        info_report("cdj2000-input: queued byte %ld mask %#lx (%u waiting)",
-                    first, second, cdj_input_queue_len);
-        cdj_input_reply("ok press\n");
+        return;
+    }
+    if (!strcmp(verb, "ack")) {
+        const CdjInputAck *ack;
+        char reply[160];
+
+        if (!cdj_input_number(arg1, &first) || first <= 0 || arg2) {
+            cdj_input_reply("err ack <id>\n");
+            return;
+        }
+        ack = cdj_input_ack_slot((unsigned)first);
+        if (!ack) {
+            cdj_input_reply("err ack: no such press (or too old)\n");
+            return;
+        }
+        if (ack->done) {
+            snprintf(reply, sizeof(reply), "ok ack id=%u done frames=%" PRIu64
+                     "-%" PRIu64 " t=%.3f-%.3f\n", ack->id, ack->first_frame,
+                     ack->last_frame, ack->down_ns / 1e9, ack->up_ns / 1e9);
+        } else if (ack->down) {
+            snprintf(reply, sizeof(reply), "ok ack id=%u down frame=%" PRIu64
+                     " t=%.3f\n", ack->id, ack->first_frame,
+                     ack->down_ns / 1e9);
+        } else {
+            snprintf(reply, sizeof(reply), "ok ack id=%u queued\n", ack->id);
+        }
+        cdj_input_reply(reply);
+        return;
+    }
+    if (!strcmp(verb, "sd") || !strcmp(verb, "usb")) {
+        static const char *const out_words[] = { "eject", "detach", "out" };
+        static const char *const in_words[] = { "insert", "attach", "in" };
+        int present = -2;
+        bool now_in = false;
+        char note[96] = "";
+        char reply[192];
+        unsigned i;
+
+        for (i = 0; arg1 && i < G_N_ELEMENTS(out_words); i++) {
+            if (!strcmp(arg1, out_words[i])) {
+                present = 0;
+            }
+            if (!strcmp(arg1, in_words[i])) {
+                present = 1;
+            }
+        }
+        if (arg1 && !strcmp(arg1, "state")) {
+            present = -1;
+        }
+        if (present == -2 || arg2) {
+            cdj_input_reply(verb[0] == 's' ? "err sd <eject|insert|state>\n"
+                                           : "err usb <detach|attach|state>\n");
+            return;
+        }
+        for (i = 0; i < CDJ_INPUT_MEDIA; i++) {
+            if (cdj_input_media[i].name
+                && !strcmp(cdj_input_media[i].name, verb)) {
+                break;
+            }
+        }
+        if (i == CDJ_INPUT_MEDIA) {
+            cdj_input_reply("err this board has no such medium\n");
+            return;
+        }
+        if (verb[0] == 's' && present >= 0) {
+            /* The door opens before the card leaves and closes after it is
+             * back; both land in the same exchange here. */
+            cdj_input_sd_door_open = present == 0;
+        }
+        if (!cdj_input_media[i].fn(cdj_input_media[i].opaque, present, &now_in,
+                                   note, sizeof(note))) {
+            snprintf(reply, sizeof(reply), "err %s: %s\n", verb,
+                     note[0] ? note : "cannot");
+            cdj_input_reply(reply);
+            return;
+        }
+        if (present >= 0) {
+            cdj_input_note_event(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL), "%s %s",
+                                 verb, present ? "in" : "out");
+            info_report("cdj2000-input: %s %s at %.3f s (frame %" PRIu64 ")%s%s",
+                        verb, present ? "in" : "out",
+                        qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / 1e9,
+                        cdj_input_frames, note[0] ? ": " : "", note);
+        }
+        snprintf(reply, sizeof(reply), "ok %s %s%s%s%s\n", verb,
+                 now_in ? "in" : "out",
+                 verb[0] == 's' ? (cdj_input_sd_door_open ? " door=open"
+                                                          : " door=closed")
+                                : "",
+                 note[0] ? " " : "", note);
+        cdj_input_reply(reply);
         return;
     }
     if (!strcmp(verb, "analog") || !strcmp(verb, "rotary")) {
@@ -507,6 +725,9 @@ static void cdj_input_command(char *line)
             cdj_input_analog_target[first] += (int32_t)second;
         }
         cdj_input_analog_driven[first] = true;
+        cdj_input_note_event(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL),
+                             "%s %ld -> %d", verb, first,
+                             cdj_input_analog_target[first]);
         info_report("cdj2000-input: analogue field %ld -> %d (now %d)", first,
                     cdj_input_analog_target[first],
                     cdj_input_analog_value[first]);
@@ -701,6 +922,16 @@ static void cdj_input_poll(void)
 
 /* ------------------------------------------------------------------ frames */
 
+static unsigned ctz_byte(uint8_t mask)
+{
+    unsigned bit = 0;
+
+    while (bit < 7 && !(mask & (1u << bit))) {
+        bit++;
+    }
+    return bit;
+}
+
 static void cdj_input_run_press(uint8_t *payload, unsigned len, int64_t now)
 {
     if (cdj_input_phase == CDJ_INPUT_IDLE && cdj_input_queue_len) {
@@ -710,10 +941,22 @@ static void cdj_input_run_press(uint8_t *payload, unsigned len, int64_t now)
         cdj_input_phase = CDJ_INPUT_DOWN;
         cdj_input_phase_since = now;
         cdj_input_phase_frames = 0;
-        info_report("cdj2000-input: byte %u mask %#x down at %.3f s "
-                    "(frame %" PRIu64 ")", cdj_input_active.byte,
-                    (unsigned)cdj_input_active.mask, now / 1e9,
-                    cdj_input_frames);
+        info_report("cdj2000-input: press %u: byte %u mask %#x down at "
+                    "%.3f s (frame %" PRIu64 ")", cdj_input_active.id,
+                    cdj_input_active.byte, (unsigned)cdj_input_active.mask,
+                    now / 1e9, cdj_input_frames);
+        cdj_input_note_event(now, "press %u.%u (id %u)", cdj_input_active.byte,
+                             (unsigned)ctz_byte(cdj_input_active.mask),
+                             cdj_input_active.id);
+        {
+            CdjInputAck *ack = cdj_input_ack_slot(cdj_input_active.id);
+
+            if (ack) {
+                ack->down = true;
+                ack->first_frame = cdj_input_frames;
+                ack->down_ns = now;
+            }
+        }
     }
 
     if (cdj_input_phase == CDJ_INPUT_DOWN) {
@@ -723,12 +966,21 @@ static void cdj_input_run_press(uint8_t *payload, unsigned len, int64_t now)
         cdj_input_phase_frames++;
         if (cdj_input_phase_frames >= CDJ_INPUT_MIN_FRAMES
             && now - cdj_input_phase_since >= cdj_input_active.hold_ns) {
+            CdjInputAck *ack = cdj_input_ack_slot(cdj_input_active.id);
+
             cdj_input_phase = CDJ_INPUT_UP;
             cdj_input_phase_since = now;
             cdj_input_phase_frames = 0;
-            info_report("cdj2000-input: byte %u mask %#x up at %.3f s",
-                        cdj_input_active.byte,
-                        (unsigned)cdj_input_active.mask, now / 1e9);
+            if (ack) {
+                ack->done = true;
+                ack->last_frame = cdj_input_frames;
+                ack->up_ns = now;
+            }
+            info_report("cdj2000-input: press %u: byte %u mask %#x up at "
+                        "%.3f s (frames %" PRIu64 "-%" PRIu64 ")",
+                        cdj_input_active.id, cdj_input_active.byte,
+                        (unsigned)cdj_input_active.mask, now / 1e9,
+                        ack ? ack->first_frame : 0, cdj_input_frames);
         }
     } else if (cdj_input_phase == CDJ_INPUT_UP) {
         cdj_input_phase_frames++;
@@ -783,6 +1035,7 @@ static void cdj_input_run_analog(uint8_t *payload, unsigned len, int64_t now)
             }
             value += delta;
             cdj_input_analog_value[field] = value;
+            cdj_input_note_event(now, "analogue field %u = %d", field, value);
             info_report("cdj2000-input: analogue field %u = %d at %.3f s "
                         "(frame %" PRIu64 ")", field, value, now / 1e9,
                         cdj_input_frames);
@@ -835,6 +1088,9 @@ void cdj_input_apply(uint8_t *payload, unsigned len)
     for (i = 0; i < len && i < CDJ_INPUT_PAYLOAD_MAX; i++) {
         payload[i] = (payload[i] & ~cdj_input_level_mask[i])
                      | cdj_input_level_value[i];
+    }
+    if (cdj_input_sd_door_open && len > CDJ_INPUT_SD_DOOR_BYTE) {
+        payload[CDJ_INPUT_SD_DOOR_BYTE] &= (uint8_t)~CDJ_INPUT_SD_DOOR_MASK;
     }
     if (len > 17 && cdj_input_sd_lid >= 0) {
         payload[17] = (payload[17] & ~4u) | (cdj_input_sd_lid ? 4u : 0u);
