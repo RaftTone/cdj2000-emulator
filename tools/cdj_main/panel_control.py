@@ -6,6 +6,9 @@
     python -m tools.cdj_main.panel_control press 16.0 --hold-ms 100 --ack
     python -m tools.cdj_main.panel_control sd eject      (insert, state)
     python -m tools.cdj_main.panel_control usb detach    (attach, state)
+    python -m tools.cdj_main.panel_control touch on      (off; the jog top: a brake in VINYL)
+    python -m tools.cdj_main.panel_control scratch 2 --reverse   (the top held, the ring turning)
+    python -m tools.cdj_main.panel_control needle 200    (off; the NEEDLE SEARCH pad)
 
 `CDJ_PANEL_KEYS` presses buttons on a schedule fixed before the machine boots,
 at most sixteen of them.  This is the other kind of input: a line-oriented TCP
@@ -116,6 +119,32 @@ JOG_BEND_PERIOD = 500
 JOG_BEND_STEP = 96
 ANALOG_TOUCH_MASK = 0x8000
 ANALOG_POSITION_MASK = 0x01FF
+
+# **The top of the jog dial is key 15.5**, the "JOG TOUCH SW" of MAIN's key
+# table, not a field.  In VINYL mode, holding it while playing brakes the deck:
+# MAIN hands the DSP a rate of 0 at once and 1.0 on release (+0x7bc0 through
+# deck X+0x694; panel/lamps-scratch lm-3 47.07 / 50.08), and the jog display's
+# touch lamp (frame 7.5) lights.  In CDJ mode it does nothing (lm-3 40..45).
+# VINYL is [0x04fdc218] == 1 (0x042845e6 and 0x0428461a take the touch only
+# then; lm-3 flipped it with JOG MODE, 18.6).  A scratch is the same touch with
+# the ring turning (JOG_ENABLE, JOG_FIELD, JOG_PERIOD_FIELD as for a bend).
+JOG_TOUCH = "15.5"
+
+# **The DIRECTION lever is payload byte 15 bit 1, active low** (0x2a097c
+# inverts it): the board sends it at FWD, so REV needs the bit forced to 0,
+# which only the channel's `level` override can do (a held bit can only add).
+# With it at REV MAIN plays backwards (+0x7bc4 bit 31, deck X+0x690) and the
+# REV lamp (frame 1.3) lights.
+DIRECTION_BYTE = 15
+DIRECTION_MASK = 0x02
+
+# **Analogue field 6 is the NEEDLE SEARCH pad**: bit 15 is the touch (MAIN's
+# flag 0x04fe2a3c bit 2) and the low nine bits the place touched.  Touching
+# 200 while paused re-streamed the track from 146.7 s of its 292 s (lm-3
+# 55.06: +0x7ba0 = 1, a flush, a class-1 open at that frame, then 2 while the
+# pad is held), i.e. about 398 counts cover the track; MAIN's own simulator
+# arms 62/63 step it within [0, 390].  Releasing it paused again (59.04).
+NEEDLE_FIELD = ANALOG_TOUCH_FIELD
 
 
 class AnalogControl(NamedTuple):
@@ -859,6 +888,35 @@ class PanelControl:
             self.analog(JOG_PERIOD_FIELD, 0)
             self.hold(JOG_ENABLE, False)
         return "ok bend"
+
+    def touch(self, on: bool) -> str:
+        """Hold (on) or release the top of the jog dial, JOG_TOUCH."""
+        return self.hold(JOG_TOUCH, on)
+
+    def scratch(self, seconds: float, reverse: bool = False,
+                period: int = JOG_BEND_PERIOD, step: int = JOG_BEND_STEP) -> str:
+        """Touch the top and turn the ring for SECONDS: a scratch in VINYL
+        mode.  The touch is released afterwards, as the bend's ring is."""
+        self.touch(True)
+        try:
+            self.bend(seconds, reverse, period, step)
+        finally:
+            self.touch(False)
+        return "ok scratch"
+
+    def direction(self, reverse: bool) -> str:
+        """Set the DIRECTION lever: REV forces byte 15 bit 1 to 0, FWD to 1."""
+        return self.send("level %d %02x %d\n" % (DIRECTION_BYTE, DIRECTION_MASK,
+                                                0 if reverse else 1))
+
+    def needle(self, position: int | None) -> str:
+        """Touch the NEEDLE SEARCH pad at POSITION (0..511), or lift the
+        finger (None)."""
+        if position is None:
+            return self.analog(NEEDLE_FIELD, 0)
+        if not 0 <= position <= ANALOG_POSITION_MASK:
+            raise ValueError("needle: the position is 0..%d" % ANALOG_POSITION_MASK)
+        return self.analog(NEEDLE_FIELD, ANALOG_TOUCH_MASK | position)
 
     def jog(self, steps: int, timeout: float = 120.0) -> str:
         """Turn the jog ring by STEPS (negative = backwards); see JOG_*.
@@ -1623,6 +1681,26 @@ def main(argv: list[str] | None = None) -> int:
     bend.add_argument("--step", type=int, default=JOG_BEND_STEP,
                       help="counts per 10 ms")
 
+    touch = sub.add_parser("touch", help="hold or release the top of the jog "
+                           "dial (VINYL: brake while playing)")
+    touch.add_argument("action", choices=["on", "off"])
+
+    scratch = sub.add_parser("scratch", help="touch the top and turn the ring "
+                             "for SECONDS (VINYL: a scratch)")
+    scratch.add_argument("seconds", type=float)
+    scratch.add_argument("--reverse", action="store_true", help="turn backwards")
+    scratch.add_argument("--period", type=int, default=JOG_BEND_PERIOD,
+                         help="ring pulse period in field 5 (smaller = faster)")
+    scratch.add_argument("--step", type=int, default=JOG_BEND_STEP,
+                         help="counts per 10 ms")
+
+    direction = sub.add_parser("direction", help="the DIRECTION lever, FWD or REV")
+    direction.add_argument("lever", choices=["fwd", "rev"])
+
+    needle = sub.add_parser("needle", help="touch the NEEDLE SEARCH pad at "
+                            "POSITION (0..511), or 'off'")
+    needle.add_argument("position")
+
     rotary = sub.add_parser("rotary", help="move an analogue field by a delta")
     rotary.add_argument("field", type=int, choices=range(len(ANALOG_FIELDS)))
     rotary.add_argument("delta", type=int)
@@ -1799,6 +1877,15 @@ def main(argv: list[str] | None = None) -> int:
                 print(panel.jog(args.steps))
             elif args.command == "bend":
                 print(panel.bend(args.seconds, args.reverse, args.period, args.step))
+            elif args.command == "touch":
+                print(panel.touch(args.action == "on"))
+            elif args.command == "scratch":
+                print(panel.scratch(args.seconds, args.reverse, args.period, args.step))
+            elif args.command == "direction":
+                print(panel.direction(args.lever == "rev"))
+            elif args.command == "needle":
+                print(panel.needle(None if args.position == "off"
+                                   else int(args.position, 0)))
             elif args.command == "analog":
                 print(panel.analog(args.field, args.value))
             elif args.command == "step":

@@ -74,6 +74,8 @@ struct CdjDspModel {
     bool rate_log;
     bool rate_seen;
     uint32_t rate_last;
+    uint32_t rate_flags_last;           /* +0x7bc4, as the rate log last saw it */
+    uint32_t rate_hold_last;            /* +0x7bcc, ditto */
     bool rate_valid_seen;               /* MAIN has written a real rate */
     int32_t tempo_ppm;                  /* parts per million, 0 = nominal */
 
@@ -142,6 +144,7 @@ struct CdjDspModel {
     bool states433;                     /* CDJ_DSP_STATES: +0x7ba0 run/stand by the DSP's state table */
     bool loop_in_slot0;                 /* CDJ_DSP_LOOP_SLOT0: 0x11 slot 0 is also the loop's IN */
     bool loop_slots;                    /* CDJ_DSP_LOOP_SLOTS: slot 5 + n is loop n's OUT */
+    bool reverse;                       /* CDJ_DSP_REVERSE: +0x7bc4 bit 31 plays backwards */
     bool slot_entry;                    /* CDJ_DSP_SLOT_ENTRY: the +0x7ce0 slot entry after 0x11/0x21 */
     bool auto_cue;                      /* CDJ_DSP_AUTO_CUE: request 7 answered with state 8 */
     bool status_record;                 /* CDJ_DSP_STATUS_RECORD: the buffers' record bytes */
@@ -568,6 +571,21 @@ CdjDspModel *cdj_dsp_model_new(Chardev *external)
     model->loop_in_slot0 = g_strcmp0(getenv("CDJ_DSP_LOOP_SLOT0"), "0") != 0;
     /* CDJ_DSP_LOOP_SLOTS (on unless 0): see the +0x7c80 slots 5..9 below. */
     model->loop_slots = g_strcmp0(getenv("CDJ_DSP_LOOP_SLOTS"), "0") != 0;
+    /*
+     * CDJ_DSP_REVERSE (on unless 0): +0x7bc4 bit 31 is the direction.  MAIN's
+     * DSP task copies it from deck byte X+0x690, the DIRECTION lever (see
+     * below); it was set while playing with the lever at REV and during a
+     * backward scratch, and clear forwards and when paused (panel/lamps-
+     * scratch lm-6, lm-7).  The DSP's command pass keeps it as get(20)
+     * (0x80043a08), and its frame pass takes a separate path on it
+     * (0x800239b4 .. 0x800239cc -> 0x80023a74) and marks a change of
+     * direction (0x80015054 .. 0x8001507c).  So the position runs backwards
+     * at the same rate, down to the start of the track.  lm-8: with the lever
+     * at REV from t=39.08 the position went from 11.98 s to 8.95 s at t=42.10,
+     * and forwards again after FWD; a backward scratch (0.63 s at 1.11) put it
+     * at 13.76 s at t=52.10, 0.70 s back, where forwards would give 15.16 s.
+     */
+    model->reverse = g_strcmp0(getenv("CDJ_DSP_REVERSE"), "0") != 0;
     /* The loop MAIN selects in +0x7bc8 (cdj_dsp_model_loop_select): on unless 0. */
     model->loop_select = g_strcmp0(getenv("CDJ_DSP_LOOP_SELECT"), "0") != 0;
     /* The slot copies +0x7c80 = 0x31 / 0x33 (see there): on unless 0. */
@@ -1474,9 +1492,20 @@ static void cdj_dsp_model_position_report(CdjDspModel *model, uint8_t *window,
          * whole-ms step lost the fraction on every tick, so -10 % (0x0e6666)
          * ran at 0.8 instead of 0.9 (NEW FIRMWARE cs-135).
          */
-        played_ns = ((now - model->pos_last_ns) * rate >> 20) + model->pos_rem_ns;
-        model->pos_ms += played_ns / SCALE_MS;
-        model->pos_rem_ns = played_ns % SCALE_MS;
+        played_ns = (now - model->pos_last_ns) * rate >> 20;
+        if (model->reverse && (ldl_le_p(window + 0x7bc4) & 0x80000000u)) {
+            int64_t total = model->pos_ms * SCALE_MS + model->pos_rem_ns - played_ns;
+
+            if (total < 0) {
+                total = 0;
+            }
+            model->pos_ms = total / SCALE_MS;
+            model->pos_rem_ns = total % SCALE_MS;
+        } else {
+            played_ns += model->pos_rem_ns;
+            model->pos_ms += played_ns / SCALE_MS;
+            model->pos_rem_ns = played_ns % SCALE_MS;
+        }
         model->pos_last_ns = now;
         if (model->loop_on && model->loop_out_ms > model->loop_in_ms
             && model->pos_ms >= model->loop_out_ms) {
@@ -1537,23 +1566,30 @@ static void cdj_dsp_model_position_report(CdjDspModel *model, uint8_t *window,
 static void cdj_dsp_model_rate_log(CdjDspModel *model, uint8_t *window,
                                    size_t length, int64_t now)
 {
-    uint32_t rate;
+    uint32_t rate, flags, hold;
     int64_t input_ns = 0;
     const char *input;
 
-    if (!model->rate_log || !window || length < 0x7bc4) {
+    if (!model->rate_log || !window || length < 0x7bd0) {
         return;
     }
     rate = ldl_le_p(window + 0x7bc0);
-    if (model->rate_seen && rate == model->rate_last) {
+    /* The DSP's command pass unpacks the whole block: +0x7bc4's bits into
+     * separate fields and +0x7bcc (0x800439ec..0x80043aa4).  MAIN zeroes
+     * +0x7bcc while the jog top is held (lm-5); both are logged with the
+     * rate, so a change of either shows next to the input that made it. */
+    flags = ldl_le_p(window + 0x7bc4);
+    hold = ldl_le_p(window + 0x7bcc);
+    if (model->rate_seen && rate == model->rate_last
+        && flags == model->rate_flags_last && hold == model->rate_hold_last) {
         return;
     }
     input = cdj_input_last_event(&input_ns);
     fprintf(stderr, "cdj2000-dsp: rate 0x%08x = %.6f (%+.3f %%) was 0x%08x"
-            " (%.6f) t=%.3f state %u%s; last input: %s",
+            " (%.6f), +0x7bc4 0x%08x +0x7bcc 0x%x t=%.3f state %u%s; last input: %s",
             rate, (rate & 0xffffff) / 1048576.0,
             ((rate & 0xffffff) / 1048576.0 - 1.0) * 100.0, model->rate_last,
-            (model->rate_last & 0xffffff) / 1048576.0, now / 1e9,
+            (model->rate_last & 0xffffff) / 1048576.0, flags, hold, now / 1e9,
             model->pos_state,
             (rate & 0xffffff) > 0x300000
             || ((rate & 0xffffff) < 0x20000 && !model->rate_valid_seen)
@@ -1564,6 +1600,8 @@ static void cdj_dsp_model_rate_log(CdjDspModel *model, uint8_t *window,
     }
     fprintf(stderr, "\n");
     model->rate_last = rate;
+    model->rate_flags_last = flags;
+    model->rate_hold_last = hold;
     model->rate_seen = true;
 }
 

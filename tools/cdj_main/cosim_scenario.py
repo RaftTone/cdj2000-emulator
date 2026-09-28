@@ -32,7 +32,11 @@ NEW FIRMWARE's nf_cosim.py.  Besides keys: aF=V sets analogue field F to V
 field F by N, and sd-eject / sd-insert / usb-detach / usb-attach take a
 medium out and put it back; jog+N / jog-N turns the jog ring N steps
 (frame steps while paused); bend+S / bend-S spins it for S wall seconds
-(a pitch bend while playing).
+(a pitch bend while playing); touch-on / touch-off holds and releases the
+top of the jog dial (a brake in VINYL mode), scratch+S / scratch-S touches
+it and turns the ring for S wall seconds; needle=N touches the NEEDLE
+SEARCH pad at N (0..511) and needle-off lifts the finger; direction-rev /
+direction-fwd sets the DIRECTION lever.
 
 and writes a table of what passed at which guest second, the frame at each
 step (PNG) and the logs, into --out.  A step that times out ends the run: the
@@ -453,6 +457,15 @@ def then_keys(run: Run, spec: str, name: str = "then") -> None:
         elif re.fullmatch(r"bend[+-]\d+(\.\d+)?", key):
             run.panel("bend", key[5:], *(["--reverse"] if key[4] == "-" else []),
                       timeout=float(key[5:]) + 60)
+        elif re.fullmatch(r"scratch[+-]\d+(\.\d+)?", key):
+            run.panel("scratch", key[8:], *(["--reverse"] if key[7] == "-" else []),
+                      timeout=float(key[8:]) + 60)
+        elif key in ("touch-on", "touch-off"):
+            run.panel("touch", key[6:])
+        elif key in ("direction-rev", "direction-fwd"):
+            run.panel("direction", key[10:])
+        elif re.fullmatch(r"needle=(0x[0-9a-fA-F]+|\d+)", key) or key == "needle-off":
+            run.panel("needle", key[7:] if key.startswith("needle=") else "off")
         else:
             key, _, hold = key.partition("@")
             run.press(key, int(hold or 100))

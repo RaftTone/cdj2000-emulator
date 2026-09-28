@@ -993,3 +993,42 @@ def test_bend_starts_from_a_negative_count():
     # After jog(-N) the ring counter is negative; the bend continues from it.
     sent = _bend("ok state frames=1 a4=-360/-360", reverse=False)
     assert sent[2] == "analog 4 %d" % ((-360 + panel_control.JOG_BEND_STEP) & 0xFFFF)
+
+
+def _sent_by(action) -> list[str]:
+    sent: list[str] = []
+
+    class Fake(panel_control.PanelControl):
+        def send(self, line: str) -> str:
+            sent.append(line.strip())
+            return "ok"
+
+        def state(self) -> str:
+            return "ok state frames=1 a4=0/0"
+
+    action(Fake())
+    return sent
+
+
+def test_touch_holds_and_releases_the_jog_top():
+    assert _sent_by(lambda panel: panel.touch(True)) == ["down 15 20"]
+    assert _sent_by(lambda panel: panel.touch(False)) == ["up 15 20"]
+
+
+def test_scratch_is_a_bend_inside_a_touch():
+    sent = _sent_by(lambda panel: panel.scratch(0.05))
+    assert sent[:3] == ["down 15 20", "down 15 80",
+                        "analog 5 %d" % panel_control.JOG_BEND_PERIOD]
+    assert sent[-3:] == ["analog 5 0", "up 15 80", "up 15 20"]
+
+
+def test_needle_touches_the_pad_and_lifts():
+    assert _sent_by(lambda panel: panel.needle(200)) == ["analog 6 %d" % (0x8000 | 200)]
+    assert _sent_by(lambda panel: panel.needle(None)) == ["analog 6 0"]
+    with pytest.raises(ValueError):
+        panel_control.PanelControl().needle(512)
+
+
+def test_direction_forces_the_lever_level():
+    assert _sent_by(lambda panel: panel.direction(True)) == ["level 15 02 0"]
+    assert _sent_by(lambda panel: panel.direction(False)) == ["level 15 02 1"]
