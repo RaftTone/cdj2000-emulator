@@ -328,9 +328,10 @@ static void cdj_dsp_model_loop_select(CdjDspModel *model, uint8_t *window,
         on = (model->seg_end_valid[n] || model->loop_built[n])
             && in >= 0 && out > in;
     }
-    if (!model->loop_select_seen || word != model->loop_select_word
-        || on != model->loop_on
-        || (on && (in != model->loop_in_ms || out != model->loop_out_ms))) {
+    if (model->rate_log
+        && (!model->loop_select_seen || word != model->loop_select_word
+            || on != model->loop_on
+            || (on && (in != model->loop_in_ms || out != model->loop_out_ms)))) {
         fprintf(stderr, "cdj2000-dsp: loop select +0x7bc8 = %u -> %s", word,
                 on ? "looping" : "no loop");
         if (on) {
@@ -595,10 +596,18 @@ CdjDspModel *cdj_dsp_model_new(Chardev *external)
      */
     model->pos_report = getenv("CDJ_DSP_POSITION") != NULL;
     /*
-     * CDJ_DSP_RATE_LOG (on unless 0): a line each time the playback rate
-     * +0x7bc0 changes -- see cdj_dsp_model_rate_log.
+     * CDJ_DSP_RATE_LOG: a line each time the playback rate +0x7bc0 changes
+     * (see cdj_dsp_model_rate_log), and each time MAIN's loop selection
+     * +0x7bc8 does.  On by default where the position model runs
+     * (CDJ_DSP_POSITION) or with CDJ_DSP_TRACE; =1 / =0 force it.  Off, a
+     * plain boot's stderr stays as it was: during init the window still
+     * holds whatever was loaded there, which these lines would print.
      */
-    model->rate_log = g_strcmp0(getenv("CDJ_DSP_RATE_LOG"), "0") != 0;
+    if (getenv("CDJ_DSP_RATE_LOG")) {
+        model->rate_log = g_strcmp0(getenv("CDJ_DSP_RATE_LOG"), "0") != 0;
+    } else {
+        model->rate_log = model->pos_report || model->trace;
+    }
     for (unsigned i = 0; i < DSP_HOT_SLOTS; i++) {
         model->hot_ms[i] = -1;
     }
