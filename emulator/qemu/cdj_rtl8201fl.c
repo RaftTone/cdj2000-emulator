@@ -77,6 +77,13 @@ bool cdj_rtl8201fl_led0(const CdjRtl8201fl *s, bool *high)
 {
     if (!high) return false;
     bool on;
+    if (s->cp) {
+        /* RTL8201CP LED0/PHYAD0: link at 10 or 100M, active low with the
+         * PHYAD0 = 1 strap.  MAIN 4.33 reads it as PSR.LMON: 0x041dfc66,
+         * 0x041e00a0 and 0x041e0a4c send only while bit 0 is clear. */
+        *high = !s->link;
+        return true;
+    }
     if (s->led_control & 8) {
         unsigned mode=s->led_config & 15;
         if (mode & ~3u) return false; /* Activity pulses not modeled. */
@@ -106,10 +113,14 @@ bool cdj_rtl8201fl_read(CdjRtl8201fl *s, unsigned reg, uint16_t *value)
     }
     switch (reg) {
     case 0: v=s->bmcr; break;
+    /* The CP's link status is the current one, not the FL's latching-low
+     * bit: MAIN 4.33 reads BMSR once per link-change event (0x04261ea4) and
+     * leaves the MAC off (ECMR 0) if that read says no link, so a latch set
+     * by its own reset and autonegotiation restart would keep it off. */
     case 1: v=0x7849 | (s->link ? 0x20 : 0) |
-              (s->link && !s->latch_low ? 4 : 0); s->latch_low=false; break;
-    case 2: v=0x001c; break;
-    case 3: v=0xc816; break;
+              (s->link && (s->cp || !s->latch_low) ? 4 : 0); s->latch_low=false; break;
+    case 2: v=s->cp ? 0x0000 : 0x001c; break;
+    case 3: v=s->cp ? 0x8201 : 0xc816; break;
     case 4: v=s->anar; break;
     case 5: v=s->anlpar; break;
     case 6: v=s->aner; s->aner &= ~2; break;

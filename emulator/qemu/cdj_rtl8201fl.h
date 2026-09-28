@@ -17,7 +17,14 @@ typedef struct CdjRtl8201fl {
     uint32_t header;
     uint8_t pir, mdi, preamble, bits;
     bool peer, link, latch_low, reset_pending, synchronized, frame, idle_needed;
+    /* The CDJ-2000's RTL8201CP (NXS-ON-2000/STATUS.md parts table) instead of
+     * the NXS's RTL8201FL: its own PHY identifier, and LED0 is the plain link
+     * LED at either speed, and its link status does not latch.  MAIN 4.33
+     * touches only registers 0, 1, 4 and 5 of PHY 1.  cdj_rtl8201fl_reset
+     * clears it; a software reset through BMCR keeps it. */
+    bool cp;
 } CdjRtl8201fl;
+/* Hardware reset to the FL; a CP board sets cp afterwards. */
 void cdj_rtl8201fl_reset(CdjRtl8201fl *s, uint64_t now);
 /* Peer advertisement is an explicit local virtual-peer input, not invented
  * network discovery. Supports base page CSMA/CD 10/100 abilities only. */

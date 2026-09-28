@@ -2,6 +2,15 @@
  * SH7764 EtherC/E-DMAC + RTL8201FL (RRV4356 p98 IC704).
  * Functional, bounded DMA; no analog PHY, wire-time or PTP-lock shortcut.
  * Only guest SDRAM may be addressed by DMA. No host-memory passthrough.
+ *
+ * The CDJ-2000 has the same SH7764 EtherC with an RTL8201CP at PHY address 1
+ * (MAIN 4.33: MDIO bit-bang 0x04262054/0x042620d8, PHY set-up 0x04261bac..,
+ * EtherC set-up 0x041df44c..).  That board is the "cdj2000-ethernet" subtype:
+ * the CP variant of the PHY model, and INT2MSKR1 reads back the EtherC bit as
+ * it stands, because 4.33 read-modify-writes that register for its USB bit
+ * (0x04248e3e) and an all-ones readback would mask EtherC again.  It exists
+ * only when a -nic names model=cdj2000-ethernet, so a machine without one
+ * keeps the plain trap it always had.
  */
 #include "qemu/osdep.h"
 #include "qemu/error-report.h"
@@ -16,10 +25,12 @@
 #include "net/net.h"
 #include "system/address-spaces.h"
 #include "cdj_nxs_eth.h"
+#include "cdj2000_netsim.h"
 #include "cdj_sh7764_eth.h"
 #include "cdj_rtl8201fl.h"
 
 #define TYPE_NXS_ETH "cdj-nxs-ethernet"
+#define TYPE_CDJ2000_ETH "cdj2000-ethernet"
 #define ETH_MASK (1u << 16)
 OBJECT_DECLARE_SIMPLE_TYPE(NxsEth, NXS_ETH)
 struct NxsEth {
@@ -34,11 +45,17 @@ struct NxsEth {
     uint32_t mask;
     uint64_t tx, rx;
     bool peer_present, last_link;
+    bool cdj2000;               /* the CDJ-2000 board: RTL8201CP, exact mask */
+    bool netsim;                /* on a synchronising hub (cdj2000_netsim.c) */
 };
+
+/* Log prefix: the NXS keeps the one its runs have always had. */
+#define TAG(s) ((s)->cdj2000 ? "cdj2000-ethernet" : "nxs-ethernet")
 
 static void fatal(NxsEth *s, const char *operation, uint32_t offset)
 {
-    error_report("nxs-ethernet: %s offset=%#x: %s", operation, offset,
+    error_report("%s: %s offset=%#x: %s", TAG(s),
+                 operation, offset,
                  s->core.error ? s->core.error : "unsupported PHY/access");
     exit(1);
 }
@@ -81,12 +98,17 @@ static bool send_frame(void *opaque, const uint8_t *data, size_t len)
 {
     NxsEth *s = opaque;
     NetClientState *nc = qemu_get_queue(s->nic);
-    if (!nc->peer || nc->link_down || nc->peer->link_down) return false;
-    ssize_t result = qemu_send_packet(nc, data, len);
-    if (result < 0) return false;
+    if (s->netsim) {
+        cdj_netsim_send(data, len);
+    } else {
+        if (!nc->peer || nc->link_down || nc->peer->link_down) return false;
+        ssize_t result = qemu_send_packet(nc, data, len);
+        if (result < 0) return false;
+    }
     s->tx++;
-    qemu_log("nxs-ethernet: tx=%" PRIu64 " bytes=%zu virtual_ns=%" PRId64 "\n",
-             s->tx, len, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+    qemu_log("%s: tx=%" PRIu64 " bytes=%zu virtual_ns=%" PRId64 "\n",
+             TAG(s), s->tx, len,
+             qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
     return true;
 }
 static const CdjSh7764EthOps dma_ops = {
@@ -97,7 +119,8 @@ static void synchronize(NxsEth *s)
 {
     uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     NetClientState *nc = qemu_get_queue(s->nic);
-    bool present = nc->peer && !nc->link_down && !nc->peer->link_down;
+    bool present = s->netsim ? cdj_netsim_active()
+                             : nc->peer && !nc->link_down && !nc->peer->link_down;
     if (present != s->peer_present) {
         /* Explicit virtual cable partner: 100Base-TX full duplex, no EEE.
          * This is the local Ethernet endpoint's capability, not Dante state. */
@@ -113,7 +136,8 @@ static void synchronize(NxsEth *s)
     if (!cdj_rtl8201fl_led0(&s->phy, &lmon)) fatal(s, "LED0/LNKSTA mode", 0x128);
     cdj_sh7764_eth_set_link(&s->core, link, lmon);
     if (link != s->last_link) {
-        qemu_log("nxs-ethernet: link=%d virtual_ns=%" PRIu64 "\n", link, now);
+        qemu_log("%s: link=%d virtual_ns=%" PRIu64 "\n",
+                 TAG(s), link, now);
         s->last_link = link;
     }
     update_irq(s);
@@ -139,13 +163,15 @@ static void write_reg(void *opaque, hwaddr off, uint64_t value, unsigned size)
     if (size != 4 || (off & 3)) fatal(s, "write width/alignment", off);
     if (off == 0x120) {
         if (!cdj_rtl8201fl_pir_write(&s->phy, value)) {
-            error_report("nxs-ethernet: MDIO header=%#x bits=%u data=%#x page=%u bmcr=%#x pir=%#" PRIx64,
+            error_report("%s: MDIO header=%#x bits=%u data=%#x page=%u bmcr=%#x pir=%#" PRIx64,
+                         TAG(s),
                          s->phy.header, s->phy.bits, s->phy.data, s->phy.page,
                          s->phy.bmcr, value);
             fatal(s, "MDIO write", off);
         }
     } else {
-        qemu_log("nxs-ethernet: write offset=%#" HWADDR_PRIx " value=%#" PRIx64 "\n", off, value);
+        qemu_log("%s: write offset=%#" HWADDR_PRIx " value=%#" PRIx64 "\n",
+                 TAG(s), off, value);
         if (!cdj_sh7764_eth_write(&s->core, off, value)) fatal(s, "write", off);
         /* EDMR.SWR resets EtherC's PIR output latch, not external IC704. */
         if (off == 0 && value == 1 && !cdj_rtl8201fl_pir_write(&s->phy, 0))
@@ -161,7 +187,8 @@ static uint64_t mask_read(void *opaque, hwaddr off, unsigned size)
 {
     NxsEth *s = opaque;
     if (size != 4 || (off != 0 && off != 4)) fatal(s, "INTC mask read", off);
-    return off == 0 ? s->mask : 0;
+    if (off != 0) return 0;
+    return s->cdj2000 ? s->mask & ETH_MASK : s->mask;
 }
 static void mask_write(void *opaque, hwaddr off, uint64_t value, unsigned size)
 {
@@ -190,12 +217,23 @@ static ssize_t receive_frame(NetClientState *nc, const uint8_t *buf, size_t len)
     NxsEth *s = qemu_get_nic_opaque(nc);
     synchronize(s);
     if (!cdj_sh7764_eth_receive(&s->core, buf, len)) fatal(s, "receive", 0);
-    qemu_log("nxs-ethernet: rx-input=%" PRIu64 " bytes=%zu virtual_ns=%" PRId64 "\n",
-             ++s->rx, len, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+    qemu_log("%s: rx-input=%" PRIu64 " bytes=%zu virtual_ns=%" PRId64 "\n",
+             TAG(s), ++s->rx, len,
+             qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
     update_irq(s);
     return len;
 }
 static void link_changed(NetClientState *nc) { synchronize(qemu_get_nic_opaque(nc)); }
+/* A frame from the synchronising hub, at the guest time it arrives. */
+static void netsim_frame(void *opaque, const uint8_t *buf, unsigned len)
+{
+    NxsEth *s = opaque;
+    synchronize(s);
+    if (!cdj_sh7764_eth_receive(&s->core, buf, len)) fatal(s, "receive", 0);
+    qemu_log("%s: rx-input=%" PRIu64 " bytes=%u virtual_ns=%" PRId64 "\n",
+             TAG(s), ++s->rx, len, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+    update_irq(s);
+}
 static NetClientInfo net_info = {
     .type = NET_CLIENT_DRIVER_NIC, .size = sizeof(NICState),
     .receive = receive_frame, .link_status_changed = link_changed,
@@ -206,6 +244,7 @@ static void reset(DeviceState *dev)
     timer_del(s->timer);
     cdj_sh7764_eth_init(&s->core, &dma_ops, s);
     cdj_rtl8201fl_reset(&s->phy, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+    s->phy.cp = s->cdj2000;
     s->mask = UINT32_MAX; s->peer_present = false; s->last_link = false;
     s->tx = s->rx = 0;
     synchronize(s);
@@ -225,8 +264,8 @@ static void realize(DeviceState *dev, Error **errp)
     sysbus_init_irq(bus, &s->irq);
     s->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, tick, s);
     qemu_macaddr_default_if_unset(&s->conf.macaddr);
-    s->nic = qemu_new_nic(&net_info, &s->conf, TYPE_NXS_ETH, dev->id,
-                          &dev->mem_reentrancy_guard, s);
+    s->nic = qemu_new_nic(&net_info, &s->conf, object_get_typename(OBJECT(s)),
+                          dev->id, &dev->mem_reentrancy_guard, s);
     qemu_format_nic_info_str(qemu_get_queue(s->nic), s->conf.macaddr.a);
 }
 static const Property properties[] = { DEFINE_NIC_PROPERTIES(NxsEth, conf) };
@@ -244,16 +283,38 @@ static const TypeInfo info = {
     .name = TYPE_NXS_ETH, .parent = TYPE_SYS_BUS_DEVICE,
     .instance_size = sizeof(NxsEth), .class_init = class_init,
 };
-static void register_type(void) { type_register_static(&info); }
-type_init(register_type)
-void cdj_nxs_eth_init(qemu_irq irq)
+static void cdj2000_instance_init(Object *obj) { NXS_ETH(obj)->cdj2000 = true; }
+static const TypeInfo cdj2000_info = {
+    .name = TYPE_CDJ2000_ETH, .parent = TYPE_NXS_ETH,
+    .instance_init = cdj2000_instance_init,
+};
+static void register_type(void)
 {
-    DeviceState *dev = qdev_new(TYPE_NXS_ETH);
+    type_register_static(&info);
+    type_register_static(&cdj2000_info);
+}
+type_init(register_type)
+static void eth_create(const char *type, qemu_irq irq)
+{
+    DeviceState *dev = qdev_new(type);
     qemu_configure_nic_device(dev, false, NULL);
+    if (!strcmp(type, TYPE_CDJ2000_ETH)) {
+        NxsEth *s = NXS_ETH(dev);
+        s->netsim = cdj_netsim_init(netsim_frame, s);
+    }
     SysBusDevice *bus = SYS_BUS_DEVICE(dev);
     sysbus_realize_and_unref(bus, &error_fatal);
     sysbus_mmio_map(bus, 0, 0xfef00000); sysbus_mmio_map(bus, 1, 0x1ef00000);
     sysbus_mmio_map(bus, 2, 0xffd400d0); sysbus_mmio_map(bus, 3, 0x1fd400d0);
     sysbus_mmio_map(bus, 4, 0xffd400c0); sysbus_mmio_map(bus, 5, 0x1fd400c0);
     sysbus_connect_irq(bus, 0, irq);
+}
+void cdj_nxs_eth_init(qemu_irq irq) { eth_create(TYPE_NXS_ETH, irq); }
+bool cdj2000_eth_init(qemu_irq irq)
+{
+    const char *netsim = getenv("CDJ_NETSIM");
+    if (!(netsim && *netsim) && !qemu_find_nic_info(TYPE_CDJ2000_ETH, false, NULL))
+        return false;
+    eth_create(TYPE_CDJ2000_ETH, irq);
+    return true;
 }
