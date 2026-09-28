@@ -123,6 +123,7 @@ struct CdjDspModel {
      * for it (0x10024fe8 + 16 n, from slot 5 + n).
      */
     bool loop_select;
+    bool slot_copy;                     /* CDJ_DSP_SLOT_COPY: +0x7c80 = 0x31 / 0x33 */
     bool loop_select_seen;
     uint32_t loop_select_word;          /* +0x7bc8 as last seen */
     int64_t seg_end_ms[DSP_LOOP_OUT_SLOT];
@@ -569,6 +570,8 @@ CdjDspModel *cdj_dsp_model_new(Chardev *external)
     model->loop_slots = g_strcmp0(getenv("CDJ_DSP_LOOP_SLOTS"), "0") != 0;
     /* The loop MAIN selects in +0x7bc8 (cdj_dsp_model_loop_select): on unless 0. */
     model->loop_select = g_strcmp0(getenv("CDJ_DSP_LOOP_SELECT"), "0") != 0;
+    /* The slot copies +0x7c80 = 0x31 / 0x33 (see there): on unless 0. */
+    model->slot_copy = g_strcmp0(getenv("CDJ_DSP_SLOT_COPY"), "0") != 0;
     model->slot_entry = g_strcmp0(getenv("CDJ_DSP_SLOT_ENTRY"), "0") != 0;
     /* The AUTO CUE search's answer (see the +0x7ba0 handler): on unless 0. */
     model->auto_cue = g_strcmp0(getenv("CDJ_DSP_AUTO_CUE"), "0") != 0;
@@ -1822,6 +1825,74 @@ void cdj_dsp_model_tick(CdjDspModel *model, uint8_t *window, size_t length)
                                              slot == 0 ? model->cue_ms : model->hot_ms[slot],
                                              now);
                 }
+            }
+            if (req->offset == 0x7c80 && model->pos_report && model->slot_copy
+                && length >= 0x7c8c && (word == 0x31 || word == 0x33)) {
+                /*
+                 * A slot copy.  The dispatcher sends 0x31 and 0x33 to
+                 * 0x80043fcc, which calls 0x8002feec(code, +0x7c84 = source,
+                 * +0x7c88 = destination) and writes its result back into
+                 * +0x7c80: 0 done (also for source == destination), -1 when
+                 * a source slot is empty (0x80034834: its descriptor's
+                 * halfword +10 is 0).  It copies the source's 48-byte slot
+                 * record into the destination's (0x10025038 + 48 slot,
+                 * 0x80038040) and publishes the destination's entry
+                 * (0x80035370, 0x800357f4).  0x33 does the same for slot
+                 * source + 5 -> destination + 5, the loops' OUT points, and
+                 * copies loop source's 16-byte entry to loop destination's
+                 * (0x10024fe8 + 16 n).  Stock MAIN sends 0x33 with 0 -> 2
+                 * when REC MODE + B stores a running loop on B (hl-1), and
+                 * calling B then selects that loop with +0x7bc8 = 3.
+                 */
+                uint32_t src = ldl_le_p(window + 0x7c84);
+                uint32_t dst = ldl_le_p(window + 0x7c88);
+                bool pair = word == 0x33;
+                bool failed = false;
+                const char *what = "copied";
+
+                if (src >= DSP_LOOP_OUT_SLOT || dst >= DSP_LOOP_OUT_SLOT) {
+                    what = "out of the model's range, left alone";
+                } else if (src == dst) {
+                    what = "onto itself, nothing to do";
+                } else if (cdj_dsp_model_loop_in(model, src) < 0
+                           || (pair && model->hot_ms[DSP_LOOP_OUT_SLOT + src] < 0)) {
+                    failed = true;
+                    what = "source empty: -1";
+                } else {
+                    int64_t point = cdj_dsp_model_loop_in(model, src);
+
+                    if (dst == 0) {
+                        model->cue_ms = point;
+                    } else {
+                        model->hot_ms[dst] = point;
+                    }
+                    cdj_dsp_model_slot_entry(model, window, length, dst, point, now);
+                    if (pair) {
+                        model->hot_ms[DSP_LOOP_OUT_SLOT + dst] =
+                            model->hot_ms[DSP_LOOP_OUT_SLOT + src];
+                        model->loop_built[dst] = model->loop_built[src];
+                        model->seg_end_ms[dst] = model->seg_end_ms[src];
+                        model->seg_end_valid[dst] = model->seg_end_valid[src];
+                        cdj_dsp_model_slot_entry(model, window, length,
+                                                 DSP_LOOP_OUT_SLOT + dst,
+                                                 model->hot_ms[DSP_LOOP_OUT_SLOT + dst],
+                                                 now);
+                    }
+                }
+                if (failed) {
+                    stl_le_p(window + 0x7c80, (uint32_t)-1);
+                }
+                fprintf(stderr, "cdj2000-dsp: +0x7c80 = 0x%x slot copy %u -> %u%s: %s",
+                        word, src, dst, pair ? " with its loop" : "", what);
+                if (!failed && src < DSP_LOOP_OUT_SLOT && dst < DSP_LOOP_OUT_SLOT && src != dst) {
+                    fprintf(stderr, " (point %" PRId64 " ms", cdj_dsp_model_loop_in(model, dst));
+                    if (pair) {
+                        fprintf(stderr, ", OUT %" PRId64 " ms",
+                                model->hot_ms[DSP_LOOP_OUT_SLOT + dst]);
+                    }
+                    fprintf(stderr, ")");
+                }
+                fprintf(stderr, " t=%.3f\n", now / 1e9);
             }
             if (req->offset == 0x7c9c && model->pos_report && length >= 0x7cb0) {
                 /*
