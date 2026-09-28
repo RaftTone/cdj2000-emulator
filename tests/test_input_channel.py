@@ -636,3 +636,57 @@ def test_the_touch_flag_reaches_bit_fifteen_of_the_pair(harness, tmp_path):
     ramped = field(segments[3].frames, 12, 2)[-1]
     assert ramped == 12
     assert not ramped & touch
+
+
+def test_a_press_answers_its_id_and_ack_names_the_frames_it_went_out_in(
+        harness, tmp_path):
+    """B5: `press` says which press it queued, `ack` says where it landed.
+
+    Frames are counted per exchange (cdj_input_frames); the harness's
+    exchange is 100 ms, so a 200 ms hold is carried by three frames, the
+    first of which is the one after the command.
+    """
+    steps = [('press 16 01 200', 1), ('ack 1', 6), ('ack 1', 1),
+             ('press 16 02 100', 0), ('ack 2', 0), ('state', 1),
+             ('ack 9', 1), ('ack x', 1)]
+    segments = [answers(s) for s in script(harness, steps, tmp_path)]
+    assert segments[0].replies == ['ok press id=1']
+    assert segments[1].replies[0].startswith('ok ack id=1 down frame=')
+    down = int(segments[1].replies[0].split('frame=')[1].split()[0])
+    done = segments[2].replies[0]
+    assert done.startswith('ok ack id=1 done frames=%d-' % down)
+    first, last = done.split('frames=')[1].split()[0].split('-')
+    frames = [f for s in segments[:3] for f in s.frames]
+    carried = [i for i, f in enumerate(frames) if f[16] & 0x01]
+    assert int(last) - int(first) + 1 == len(carried)
+    assert segments[3].replies == ['ok press id=2']
+    assert segments[4].replies == ['ok ack id=2 queued']
+    state = parse_state(segments[5].replies[0])
+    assert state['lamps'] == '-'
+    assert state['last_press'].startswith('2:')
+    assert segments[6].replies[0].startswith('err ack')
+    assert segments[7].replies[0].startswith('err ack')
+
+
+def test_media_verbs_refuse_on_a_board_without_that_medium(harness, tmp_path):
+    """B8: the harness registers no SD slot and no USB port, so both verbs
+    say so instead of pretending, and a bad action is refused first."""
+    steps = [('sd eject', 1), ('usb attach', 1), ('sd open', 1),
+             ('usb', 1)]
+    segments = [answers(s) for s in script(harness, steps, tmp_path)]
+    assert segments[0].replies == ['err this board has no such medium']
+    assert segments[1].replies == ['err this board has no such medium']
+    assert segments[2].replies[0].startswith('err sd <eject|insert|state>')
+    assert segments[3].replies[0].startswith('err usb <detach|attach|state>')
+    # and the SD door bit was never touched
+    assert all(not f[17] & 0x04 for s in segments for f in s.frames)
+
+
+def parse_state(reply: str) -> dict[str, str]:
+    return panel_control.parse_state(reply)
+
+
+def answers(segment: Segment) -> Segment:
+    """The segment without the connection's greeting among its replies."""
+    return segment._replace(replies=[r for r in segment.replies
+                                     if r != 'ok cdj2000-input'])

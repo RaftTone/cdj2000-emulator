@@ -25,6 +25,8 @@
 #include "system/address-spaces.h"
 #include "system/memory.h"
 
+#include "cdj2000_input.h"
+#include "cdj2000_media_rate.h"
 #include "cdj2000_usbh.h"
 
 /* Register offsets, manual table 21.2. */
@@ -166,6 +168,15 @@ typedef struct CdjUsbhPipe {
     unsigned retries;
     USBPacket packet;
     bool inflight;
+    /*
+     * A bulk IN packet the device has answered, held back by
+     * CDJ_USB_READ_BPS until held_until: the pipe stays busy (inflight) and
+     * nothing reaches the buffer before then.  held_ns is the delay, for the
+     * read log.
+     */
+    bool held;
+    int64_t held_until;
+    int64_t held_ns;
     uint8_t pkt_buf[PKT_BUF_SIZE];
 } CdjUsbhPipe;
 
@@ -212,6 +223,7 @@ struct CdjUsbhState {
     bool trace_scsi;                    /* CDJ_USBH_TRACE=scsi */
     bool trace_on_write;                /* =scsi+write: full trace after a WRITE */
     unsigned trace_left;                /* lines of that full trace still to go */
+    CdjMediaRate rate;                  /* CDJ_USB_READ_BPS, CDJ_READ_LOG */
 
     CdjUsbhDmaDone dma_done;
     void *dma_opaque;
@@ -640,7 +652,71 @@ static void cdj_usbh_fail(CdjUsbhState *s, CdjUsbhPipe *p, int status)
     }
 }
 
+/* The CSW of the bulk-only transport: status, not data read off the medium. */
+static bool packet_is_csw(const CdjUsbhPipe *p, unsigned actual)
+{
+    return actual == 13 && !memcmp(p->pkt_buf, "USBS", 4);
+}
+
+static void cdj_usbh_packet_finish(CdjUsbhState *s, CdjUsbhPipe *p);
+
+/*
+ * A transaction is over on the device's side.  With CDJ_USB_READ_BPS a bulk
+ * IN packet's data reaches the pipe's buffer only size / rate of guest time
+ * later; the CSW is moved at the same rate, as it is on the wire.  Without a
+ * rate this is cdj_usbh_packet_finish() at once, exactly as before.
+ */
 static void cdj_usbh_packet_done(CdjUsbhState *s, CdjUsbhPipe *p)
+{
+    USBPacket *pkt = &p->packet;
+
+    if (s->rate.bps && pkt->pid == USB_TOKEN_IN && !pipe_is_dcp(p)
+        && pkt->status == USB_RET_SUCCESS && pkt->actual_length) {
+        int64_t hold = cdj_media_rate_ns(&s->rate, pkt->actual_length);
+
+        if (hold > 0) {
+            p->held = true;
+            p->held_ns = hold;
+            p->held_until = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + hold;
+            cdj_usbh_kick(s, hold);
+            return;
+        }
+    }
+    p->held_ns = 0;
+    cdj_usbh_packet_finish(s, p);
+}
+
+/* Held packets whose time has come; the rest re-arm the timer. */
+static void cdj_usbh_release_held(CdjUsbhState *s)
+{
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    unsigned nr;
+
+    for (nr = 0; nr < NR_PIPES; nr++) {
+        CdjUsbhPipe *p = &s->pipe[nr];
+
+        if (!p->held) {
+            continue;
+        }
+        if (now < p->held_until) {
+            cdj_usbh_kick(s, p->held_until - now);
+            continue;
+        }
+        p->held = false;
+        cdj_usbh_packet_finish(s, p);
+    }
+}
+
+/* A held packet that will never be delivered: the device or the module went. */
+static void pipe_drop_held(CdjUsbhPipe *p)
+{
+    if (p->held) {
+        p->held = false;
+        p->inflight = false;
+    }
+}
+
+static void cdj_usbh_packet_finish(CdjUsbhState *s, CdjUsbhPipe *p)
 {
     USBPacket *pkt = &p->packet;
     int pid = pkt->pid;
@@ -662,7 +738,10 @@ static void cdj_usbh_packet_done(CdjUsbhState *s, CdjUsbhPipe *p)
     if (pid == USB_TOKEN_IN) {
         unsigned maxp = pipe_maxp(s, p);
 
-        if (s->trace_scsi && actual == 13 && !memcmp(p->pkt_buf, "USBS", 4)) {
+        if (!pipe_is_dcp(p) && actual && !packet_is_csw(p, actual)) {
+            cdj_media_rate_data(&s->rate, actual, p->held_ns);
+        }
+        if (s->trace_scsi && packet_is_csw(p, actual)) {
             cdj_usbh_trace(s, "pipe%u: CSW tag %08x residue %u status %u",
                            p->nr, ldl_le_p(p->pkt_buf + 4),
                            ldl_le_p(p->pkt_buf + 8), p->pkt_buf[12]);
@@ -769,6 +848,13 @@ static void cdj_usbh_run_pipe(CdjUsbhState *s, CdjUsbhPipe *p)
         len = MIN(p->tx->len - p->tx_pos, pipe_maxp(s, p));
         len = MIN(len, PKT_BUF_SIZE);
         memcpy(p->pkt_buf, p->tx->data + p->tx_pos, len);
+        if (s->rate.log && len == 31 && !memcmp(p->pkt_buf, "USBC", 4)
+            && p->pkt_buf[15] == 0x28) {
+            const uint8_t *cb = p->pkt_buf + 15;
+
+            cdj_media_rate_command(&s->rate, "READ(10)", ldl_be_p(cb + 2),
+                                   lduw_be_p(cb + 7));
+        }
         if (s->trace_scsi && len == 31 && !memcmp(p->pkt_buf, "USBC", 4)) {
             const uint8_t *cb = p->pkt_buf + 15;
 
@@ -812,6 +898,7 @@ static void cdj_usbh_timer(void *opaque)
     if (!cdj_usbh_running(s)) {
         return;
     }
+    cdj_usbh_release_held(s);
     if (s->setup_pending) {
         cdj_usbh_setup(s);
     }
@@ -849,6 +936,9 @@ static void cdj_usbh_child_detach(USBPort *port, USBDevice *dev)
             && p->packet.ep->dev == dev) {
             usb_cancel_packet(&p->packet);
             p->inflight = false;
+        }
+        if (p->held && p->packet.ep && p->packet.ep->dev == dev) {
+            pipe_drop_held(p);
         }
     }
 }
@@ -1335,6 +1425,7 @@ static void cdj_usbh_reset(DeviceState *dev)
         p->stopped = false;
         p->in_total = 0;
         p->retries = 0;
+        pipe_drop_held(p);
         pipe_rx_clear(p);
         pipe_tx_clear(p);
     }
@@ -1374,6 +1465,7 @@ static void cdj_usbh_realize(DeviceState *dev, Error **errp)
         usb_port_location(&s->ports[nr], NULL, nr + 1);
     }
     s->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, cdj_usbh_timer, s);
+    cdj_media_rate_init(&s->rate, "usb", "CDJ_USB_READ_BPS");
     memory_region_init_io(&s->iomem, OBJECT(dev), &cdj_usbh_ops, s,
                           "cdj2000.usbh", CDJ_USBH_SIZE);
     sysbus_init_mmio(sbd, &s->iomem);
@@ -1403,6 +1495,39 @@ static void cdj_usbh_register_types(void)
 
 type_init(cdj_usbh_register_types)
 
+/*
+ * `usb detach` / `usb attach` on the input channel (cdj2000_input.c): the
+ * stick's cable, pulled and put back.  QEMU keeps the device; the port sees
+ * DTCH/BCHG and later ATTCH/BCHG, as for a stick taken out and plugged in.
+ */
+static bool cdj_usbh_medium(void *opaque, int present, bool *now_in,
+                            char *note, size_t note_len)
+{
+    CdjUsbhState *s = opaque;
+    USBPort *port = NULL;
+    unsigned nr;
+
+    for (nr = 0; nr < ARRAY_SIZE(s->ports); nr++) {
+        if (s->ports[nr].dev) {
+            port = &s->ports[nr];
+            break;
+        }
+    }
+    if (!port) {
+        snprintf(note, note_len, "no USB device on the ports (--usb-stick)");
+        return false;
+    }
+    if (present == 0 && port->dev->state != USB_STATE_NOTATTACHED) {
+        usb_detach(port);
+    } else if (present == 1 && port->dev->state == USB_STATE_NOTATTACHED
+               && port->dev->attached) {
+        usb_attach(port);
+    }
+    *now_in = port->dev->state != USB_STATE_NOTATTACHED;
+    snprintf(note, note_len, "port=%u", nr);
+    return true;
+}
+
 void cdj_usbh_init(MemoryRegion *system, qemu_irq irq,
                    CdjUsbhDmaDone dma_done, void *dma_opaque)
 {
@@ -1414,6 +1539,7 @@ void cdj_usbh_init(MemoryRegion *system, qemu_irq irq,
     s->dma_opaque = dma_opaque;
     sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
     cdj_usbh_singleton = s;
+    cdj_input_register_medium("usb", cdj_usbh_medium, s);
 
     /* Both the P4 window the firmware uses and the area-7 physical one. */
     memory_region_add_subregion_overlap(system, CDJ_USBH_BASE, &s->iomem, 1);
