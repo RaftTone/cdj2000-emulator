@@ -909,8 +909,15 @@ static void cdj_panel_tx_trace(CdjDmacChannel *channel)
  * bit, which px-4 lit by storing a running loop in C.
  *
  * Byte 3 is four 2-bit source lamps (the builder copies L7 two bits at a
- * time); SD and USB are named, each moved 1 -> 3 by its SOURCE key (px-5,
- * px-7) and blinking while the deck reads that medium.
+ * time); SD and USB each moved 1 -> 3 by its SOURCE key (px-5, px-7) and
+ * blink while the deck reads that medium.  DISC (bits 1..0) and LINK (bits
+ * 7..6) went to 2 on their SOURCE keys with no disc and no link, and back to
+ * 0 on the next source (runs/cosim/hl-4 in the loops/hotcue-lamps worktree).
+ * Still unnamed: 1.3, 2.3 (off at a LOAD, blinking 125 ms, on at the PLAY
+ * after it: hl-2), 2.4, 2.7, byte 4 (bits 2/4/6 on from 4.2 s after boot,
+ * then constant; TEMPO RANGE does not move it), byte 5, 7.3/7.4 (on while
+ * JOG MODE is CDJ: hl-4) and 7.6 (on from boot, blinking while a hot cue
+ * call re-streams: hl-2).
  * Bytes 6 and 8 are jog ring positions (L+8, L+12) and are not lamps.
  */
 typedef struct CdjPanelLamp {
@@ -939,8 +946,10 @@ static const CdjPanelLamp cdj_panel_lamp_names[] = {
     { 2, 0x02, "JOG_CDJ" },             /* L1.2, [0x04fdc218] == 1 */
     { 2, 0x04, "SD_INDICATOR" },        /* L1.4, 0x04290ed0's blinker */
     { 2, 0x20, "MASTER_TEMPO" },        /* L1.7 = [0x04fdc1d4], 0x04263baa */
+    { 3, 0x03, "SOURCE_DISC" },         /* L7 bits 1..0: DISC 19.3 -> 2 (hl-4) */
     { 3, 0x0c, "SOURCE_SD" },           /* L7 bits 3..2, 0x04290ae8 */
     { 3, 0x30, "SOURCE_USB" },          /* L7 bits 5..4, 0x04290b00 */
+    { 3, 0xc0, "SOURCE_LINK" },         /* L7 bits 7..6: LINK 19.0 -> 2 (hl-4) */
 };
 
 #define CDJ_PANEL_LAMP_MAX 64
