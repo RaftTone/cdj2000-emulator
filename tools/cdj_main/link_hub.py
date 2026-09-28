@@ -127,6 +127,9 @@ class Hub:
         self.started = time.time()
         self.next_id = 1
         if listen.startswith("unix:"):
+            if not hasattr(socket, "AF_UNIX"):
+                raise SystemExit("link_hub: unix: needs Unix-domain sockets; "
+                                 "listen on PORT or HOST:PORT instead")
             path = listen[5:]
             if os.path.exists(path):
                 os.unlink(path)

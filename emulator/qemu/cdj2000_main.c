@@ -3725,9 +3725,12 @@ static void cdj_main_poke_init(void)
 }
 
 /*
- * AUTO CUE on at boot, as the owner's deck (A.CUE lit); CDJ_AUTO_CUE=0
- * keeps the image's power-on value (off), so a LOAD ends with 4, 2 and the
- * deck plays by itself.
+ * AUTO CUE on at boot, as the owner's deck (A.CUE lit), when the DSP model
+ * can answer its search: by default only with CDJ_DSP_POSITION, whose
+ * +0x7ba0 handler sends the reply (+0x7bf8 = 8); without it MAIN would wait
+ * for an answer that never comes.  CDJ_AUTO_CUE=1 forces it on, =0 keeps the
+ * image's power-on value (off), so a LOAD ends with 4, 2 and the deck plays
+ * by itself.
  * MAIN 4.33 keeps the setting in byte 0x04fdc1cf (1 = on; the TIME/A.CUE
  * key held toggles it at 0x04269604..0x04269650, the lamp follows it), with
  * a copy at 0x04831fa8 + 0x69a and bit 2 of the settings word 0x0483fe70
@@ -3757,7 +3760,10 @@ static void cdj_auto_cue_init(void)
     const char *at = getenv("CDJ_AUTO_CUE_AT");
     QEMUTimer *timer;
 
-    if ((on && !strcmp(on, "0")) || cdj_nxs_profile) {
+    if (cdj_nxs_profile) {
+        return;
+    }
+    if (on ? !strcmp(on, "0") : getenv("CDJ_DSP_POSITION") == NULL) {
         return;
     }
     timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, cdj_auto_cue_fire, NULL);

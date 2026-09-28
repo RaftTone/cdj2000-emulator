@@ -17,6 +17,10 @@ import subprocess
 
 import pytest
 
+# The qtest pipe is polled with select(), which Windows only allows on sockets.
+pytestmark = pytest.mark.skipif(
+    os.name == "nt", reason="select() on pipes is not supported on Windows")
+
 ROOT = Path(__file__).resolve().parents[1]
 SDHI = 0xFFE40000
 CMD, ARG0, ARG1, STOP, SECCNT, RSP, INFO1, INFO2, SIZE, DATA = (

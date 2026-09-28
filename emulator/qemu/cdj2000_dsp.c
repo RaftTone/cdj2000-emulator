@@ -483,7 +483,8 @@ static void cdj_dsp_tick(void *opaque)
 }
 
 /*
- * CDJ_DSP_POSITION_US (default 1000, 0 = off): the position report on a timer
+ * CDJ_DSP_POSITION_US (default 1000, 0 = off; only with CDJ_DSP_POSITION, so
+ * other runs keep their timer deadlines): the position report on a timer
  * of its own.  MAIN's DSP task reads the block every ~3 ms (sk-1: 333 reads a
  * second at 0x0419e62a/0x0424ff80) and sends a beat only while the beat's
  * time is below its position X+0x220 plus 8 ms (0x0419f6f6..0x0419f704) and
@@ -582,7 +583,7 @@ void cdj_dsp_init(MemoryRegion *system, Chardev *external, qemu_irq irq,
 
     dsp->pos_tick_ns = (int64_t)(getenv("CDJ_DSP_POSITION_US")
         ? strtol(getenv("CDJ_DSP_POSITION_US"), NULL, 0) : 1000) * 1000;
-    if (dsp->pos_tick_ns > 0) {
+    if (dsp->pos_tick_ns > 0 && getenv("CDJ_DSP_POSITION")) {
         dsp->pos_tick = timer_new_ns(QEMU_CLOCK_VIRTUAL, cdj_dsp_pos_tick, dsp);
         timer_mod(dsp->pos_tick, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + dsp->pos_tick_ns);
     }

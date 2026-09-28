@@ -944,7 +944,24 @@ def test_jog_holds_the_enable_bit_and_walks_the_ring_counter():
             return "ok"
 
         def state(self) -> str:
-            return "ok state frames=1 a4=-360/360"
+            return "ok state frames=1 a4=360/360"
 
     Fake().jog(5)
     assert sent == ["down 15 80", "rotary 4 360", "up 15 80"]
+
+
+def test_jog_backwards_reaches_a_negative_target(monkeypatch):
+    # A driven field reports "a4=-360/-360"; the sign is the value's own.
+    monkeypatch.setattr(panel_control.time, "sleep", lambda _: None)
+    sent: list[str] = []
+
+    class Fake(panel_control.PanelControl):
+        def send(self, line: str) -> str:
+            sent.append(line.strip())
+            return "ok"
+
+        def state(self) -> str:
+            return "ok state frames=1 a4=-360/-360"
+
+    Fake().jog(-5, timeout=1.0)
+    assert sent == ["down 15 80", "rotary 4 -360", "up 15 80"]

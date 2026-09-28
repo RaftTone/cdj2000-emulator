@@ -829,7 +829,11 @@ class PanelControl:
             deadline = time.time() + timeout
             while time.time() < deadline:
                 value, _, target = parse_state(self.state()).get(
-                    "a%d" % JOG_FIELD, "0/0").lstrip("-").partition("/")
+                    "a%d" % JOG_FIELD, "0/0").partition("/")
+                # `rotary` leaves the field driven, so no "-" marker is
+                # expected; "--N" would be an undriven negative value.
+                if value.startswith("--"):
+                    value = value[1:]
                 if value == target:
                     break
                 time.sleep(0.2)
