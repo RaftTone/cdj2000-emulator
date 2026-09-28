@@ -1,0 +1,48 @@
+--- a/hw/intc/sh_intc.c
++++ b/hw/intc/sh_intc.c
+@@ -80,31 +80,23 @@
+ int sh_intc_get_pending_vector(struct intc_desc *desc, int imask)
+ {
+     unsigned int i;
+-
+-    /* slow: use a linked lists of pending sources instead */
+-    /* wrong: take interrupt priority into account (one list per priority) */
+-
+-    if (imask == 0x0f) {
+-        return -1; /* FIXME, update code to include priority per source */
+-    }
+-
++    int best_vector = -1;
++    int best_priority = imask;
++
++    /* Keep source order as the tie-breaker for equal priorities. */
+     for (i = 0; i < desc->nr_sources; i++) {
+         struct intc_source *source = &desc->sources[i];
+ 
+-        /*
+-         * An SH-4 interrupt is accepted only while its priority level is
+-         * strictly greater than SR.IMASK.  Sources left at the default level
+-         * of 15 behave as before.  Without this, a guest that masks its own
+-         * timer by raising IMASK inside the interrupt prologue re-enters the
+-         * handler immediately and nests until the stack is gone.
+-         */
+-        if (source->pending && source->prio > imask) {
+-            trace_sh_intc_pending(desc->pending, source->vect);
+-            desc->pending_prio = source->prio;
+-            return source->vect;
+-        }
+-    }
+-    return -1;
++        if (source->pending && source->prio > best_priority) {
++            best_priority = source->prio;
++            best_vector = source->vect;
++        }
++    }
++    if (best_vector >= 0) {
++        desc->pending_prio = best_priority;
++        trace_sh_intc_pending(desc->pending, best_vector);
++    }
++    return best_vector;
+ }
+ 
+ typedef enum {

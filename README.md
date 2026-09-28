@@ -219,6 +219,11 @@ interrupt handling that are invisible to Linux and fatal to a uITRON RTOS, a
 Blackfin packed-ALU instruction that committed a cycle early, and the AMD
 command set the CDJ's flash actually speaks.
 
+For firmware-free integration checks against the built QEMU board, run
+`sh scripts/test-qemu-integration.sh`. It rebuilds the board and exercises
+the actual HPI, SH-4 interrupt/timer, DMA and ATA paths; a missing QEMU build
+cannot turn those tests into skips.
+
 ## Licence
 
 `GPL-2.0-or-later`. See [LICENSE](LICENSE), and [THIRD_PARTY.md](THIRD_PARTY.md)

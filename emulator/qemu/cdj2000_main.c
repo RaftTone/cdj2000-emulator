@@ -188,7 +188,9 @@ static bool cdj_nxs_profile;
 #define TMU2_BASE       0xffdc0000
 #define TMU_FREQ        54000000
 #define TMU0_IRQ        0x2c
+#define TMU1_IRQ        0x2d
 #define INTEVT_TMU0     (TMU0_IRQ * 0x20)   /* 0x580 */
+#define INTEVT_TMU1     (TMU1_IRQ * 0x20)   /* 0x5a0 */
 #define TMU3_IRQ        0x70
 #define TMU4_IRQ        0x71
 #define TMU5_IRQ        0x72
@@ -243,6 +245,7 @@ static bool cdj_nxs_profile;
 enum {
     CDJ_INTC_UNUSED = 0,
     CDJ_INTC_TMU0,
+    CDJ_INTC_TMU1,
     CDJ_INTC_LINK_RX,
     CDJ_INTC_LINK_TX,
     CDJ_INTC_LINK_DONE,
@@ -4504,6 +4507,7 @@ static void cdj_intc_timer_init(MemoryRegion *system, SuperHCPU *cpu)
 {
     static struct intc_vect vectors[] = {
         INTC_VECT(CDJ_INTC_TMU0, INTEVT_TMU0),
+        INTC_VECT(CDJ_INTC_TMU1, INTEVT_TMU1),
         INTC_VECT(CDJ_INTC_LINK_RX, INTEVT_LINK_RX),
         INTC_VECT(CDJ_INTC_LINK_TX, INTEVT_LINK_TX),
         INTC_VECT(CDJ_INTC_LINK_DONE, INTEVT_LINK_DONE),
@@ -4528,12 +4532,13 @@ static void cdj_intc_timer_init(MemoryRegion *system, SuperHCPU *cpu)
      * enum_ids are MSB-field first: sh_intc_write shifts a field's mask by
      * (first - k) * field_width, so for a 32-bit register of 8-bit fields
      * index 0 is bits 31:24 and index 3 is bits 7:0.  The zero entries are
-     * fields the firmware leaves at 0 — TMU1 and TMU2 among them, which is
-     * why they are never deliverable even though the timer block has three
-     * channels.
+     * fields the stock firmware leaves at 0. The connected AmbiX profile
+     * programs INT2PRI0[23:16] for TMU1, so channel 1 must retain its own
+     * source even though stock never enables it.
      */
     static struct intc_prio_reg prio_registers[] = {
-        { 0xffd40000, 0, 32, 8, { CDJ_INTC_TMU0, 0, 0, 0 } },
+        { 0xffd40000, 0, 32, 8,
+          { CDJ_INTC_TMU0, CDJ_INTC_TMU1, 0, 0 } },
         /* INT2PRI1: TUNI3, TUNI4, TUNI5, reserved -- the loader's tick. */
         { 0xffd40004, 0, 32, 8, { CDJ_INTC_TMU3, CDJ_INTC_TMU4, CDJ_INTC_TMU5, 0 } },
         { 0xffd40008, 0, 32, 8, { CDJ_INTC_SCIF_RX, 0, 0, 0 } },
@@ -4637,7 +4642,8 @@ static void cdj_intc_timer_init(MemoryRegion *system, SuperHCPU *cpu)
     uint32_t freq = freq_env ? strtoul(freq_env, NULL, 0) : TMU_FREQ;
 
     tmu012_init(system, TMU_BASE, TMU012_FEAT_TOCR | TMU012_FEAT_3CHAN,
-                freq, intc->irqs[CDJ_INTC_TMU0], NULL, NULL, NULL);
+                freq, intc->irqs[CDJ_INTC_TMU0], intc->irqs[CDJ_INTC_TMU1],
+                NULL, NULL);
     tmu012_init(system, TMU2_BASE, TMU012_FEAT_3CHAN,
                 freq, intc->irqs[CDJ_INTC_TMU3], intc->irqs[CDJ_INTC_TMU4],
                 intc->irqs[CDJ_INTC_TMU5], NULL);

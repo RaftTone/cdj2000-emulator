@@ -1,0 +1,67 @@
+--- a/hw/timer/sh_timer.c
++++ b/hw/timer/sh_timer.c
+@@ -16,6 +16,7 @@
+ #include "hw/timer/tmu012.h"
+ #include "hw/core/ptimer.h"
+ #include "trace.h"
++#include "system/reset.h"
+ 
+ #define TIMER_TCR_TPSC          (7 << 0)
+ #define TIMER_TCR_CKEG          (3 << 3)
+@@ -216,6 +217,12 @@
+     }
+     ptimer_transaction_commit(s->timer);
+     s->enabled = !!enable;
++    if (!s->enabled) {
++        /* A stopped channel must not keep a level-sensitive IRQ asserted. */
++        s->int_level = 0;
++        s->old_level = 0;
++        qemu_set_irq(s->irq, 0);
++    }
+ }
+ 
+ static void sh_timer_tick(void *opaque)
+@@ -344,6 +351,36 @@
+     .endianness = DEVICE_NATIVE_ENDIAN,
+ };
+ 
++static void sh_timer_channel_reset(SHTimerState *s)
++{
++    ptimer_transaction_begin(s->timer);
++    ptimer_stop(s->timer);
++    ptimer_set_limit(s->timer, UINT32_MAX, 0);
++    ptimer_set_count(s->timer, UINT32_MAX);
++    ptimer_transaction_commit(s->timer);
++    s->enabled = 0;
++    s->int_level = 0;
++    s->old_level = 0;
++    s->tcor = UINT32_MAX;
++    s->tcnt = UINT32_MAX;
++    s->tcr = 0;
++    s->tcpr = 0xdeadbeef;
++    qemu_set_irq(s->irq, 0);
++}
++
++static void tmu012_reset(void *opaque)
++{
++    tmu012_state *s = opaque;
++
++    for (unsigned int i = 0; i < 3; ++i) {
++        if (s->timer[i]) {
++            sh_timer_channel_reset(s->timer[i]);
++        }
++    }
++    s->tstr = 0;
++    s->tocr = 0;
++}
++
+ void tmu012_init(MemoryRegion *sysmem, hwaddr base, int feat, uint32_t freq,
+                  qemu_irq ch0_irq, qemu_irq ch1_irq,
+                  qemu_irq ch2_irq0, qemu_irq ch2_irq1)
+@@ -369,5 +406,6 @@
+     memory_region_init_alias(&s->iomem_a7, NULL, "timer-a7",
+                              &s->iomem, 0, memory_region_size(&s->iomem));
+     memory_region_add_subregion(sysmem, A7ADDR(base), &s->iomem_a7);
++    qemu_register_reset(tmu012_reset, s);
+     /* ??? Save/restore.  */
+ }

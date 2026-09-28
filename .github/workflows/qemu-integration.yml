@@ -1,0 +1,33 @@
+name: custom QEMU integration
+
+permissions:
+  contents: read
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  qemu-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install QEMU build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y meson ninja-build pkg-config libglib2.0-dev libpixman-1-dev zlib1g-dev
+          python -m pip install -r requirements-dev.txt
+      - name: Fetch pinned QEMU source
+        run: |
+          mkdir -p build/qemu
+          git -C build/qemu init
+          git -C build/qemu remote add origin https://gitlab.com/qemu-project/qemu.git
+          git -C build/qemu fetch --depth=1 --filter=blob:none origin 55347990687e7bc5b6b0d624f290025726e8fbfa
+          git -C build/qemu checkout --detach FETCH_HEAD
+      - name: Build board and run firmware-free integration
+        run: sh scripts/test-qemu-integration.sh

@@ -1,6 +1,6 @@
 # Patches
 
-Three patches, against two upstreams. Each one exists because the CDJ's firmware
+Patches against two upstreams. Each one exists because the CDJ's firmware
 exercises something the upstream emulator gets wrong or does not implement, and
 each says what was measured before and after. See `../THIRD_PARTY.md` for the
 licence of each.
@@ -8,6 +8,8 @@ licence of each.
 | patch | against | applied by |
 |---|---|---|
 | `qemu-sh-intc-priority-imask.patch` | QEMU 11.x | `scripts/build-qemu-sh4.sh` |
+| `qemu-sh-intc-priority-order.patch` | QEMU 11.x, after the IMASK patch | `scripts/build-qemu-sh4.sh` |
+| `qemu-sh-tmu-stop-reset.patch` | QEMU 11.x | `scripts/build-qemu-sh4.sh` |
 | `01-gdb-17.2-bfin-parallel-dsp32alu.patch` | GDB 17.2 | `scripts/build-bfin-sim.sh` |
 | `02-gdb-17.2-bfin-cdj2000-board.patch` | GDB 17.2 | `scripts/build-bfin-sim.sh` |
 
@@ -28,6 +30,17 @@ that masks with `SR.IMASK`.
    nothing. The patch adds `prio` to `struct intc_source`, defaulting to `0x0f`
    so existing controllers behave exactly as before, and accepts a source only
    while `prio > imask`.
+
+The follow-on `qemu-sh-intc-priority-order.patch` selects the highest-priority
+eligible source, using source order to break ties. The first patch only filtered
+by `IMASK` and still returned the first pending source. Both patches are needed
+for the board's programmed priority levels to arbitrate simultaneous requests.
+
+`qemu-sh-tmu-stop-reset.patch` clears a stopped timer's asserted IRQ and adds a
+reset callback for each three-channel TMU block. A reset stops the underlying
+ptimers, restores their count and limit, clears their interrupt levels, and
+restores the visible registers. Without this, a pending timer line can survive
+a guest reset and interrupt the new boot before it has initialized its handlers.
 
 2. **`sh_intc_write` never recorded the level a priority register carries.** It
    only asked whether the field was non-zero, i.e. whether the source was

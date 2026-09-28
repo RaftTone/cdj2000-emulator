@@ -47,10 +47,12 @@ if [ ! -f "$QEMU_SRC/hw/sh4/meson.build" ]; then
     exit 1
 fi
 
-# SH-4 interrupt semantics QEMU gets wrong; see patches/README.md.  Applied
-# with --forward so re-running the script on an already-patched tree is a no-op.
-patch=$REPO/patches/qemu-sh-intc-priority-imask.patch
-if [ -f "$patch" ]; then
+# SH-4 interrupt and timer fixes; see patches/README.md. Apply in order, with
+# --forward so re-running the script on an already-patched tree is a no-op.
+for patch in \
+    "$REPO/patches/qemu-sh-intc-priority-imask.patch" \
+    "$REPO/patches/qemu-sh-intc-priority-order.patch" \
+    "$REPO/patches/qemu-sh-tmu-stop-reset.patch"; do
     if patch -d "$QEMU_SRC" -p1 --forward --silent --dry-run < "$patch" >/dev/null 2>&1; then
         echo "applying $(basename "$patch")"
         patch -d "$QEMU_SRC" -p1 --forward < "$patch"
@@ -60,7 +62,7 @@ if [ -f "$patch" ]; then
         echo "patch does not apply cleanly: $patch" >&2
         exit 1
     fi
-fi
+done
 
 echo "mirroring board sources into $QEMU_SRC/hw/sh4"
 for source in "$REPO"/emulator/qemu/*.c "$REPO"/emulator/qemu/*.h; do
