@@ -153,6 +153,8 @@ struct CdjDspModel {
     bool status_first;                  /* CDJ_DSP_STATUS_FIRST: ... or the first one registered after a flush */
     uint32_t first_record;              /* +0x8120 of the first +0x8100 = 3 since the flush, 0 = none */
     bool track_end;                     /* CDJ_DSP_TRACK_END: state 7 at the record's last frame */
+    bool slot_release;                  /* CDJ_DSP_SLOT_RELEASE: request 1 frees the ready slots */
+    bool slot_released[DSP_HOT_SLOTS];  /* freed since recorded: a 0x11 records again */
     bool at_end;                        /* the position reached the record's end */
     uint32_t record_frames[256];        /* +0x811c of the +0x8100 command naming the record, CD frames */
     uint64_t jobs;
@@ -597,6 +599,8 @@ CdjDspModel *cdj_dsp_model_new(Chardev *external)
     model->slot_entry = g_strcmp0(getenv("CDJ_DSP_SLOT_ENTRY"), "0") != 0;
     /* The end of a track (see cdj_dsp_model_track_end): on unless 0. */
     model->track_end = g_strcmp0(getenv("CDJ_DSP_TRACK_END"), "0") != 0;
+    /* Held slots freed at a re-stream (see the +0x7ba0 handler): on unless 0. */
+    model->slot_release = g_strcmp0(getenv("CDJ_DSP_SLOT_RELEASE"), "0") != 0;
     /*
      * CDJ_DSP_SEGMENT_ENTRY (on unless 0): segment commands 1 and 2 publish
      * the slot entry of the point they set, as a 0x11 / 0x12 record does
@@ -1906,8 +1910,9 @@ void cdj_dsp_model_tick(CdjDspModel *model, uint8_t *window, size_t length)
                                     : " (a loop's OUT) recorded here, no IN before it";
                     }
                 } else if (!jump) {
-                    if (model->hot_ms[slot] < 0) {
+                    if (model->hot_ms[slot] < 0 || model->slot_released[slot]) {
                         model->hot_ms[slot] = model->pos_ms;
+                        model->slot_released[slot] = false;
                         what = " recorded here";
                     } else {
                         what = " already held, kept";
@@ -2215,6 +2220,23 @@ void cdj_dsp_model_tick(CdjDspModel *model, uint8_t *window, size_t length)
                     model->pos_standby = word == 4;
                     if (word != 4) {
                         model->seek_armed = false;
+                    }
+                }
+                if (word == 1 && model->slot_release) {
+                    /*
+                     * The DSP's slot pass (0x8002d9ec) walks the ten slots
+                     * and, while the pending request get(18) is 1, sets every
+                     * held flag that reads 2 back to 0 (0x8002da6c..
+                     * 0x8002da9c, table 0x10024f70).  A slot is refused a
+                     * record only while its flag is set (0x80043ea8 ->
+                     * 0x8002e830), so after the 1 MAIN sends at every load and
+                     * re-stream a 0x11 records the slot again from the new
+                     * stream; its point stays until then (a jump reads the
+                     * slot record, not the flag).  2 is the flag of a slot
+                     * whose data is complete; the model completes at once.
+                     */
+                    for (unsigned i = 0; i < DSP_HOT_SLOTS; i++) {
+                        model->slot_released[i] = true;
                     }
                 }
                 if (word == 2 || word == 5) {
