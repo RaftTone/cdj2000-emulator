@@ -2103,10 +2103,32 @@ void cdj_dsp_model_tick(CdjDspModel *model, uint8_t *window, size_t length)
                  * to track 2 (5:31).  Only a 2 sets it.
                  */
                 model->pos_record = ldl_le_p(window + 0x8120);
-                model->pos_ms = 0;
-                model->pos_state = 2;
-                fprintf(stderr, "cdj2000-dsp: +0x8100 = %d names record %u, position 0 t=%.3f\n",
-                        word, model->pos_record, now / 1e9);
+                if (model->states433) {
+                    /*
+                     * With the 4.33 state model a 2 only names the record.
+                     * On the DSP it is a PCM-channel command like 3 and 4:
+                     * the main loop takes +0x8100 into get(0) (0x80044ad8),
+                     * copies the stream header (0x80044c90) and runs the
+                     * class handler, where for class 1 a 2 is a data transfer
+                     * (0x800416ac, count get(35)) or an open that clears the
+                     * record's byte fields b14+0/+8/+10 (0x80041374).  The
+                     * running state b14+732 has two writers only, the init
+                     * (0x80048bd8, state 1) and the main pass adopting
+                     * +0x7ba0 (0x80048ae0), so run or stand is +0x7ba0's
+                     * alone.  The NXS port sends 2 right after PLAY on a
+                     * second load (r84), and the old reading below stopped
+                     * the deck there.
+                     */
+                    fprintf(stderr, "cdj2000-dsp: +0x8100 = %d names record %u; run/stand "
+                            "and position unchanged (position state %u at %" PRId64
+                            " ms) t=%.3f\n", word, model->pos_record, model->pos_state,
+                            model->pos_ms, now / 1e9);
+                } else {
+                    model->pos_ms = 0;
+                    model->pos_state = 2;
+                    fprintf(stderr, "cdj2000-dsp: +0x8100 = %d names record %u, position 0 t=%.3f\n",
+                            word, model->pos_record, now / 1e9);
+                }
             }
             if (req->offset == 0x7ba0 && model->pos_report && model->states433
                 && word >= 1 && word <= 8) {
