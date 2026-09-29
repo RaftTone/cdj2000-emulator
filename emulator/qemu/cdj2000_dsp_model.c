@@ -152,6 +152,9 @@ struct CdjDspModel {
     bool status_current;                /* CDJ_DSP_STATUS_CURRENT: both blocks name the record played */
     bool status_first;                  /* CDJ_DSP_STATUS_FIRST: ... or the first one registered after a flush */
     uint32_t first_record;              /* +0x8120 of the first +0x8100 = 3 since the flush, 0 = none */
+    bool track_end;                     /* CDJ_DSP_TRACK_END: state 7 at the record's last frame */
+    bool at_end;                        /* the position reached the record's end */
+    uint32_t record_frames[256];        /* +0x811c of the +0x8100 command naming the record, CD frames */
     uint64_t jobs;
     uint32_t seek_applied[3];           /* +0x8154/8/c of the last start taken */
     bool seek_armed;                    /* the record was just named: its start is the position */
@@ -592,6 +595,8 @@ CdjDspModel *cdj_dsp_model_new(Chardev *external)
     /* The slot copies +0x7c80 = 0x31 / 0x33 (see there): on unless 0. */
     model->slot_copy = g_strcmp0(getenv("CDJ_DSP_SLOT_COPY"), "0") != 0;
     model->slot_entry = g_strcmp0(getenv("CDJ_DSP_SLOT_ENTRY"), "0") != 0;
+    /* The end of a track (see cdj_dsp_model_track_end): on unless 0. */
+    model->track_end = g_strcmp0(getenv("CDJ_DSP_TRACK_END"), "0") != 0;
     /*
      * CDJ_DSP_SEGMENT_ENTRY (on unless 0): segment commands 1 and 2 publish
      * the slot entry of the point they set, as a 0x11 / 0x12 record does
@@ -1469,6 +1474,53 @@ static void cdj_dsp_model_stream_seek(CdjDspModel *model, uint8_t *window,
 #define DSP_POS_FRAMES      0x7c10
 #define DSP_POS_VALID       0x7c14
 
+/*
+ * The end of a track (CDJ_DSP_TRACK_END).  MAIN hands the DSP each record's
+ * length with the +0x8100 command that names it: +0x811c is the audio's
+ * length in CD frames (75 a second) and +0x8120 the record (runs/cosim/te-1:
+ * record 1 0x55d1 = 292.9 s, the 4:52 track; record 2 0x53ae = 285.6 s, the
+ * 4:45 one).  When the decoder pass has no more data it calls 0x80019608,
+ * which sets the running state 7 (output silent, 0x80015b48) and publishes it
+ * in +0x7bf8 through 0x80035940 (from 0x80014a08..0x80014a30 and
+ * 0x800147ec..0x80014814).  MAIN's DSP task, with a run request (2) pending,
+ * takes +0x7bf8 = 7 or 8 as the end: it stores the state in the request and
+ * signals the deck (0x041a0b6a..0x041a0b8e, 0x042e9dfc).  The model has no
+ * decoder, so the record's last frame stands for "no more data": the
+ * position stops there and +0x7bf8 = 7.  Which exact test the DSP makes on
+ * its data (b14+456, set at 0x80023a90 / 0x80027268) is not traced; the
+ * frame count is MAIN's own for the record.
+ */
+static void cdj_dsp_model_track_end(CdjDspModel *model, uint8_t *window, int64_t now)
+{
+    uint32_t frames;
+    int64_t end_ms;
+
+    if (!model->track_end || model->pos_record >= 256) {
+        return;
+    }
+    frames = model->record_frames[model->pos_record];
+    if (!frames) {
+        return;
+    }
+    end_ms = (int64_t)frames * 1000 / 75;
+    if (model->pos_ms < end_ms) {
+        model->at_end = false;
+        return;
+    }
+    /* called only while running: a run request at the end stops again */
+    model->pos_ms = end_ms;
+    model->pos_rem_ns = 0;
+    model->pos_state = 2;
+    stl_le_p(window + 0x7bf8, 7);
+    if (model->at_end) {
+        return;
+    }
+    model->at_end = true;
+    fprintf(stderr, "cdj2000-dsp: end of record %u at %" PRId64 " ms (%u CD frames): "
+            "position stops, +0x7bf8 = 7 t=%.3f\n", model->pos_record, end_ms,
+            frames, now / 1e9);
+}
+
 static void cdj_dsp_model_position_report(CdjDspModel *model, uint8_t *window,
                                           size_t length, int64_t now)
 {
@@ -1527,6 +1579,7 @@ static void cdj_dsp_model_position_report(CdjDspModel *model, uint8_t *window,
             model->pos_rem_ns = played_ns % SCALE_MS;
         }
         model->pos_last_ns = now;
+        cdj_dsp_model_track_end(model, window, now);
         if (model->loop_on && model->loop_out_ms > model->loop_in_ms
             && model->pos_ms >= model->loop_out_ms) {
             model->pos_ms = model->loop_in_ms
@@ -2083,6 +2136,14 @@ void cdj_dsp_model_tick(CdjDspModel *model, uint8_t *window, size_t length)
                         "= %" PRId64 " ms: %s t=%.3f\n", word, (word >> 4) & 0xf, word & 0xf,
                         ldl_le_p(window + 0x7ca0), sub, half, ldl_le_p(window + 0x7cac),
                         point_ms, effect, now / 1e9);
+            }
+            if (req->offset == 0x8100 && (word == 2 || word == 3) && length >= 0x8128) {
+                uint32_t rec = ldl_le_p(window + 0x8120);
+                uint32_t frames = ldl_le_p(window + 0x811c);
+
+                if (rec < 256 && frames) {
+                    model->record_frames[rec] = frames;     /* see ..._track_end */
+                }
             }
             if (req->offset == 0x8100 && word == 3 && model->first_record == 0
                 && length >= 0x8128) {
