@@ -156,6 +156,8 @@ struct CdjDspModel {
     bool slot_release;                  /* CDJ_DSP_SLOT_RELEASE: request 1 frees the ready slots */
     bool slot_released[DSP_HOT_SLOTS];  /* freed since recorded: a 0x11 records again */
     bool at_end;                        /* the position reached the record's end */
+    uint32_t end_toggle;                /* +0x7bf8 alternates 7 / the request at the end */
+    uint32_t last_request;              /* the last +0x7ba0 request taken, get(18) */
     uint32_t record_frames[256];        /* +0x811c of the +0x8100 command naming the record, CD frames */
     uint64_t jobs;
     uint32_t seek_applied[3];           /* +0x8154/8/c of the last start taken */
@@ -1511,18 +1513,28 @@ static void cdj_dsp_model_track_end(CdjDspModel *model, uint8_t *window, int64_t
         model->at_end = false;
         return;
     }
-    /* called only while running: a run request at the end stops again */
+    /*
+     * Called only while running.  With no data the decoder pass sets state
+     * 7 (0x80019608) and publishes it; but the main pass, whenever no host
+     * request is in the mailbox (+0xffe4 == 0, 0x80048a84 -> 0x80044de4) and
+     * no slot jump is queued, adopts MAIN's last request get(18) again as
+     * the running state and publishes it (0x80048aa0..0x80048ae4).  So with
+     * MAIN's run request (2) still standing, +0x7bf8 alternates between 7
+     * and 2, the decoder finding no data on every pass.  MAIN's DSP task
+     * takes the 7 as the end (0x041a0b6a: the pending 2 becomes 7) and the
+     * next other value as the answer (0x041a0be4..0x041a0bfc); with a 7 that
+     * never went away it waited its 10 s and re-streamed (te-2).
+     */
     model->pos_ms = end_ms;
     model->pos_rem_ns = 0;
-    model->pos_state = 2;
-    stl_le_p(window + 0x7bf8, 7);
+    stl_le_p(window + 0x7bf8, (model->end_toggle++ & 1) ? model->last_request : 7);
     if (model->at_end) {
         return;
     }
     model->at_end = true;
     fprintf(stderr, "cdj2000-dsp: end of record %u at %" PRId64 " ms (%u CD frames): "
-            "position stops, +0x7bf8 = 7 t=%.3f\n", model->pos_record, end_ms,
-            frames, now / 1e9);
+            "position stops, +0x7bf8 alternates 7 / %u t=%.3f\n", model->pos_record,
+            end_ms, frames, model->last_request, now / 1e9);
 }
 
 static void cdj_dsp_model_position_report(CdjDspModel *model, uint8_t *window,
@@ -2222,6 +2234,7 @@ void cdj_dsp_model_tick(CdjDspModel *model, uint8_t *window, size_t length)
                         model->seek_armed = false;
                     }
                 }
+                model->last_request = word;
                 if (word == 1 && model->slot_release) {
                     /*
                      * The DSP's slot pass (0x8002d9ec) walks the ten slots
