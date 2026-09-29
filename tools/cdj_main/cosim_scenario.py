@@ -400,7 +400,8 @@ def scenario(run: Run, args) -> None:
     run.wait("settle", lambda: run.guest() >= loaded_at + 2, 10)
 
     err_mark = len(run.err.read_text(errors="replace"))
-    run.press("16.0")
+    if not args.no_play:
+        run.press("16.0")
     got = run.wait("play", err_matching(run, r"cdj2000-dsp: position \d+ ms", err_mark), 20)
     run.step("play", bool(got), got or "the DSP model's position does not run")
     dump = run.out / "main-link-dump.bin"
@@ -506,6 +507,10 @@ def main(argv=None) -> int:
     parser.add_argument("--boot-arg", action="append", default=[], metavar="ARG",
                         help="extra boot_vm argument, e.g. --boot-arg=--trace=0x42596ee")
     parser.add_argument("--dsp-trace", action="store_true")
+    parser.add_argument("--no-play", action="store_true",
+                        help="do not press PLAY after the load: with AUTO CUE off "
+                             "(CDJ_AUTO_CUE=0) the load ends with +0x7ba0 = 4, 2 and "
+                             "the deck already plays")
     parser.add_argument("--play-seconds", type=float, default=12,
                         help="guest seconds to let the deck play after PLAY")
     parser.add_argument("--audio", action="store_true",
