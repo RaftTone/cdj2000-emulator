@@ -632,3 +632,11 @@ still have it.
 17. `17-gdb-17.2-bfin-prof-mingw.patch`: the profiler collects its frame lines in a memory stream, and MinGW has no
     `open_memstream`, so `sim/bfin/interp.c` did not compile on Windows once patch 16 was in. There the lines go to
     `<profile>.frames` beside the profile and are read back when the window closes. POSIX is unchanged.
+
+18. `18-gdb-17.2-bfin-memory-stalls.patch`: `BFIN_MEM_STALL=1` adds what the core waits for memory: every load,
+    store and instruction fetch is classified by the CPLBs (cacheable or not) and run through a 16 KB I-cache and
+    a 16-32 KB D-cache; a miss costs `BFIN_STALL_FILL` cycles (default 90), an uncached SDRAM read `BFIN_STALL_RD`
+    (45), an uncached or write-through write `BFIN_STALL_WR` (12), a flash access `BFIN_STALL_ASYNC` (40). The
+    cycles go to the instruction that waited, so the virtual time base (and with it every timer, DMA and frame)
+    sees a slower core. `BFIN_STATS` prints a `STATS mem` line with the counters. Off by default, and then it costs
+    one test per access. Not modelled: SDRAM refresh and banks, DMA taking the bus, the write buffer.

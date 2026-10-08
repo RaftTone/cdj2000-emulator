@@ -178,6 +178,29 @@ patch 15 (`bin/cdj-run-frames`, or `bin/cdj-run` rebuilt from the current patch 
 sibling by itself).  The window starts a second early so the archive is already armed; the GIF is written when
 the run ends, so stop it with SIGINT (`cosim_scenario` does), not a kill.
 
+## A slower GUI core (SDRAM waits)
+
+The simulated Blackfin runs an instruction a cycle, so the GUI task that keeps a playing deck's screen up needs
+about 7 % of the core where the deck's own measurement says it is close to all of it: a lag that is the GUI
+running out of time shows on the deck and never here.  Patch 18 adds a first-order model of the wait for memory,
+off by default:
+
+    python -m tools.cdj_main.cosim_scenario ... --gui-env BFIN_MEM_STALL=1
+
+Loads, stores and fetches go through the CPLBs (cacheable or not) and a 16 KB I-cache and a 16-32 KB D-cache; a
+miss costs `BFIN_STALL_FILL` cycles (default 90), an uncached SDRAM read `BFIN_STALL_RD` (45), an uncached or
+write-through write `BFIN_STALL_WR` (12), a flash access `BFIN_STALL_ASYNC` (40), a core or system MMR
+`BFIN_STALL_MMR` (0).  The `STATS mem` line of the GUI log (`BFIN_STATS` is on in `cosim_scenario`) counts hits,
+misses and uncached accesses of both caches and the stall cycles.  Busy time of the core is
+`1 - parked_s / guest_s` in the `STATS wall` line; a cost per published frame is
+`(guest_s - parked_s) * 400e6 / published`.
+
+Measured on the stock GUI with a track playing (card-camp836, 30 s of play): off 7 % busy, 1.0 million cycles a
+published frame; the defaults 19 %, 2.8 million; fill 200 / read 100 / write 30, 35 %, 5.4 million.  The deck's
+12 million a frame is not reached by plausible SDRAM waits alone: the rest is something this model leaves out
+(DMA taking the bus, the display's in the first place) or a cache that does not hold on the deck.  Set the
+three numbers from a measurement on the deck, not from this table.
+
 ## A key held from the first second
 
 `boot_vm --hold-key KEY[:SECONDS]` (also `cosim_scenario`) holds a panel key from guest time zero for SECONDS

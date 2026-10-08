@@ -1,0 +1,307 @@
+BFIN_MEM_STALL=1: what the GUI core waits for memory, as a first-order model (cache misses and uncached SDRAM accesses).
+
+Off by default; with it, dv-bfin_mmu.c classifies every load, store and instruction fetch by the CPLBs and a 16 KB I-cache / 16-32 KB D-cache, and the cycles go to the instruction that waited (the virtual time base advances by them).  BFIN_STALL_FILL / _RD / _WR / _ASYNC / _MMR set the costs; BFIN_STATS adds a "STATS mem" line with the counters.
+
+--- a/sim/bfin/bfin-sim.c
++++ b/sim/bfin/bfin-sim.c
+@@ -9348,6 +9348,11 @@
+ 		      get_store_name (cpu, addr), *addr);
+     }
+ 
++  if (__builtin_expect (bfin_stall_pending != 0, 0))
++    {
++      CYCLE_DELAY += bfin_stall_pending;
++      bfin_stall_pending = 0;
++    }
+   cycles_inc (cpu, CYCLE_DELAY);
+ 
+   /* Set back to zero in case a pending CEC event occurs
+--- a/sim/bfin/bfin-sim.h
++++ b/sim/bfin/bfin-sim.h
+@@ -441,6 +441,18 @@
+   return (f->ok >> ((supv << 1) | (unsigned) write)) & 1;
+ }
+ 
++/* BFIN_MEM_STALL=1: what the guest's loads, stores and instruction fetches cost in cycles beyond the one an
++   instruction takes -- cache misses and uncached accesses to SDRAM (dv-bfin_mmu.c).  Off, the cost is this one
++   test.  The pending cycles are added to CYCLE_DELAY when the instruction retires (bfin-sim.c).  */
++extern int bfin_mem_stall_on;
++extern bu32 bfin_stall_pending;
++void bfin_mem_stall_access (SIM_CPU *cpu, bu32 addr, int bytes, bool write, bool inst);
++#define BFIN_MEM_STALL(cpu, addr, bytes, write, inst) \
++do { \
++  if (__builtin_expect (bfin_mem_stall_on, 0)) \
++    bfin_mem_stall_access (cpu, addr, bytes, write, inst); \
++} while (0)
++
+ #define __PUT_MEM(taddr, v, size) \
+ do { \
+   bu##size __v = (v); \
+@@ -462,6 +474,7 @@
+   bfin_trace_gui_state_write (cpu, __taddr, __v, __bytes); \
+   if (__cnt != __bytes) \
+     mmu_process_fault (cpu, __taddr, true, false, false, true); \
++  BFIN_MEM_STALL (cpu, __taddr, __bytes, true, false); \
+   BFIN_TRACE_CORE (cpu, __taddr, __bytes, write_map, __v); \
+ } while (0)
+ #define PUT_BYTE(taddr, v) __PUT_MEM(taddr, v, 8)
+@@ -489,6 +502,7 @@
+     bfin_trace_gui_state_read (cpu, __taddr, __ret, __bytes); \
+   if (__cnt != __bytes) \
+     mmu_process_fault (cpu, __taddr, false, inst, false, true); \
++  BFIN_MEM_STALL (cpu, __taddr, __bytes, false, inst); \
+   BFIN_TRACE_CORE (cpu, __taddr, __bytes, map, __ret); \
+   __ret; \
+ })
+--- a/sim/bfin/dv-bfin_mmu.c
++++ b/sim/bfin/dv-bfin_mmu.c
+@@ -313,6 +313,8 @@
+   mmu->base = attach_address;
+ }
+ 
++static void bfin_mem_stall_init (void);
++
+ static void
+ bfin_mmu_finish (struct hw *me)
+ {
+@@ -331,6 +333,7 @@
+ 			   /*(4 * 1024 * 1024 * CPU_INDEX (hw_system_cpu (me)));*/
+   mmu->dmem_control = 0x00000001;
+   mmu->imem_control = 0x00000001;
++  bfin_mem_stall_init ();
+ }
+ 
+ const struct hw_descriptor dv_bfin_mmu_descriptor[] =
+@@ -844,4 +847,214 @@
+ 	return;
+     }
+   cec_exception (cpu, excp);
++}
++
++/* BFIN_MEM_STALL=1: the cycles the guest spends waiting for memory.
++
++   The core takes one cycle an instruction, which is right for L1 SRAM and cache hits and far too fast for
++   the Pioneer GUI, whose code and data live in SDRAM: a frame that costs about 2 million cycles here costs
++   about 12 million on the deck, and a lag that is only the GUI task running out of time never shows.  This is
++   a first-order model of why, not a copy of the memory controller:
++
++   - the page's CPLB decides whether an access is cached (CPLB_L1_CHBL, with CPLB_WT for write-through) when
++     the CPLBs are on; with them off everything external is uncached;
++   - the instruction cache (IMEM_CONTROL.IMC) is 16 KB, 4-way, 32-byte lines; the data cache
++     (DMEM_CONTROL.DMC) is 16 KB, 2-way, or 32 KB with both banks, LRU, write-back with write-allocate;
++   - a miss costs BFIN_STALL_FILL cycles (a line fill from SDRAM), an uncached SDRAM read BFIN_STALL_RD, an
++     uncached or write-through write BFIN_STALL_WR, an asynchronous bank (flash, 0x20000000) access
++     BFIN_STALL_ASYNC; core and system MMRs BFIN_STALL_MMR (default 0);
++   - instruction fetches are charged once per aligned 8 bytes (the fetch width).
++
++   Not modelled: the SDRAM refresh and bank state, DMA taking the bus (the display DMA is the biggest
++   user), the write buffer's drain, the data cache's second bank's own arbitration.  The numbers are defaults
++   for a 400 MHz core and a 100 MHz 16-bit SDRAM (a line fill 90 cycles, an uncached read 45), to be tuned against
++   a measurement on the deck: with them the GUI task of a playing deck costs about 2.8 million cycles a published
++   frame instead of 1.0 million, which is still far from the 12 million the deck was measured at.  */
++int bfin_mem_stall_on;
++bu32 bfin_stall_pending;
++uint64_t bfin_stall_total;
++static bu32 stall_fill = 90, stall_rd = 45, stall_wr = 12, stall_async = 40, stall_mmr = 0;
++
++#define STALL_WAYS_I 4
++#define STALL_WAYS_D 2
++#define STALL_SETS_I 128		/* 16 KB / 32 B / 4 ways */
++#define STALL_SETS_D_MAX 512		/* 32 KB / 32 B / 2 ways */
++static bu32 icache_tag[STALL_SETS_I][STALL_WAYS_I];
++static bu32 icache_age[STALL_SETS_I][STALL_WAYS_I];
++static bu32 dcache_tag[STALL_SETS_D_MAX][STALL_WAYS_D];
++static bu32 dcache_age[STALL_SETS_D_MAX][STALL_WAYS_D];
++static bu32 stall_clock;
++static bu32 stall_last_fetch = ~0u;
++static uint64_t stall_hits[2], stall_misses[2], stall_uncached[2];
++
++static bu32
++stall_env (const char *name, bu32 value)
++{
++  const char *text = getenv (name);
++
++  return text && *text ? (bu32) strtoul (text, NULL, 0) : value;
++}
++
++static void
++bfin_mem_stall_init (void)
++{
++  const char *on = getenv ("BFIN_MEM_STALL");
++
++  bfin_mem_stall_on = on && *on && strcmp (on, "0") != 0;
++  if (!bfin_mem_stall_on)
++    return;
++  stall_fill = stall_env ("BFIN_STALL_FILL", stall_fill);
++  stall_rd = stall_env ("BFIN_STALL_RD", stall_rd);
++  stall_wr = stall_env ("BFIN_STALL_WR", stall_wr);
++  stall_async = stall_env ("BFIN_STALL_ASYNC", stall_async);
++  stall_mmr = stall_env ("BFIN_STALL_MMR", stall_mmr);
++  fprintf (stderr, "bfin mem stall: fill %u rd %u wr %u async %u mmr %u\n",
++	   stall_fill, stall_rd, stall_wr, stall_async, stall_mmr);
++}
++
++/* The CPLB entry covering ADDR in table INST, or 0 (the CPLBs off, or no entry): its data word.  The last
++   entry that matched is remembered, as the walk in _mmu_check_addr does.  */
++static bu32
++stall_cplb_data (struct bfin_mmu *mmu, bool inst, bu32 addr)
++{
++  static const bu32 pages[4] = { 0x400, 0x1000, 0x100000, 0x400000 };
++  static bu32 memo_lo[2], memo_hi[2], memo_data[2];
++  const bu32 *cplb_addr = inst ? &mmu->icplb_addr[0] : &mmu->dcplb_addr[0];
++  const bu32 *cplb_data = inst ? &mmu->icplb_data[0] : &mmu->dcplb_data[0];
++  bu32 control = inst ? mmu->imem_control : mmu->dmem_control;
++  int i;
++
++  if (!(control & ENCPLB))
++    return 0;
++  if (memo_hi[inst] && addr >= memo_lo[inst] && addr < memo_hi[inst])
++    return memo_data[inst];
++  for (i = 0; i < 16; ++i)
++    {
++      bu32 hi;
++
++      if (!(cplb_data[i] & CPLB_VALID))
++	continue;
++      hi = cplb_addr[i] + pages[(cplb_data[i] & PAGE_SIZE) >> 16];
++      if (addr >= cplb_addr[i] && addr < hi)
++	{
++	  memo_lo[inst] = cplb_addr[i];
++	  memo_hi[inst] = hi;
++	  memo_data[inst] = cplb_data[i];
++	  return cplb_data[i];
++	}
++    }
++  return 0;
++}
++
++/* One lookup in a set-associative LRU cache: 0 for a hit, 1 for a miss (the line is then installed).  */
++static int
++stall_cache_lookup (bu32 *tags, bu32 *ages, int ways, bu32 line)
++{
++  int way, victim = 0;
++
++  for (way = 0; way < ways; ++way)
++    if (tags[way] == line)
++      {
++	ages[way] = ++stall_clock;
++	return 0;
++      }
++  for (way = 1; way < ways; ++way)
++    if (ages[way] < ages[victim])
++      victim = way;
++  tags[victim] = line;
++  ages[victim] = ++stall_clock;
++  return 1;
++}
++
++void
++bfin_mem_stall_access (SIM_CPU *cpu, bu32 addr, int bytes, bool write, bool inst)
++{
++  struct bfin_mmu *mmu;
++  bu32 cost = 0, data, line;
++  bool cached;
++
++  if (addr >= 0xFF800000)
++    {
++      if (addr >= 0xFFC00000 || (addr >= 0xFFE00000))
++	cost = stall_mmr;
++      goto done;			/* L1 SRAM: no wait */
++    }
++  if (inst)
++    {
++      bu32 group = addr >> 3;
++
++      if (group == stall_last_fetch)
++	return;
++      stall_last_fetch = group;
++    }
++  mmu = MMU_STATE (cpu);
++  data = stall_cplb_data (mmu, inst, addr);
++  cached = (data & CPLB_L1_CHBL) != 0;
++  if (cached)
++    {
++      if (inst)
++	cached = (mmu->imem_control & MC) != 0;
++      else
++	cached = (mmu->dmem_control & 0xc) != 0;
++    }
++  if (addr >= 0x20000000)
++    {
++      cost = stall_async;		/* flash and the other asynchronous banks are not cached here */
++      goto done;
++    }
++  if (!cached)
++    {
++      cost = write ? stall_wr : stall_rd;
++      ++stall_uncached[inst];
++      goto done;
++    }
++  if (write && (data & CPLB_WT))
++    {
++      cost = stall_wr;
++      ++stall_uncached[inst];
++      goto done;
++    }
++  line = addr >> 5;
++  if (inst)
++    {
++      bu32 set = line & (STALL_SETS_I - 1);
++
++      if (stall_cache_lookup (icache_tag[set], icache_age[set], STALL_WAYS_I, line))
++	{
++	  cost = stall_fill;
++	  ++stall_misses[1];
++	}
++      else
++	++stall_hits[1];
++    }
++  else
++    {
++      bu32 sets = (mmu->dmem_control & 0xc) == 0xc ? STALL_SETS_D_MAX : STALL_SETS_D_MAX / 2;
++      bu32 set = line & (sets - 1);
++
++      if (stall_cache_lookup (dcache_tag[set], dcache_age[set], STALL_WAYS_D, line))
++	{
++	  cost = stall_fill;
++	  ++stall_misses[0];
++	}
++      else
++	++stall_hits[0];
++    }
++ done:
++  bfin_stall_pending += cost;
++  bfin_stall_total += cost;
++}
++
++/* For the STATS line (interp.c).  */
++void
++bfin_mem_stall_report (FILE *stream)
++{
++  if (!bfin_mem_stall_on)
++    return;
++  fprintf (stream, "STATS mem stall_cycles=%llu dhit=%llu dmiss=%llu dunc=%llu ihit=%llu imiss=%llu iunc=%llu",
++	   (unsigned long long) bfin_stall_total,
++	   (unsigned long long) stall_hits[0], (unsigned long long) stall_misses[0],
++	   (unsigned long long) stall_uncached[0], (unsigned long long) stall_hits[1],
++	   (unsigned long long) stall_misses[1], (unsigned long long) stall_uncached[1]);
++  fputc ('\n', stream);
+ }
+--- a/sim/bfin/interp.c
++++ b/sim/bfin/interp.c
+@@ -766,6 +766,7 @@
+   unsigned long last_events;
+ };
+ static struct bfin_stats bfin_stats;
++extern void bfin_mem_stall_report (FILE *);	/* dv-bfin_mmu.c */
+ 
+ double
+ bfin_wall_seconds (void)
+@@ -919,6 +920,7 @@
+ 	       bfin_wall.parked_s,
+ 	       (double) bfin_wall.dropped / bfin_wall.cclk_hz * 1e3,
+ 	       bfin_wall.waits, bfin_wall.spins);
++      bfin_mem_stall_report (stderr);
+       bfin_cosim_stats ();
+       fflush (stderr);
+       bfin_stats.last_wall = now;
