@@ -381,12 +381,13 @@ def link_hub_env(spec: str | None) -> dict[str, str]:
     return {"CDJ_NETSIM": target if ":" in target else f"127.0.0.1:{target}"}
 
 
-def link_hub_args(spec: str | None) -> list[str]:
+def link_hub_args(spec: str | None, model: str = "cdj2000-ethernet") -> list[str]:
     """The QEMU arguments that connect the EtherC to a link_hub.
 
-    The board creates its EtherC only for a NIC of model cdj2000-ethernet, and
-    both netdevs below frame each Ethernet frame with a 32-bit length, which
-    is what the hub reads.
+    The CDJ-2000 board creates its EtherC only for a NIC of model
+    cdj2000-ethernet (the NXS board's is cdj-nxs-ethernet), and both netdevs
+    below frame each Ethernet frame with a 32-bit length, which is what the
+    hub reads.
     """
     if not spec or spec.startswith("sync:"):
         return []           # sync: the board talks to the hub itself (CDJ_NETSIM)
@@ -395,7 +396,7 @@ def link_hub_args(spec: str | None) -> list[str]:
     else:
         host, _, port = spec.rpartition(":")
         netdev = f"socket,id=djlink,connect={host or '127.0.0.1'}:{port}"
-    return ["-netdev", netdev, "-net", "nic,model=cdj2000-ethernet,netdev=djlink"]
+    return ["-netdev", netdev, "-net", f"nic,model={model},netdev=djlink"]
 
 
 def main() -> int:

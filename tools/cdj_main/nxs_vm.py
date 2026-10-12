@@ -22,6 +22,7 @@ import time
 
 from tools.cdj_dsp.tx_capture import tx_capture_metadata
 from tools.cdj_main.run_state import write_json
+from tools.cdj_main.boot_vm import flash_with_mac, link_hub_args
 from tools.cdj_main.nxs_panel import neutral_frame
 from tools.cdj_main import media_readiness, panel_control
 from tools.cdj_main.qmp import connect_chardev
@@ -879,6 +880,18 @@ def main():
                         help='log unmodeled external-bus accesses; does not implement the missing devices')
     diag.add_argument('--ethernet-peer-port', type=int,
                         help='connect modeled Ethernet to a framed test peer on 127.0.0.1 only')
+    parser.add_argument('--link-hub', metavar='PORT|HOST:PORT|unix:PATH',
+                        help="plug the player's Ethernet into a Pro DJ Link segment: "
+                             'tools.cdj_main.link_hub, or anything else that speaks '
+                             "QEMU's framed stream, listening there, as boot_vm "
+                             '--link-hub does for the CDJ-2000 (the NXS board has no '
+                             'sync: segment)')
+    parser.add_argument('--link-mac', metavar='XX:XX:XX:XX:XX:XX',
+                        help="the player's own Ethernet address, written where MAIN "
+                             'keeps it (flash 0x3f8000, as on the CDJ-2000) into a '
+                             'run-local copy of the flash. A blank record gives every '
+                             'deck 00:00:00:00:00:01 and 169.254.0.1, so a second deck '
+                             'on one segment needs its own')
     dsp.add_argument('--functional-dsp-timing', action='store_true',
                         help='run past the unresolved SPLOOPD epilog with a labeled two-cycle approximation')
     dsp.add_argument('--functional-dsp-audio', action='store_true',
@@ -989,6 +1002,26 @@ def main():
         parser.error('--source-key-retry-interval must be finite and positive')
     if args.ethernet_peer_port is not None and not 1024 <= args.ethernet_peer_port <= 65535:
         parser.error('--ethernet-peer-port must be 1024..65535')
+    if args.link_hub is not None:
+        if args.ethernet_peer_port is not None:
+            parser.error('--link-hub cannot be combined with --ethernet-peer-port')
+        if args.link_hub.startswith('sync:'):
+            parser.error('--link-hub sync: needs the CDJ-2000 board (boot_vm); '
+                         'the NXS board has no synchronising Ethernet')
+        if not args.link_hub.startswith('unix:'):
+            port = args.link_hub.rpartition(':')[2]
+            if not port.isdigit() or not 1 <= int(port) <= 65535:
+                parser.error('--link-hub must be PORT, HOST:PORT or unix:PATH')
+    if args.link_mac is not None:
+        try:
+            octets = bytes.fromhex(args.link_mac.replace(':', '').replace('-', ''))
+        except ValueError:
+            octets = b''
+        # A unicast address whose last record halfword is not the blank 0xffff
+        # (boot_vm.flash_with_mac); checked here, before the run exists.
+        if len(octets) != 6 or octets[0] & 1 or octets[4:6] == b'\xff\xff':
+            parser.error('--link-mac must be a unicast XX:XX:XX:XX:XX:XX '
+                         'not ending in ff:ff')
     if not math.isfinite(args.seconds) or args.seconds <= 0 or (
             args.port is not None and not 1024 <= args.port <= 65531):
         parser.error('positive duration and port 1024..65531 required')
@@ -1133,7 +1166,8 @@ def main():
         inputs['gui_flash_boot'] = args.gui_flash_boot.resolve()
     inputs.update(media_inputs)
     input_artifacts = {name: input_metadata(path) for name, path in inputs.items()}
-    main_command = [str(args.qemu.resolve()), '-M', 'cdj2000nxs-main', '-bios', str(main_firmware),
+    bios = flash_with_mac(main_firmware, args.link_mac, run / 'main-flash-mac.bin')
+    main_command = [str(args.qemu.resolve()), '-M', 'cdj2000nxs-main', '-bios', str(bios),
         '-display', 'none', '-no-reboot', '-d', 'unimp,guest_errors', '-D', str(run / 'main.log'),
         '-serial', f'tcp:127.0.0.1:{args.port},server,nowait',
         '-serial', f'tcp:127.0.0.1:{args.port + 2},server,nowait', '-serial', 'null']
@@ -1158,7 +1192,9 @@ def main():
         # MAIN's time is its instruction count, and it waits paused until the
         # GUI connects, so both boards start at guest time 0.
         main_command += ['-icount', f'shift={args.cosim_shift},sleep=off', '-S']
-    if args.ethernet_peer_port is None:
+    if args.link_hub is not None:
+        main_command += link_hub_args(args.link_hub, model='cdj-nxs-ethernet')
+    elif args.ethernet_peer_port is None:
         main_command += ['-nic', 'none']
     else:
         # No bridge, physical interface, DNS or arbitrary host selection.
@@ -1400,8 +1436,12 @@ def main():
              'legacy synchronous bounded DSP activation')))
     run_manifest['ethernet'] = dict(
         controller='SH7764 EtherC/E-DMAC', phy='RTL8201FL-VB-CG',
-        peer=(f'127.0.0.1:{args.ethernet_peer_port}' if args.ethernet_peer_port else None),
-        mode='isolated framed Ethernet' if args.ethernet_peer_port else 'disconnected',
+        peer=(args.link_hub if args.link_hub is not None else
+              f'127.0.0.1:{args.ethernet_peer_port}' if args.ethernet_peer_port else None),
+        mode=('Pro DJ Link segment (link_hub framed stream)' if args.link_hub is not None else
+              'isolated framed Ethernet' if args.ethernet_peer_port else 'disconnected'),
+        mac=args.link_mac or 'flash record (00:00:00:00:00:01 when blank)',
+        flash=str(bios),
         hardware_timing_validated=False,
         approximations=['atomic descriptor DMA; unified coherent RAM; no bus arbitration or wire timing',
                         'PHY negotiation uses an explicit virtual peer and modeled delay, not analog signaling',

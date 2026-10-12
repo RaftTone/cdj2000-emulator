@@ -1365,6 +1365,48 @@ python -m tools.cdj_main.cosim_scenario --card $H/cardB.img --playlist-row 4 --t
   on Windows `CDJ_NETSIM` refuses to start. The NXS machine keeps its own
   Ethernet (RTL8201FL) as before.
 
+### Two NXS decks on one Pro DJ Link
+
+The NXS board's EtherC and RTL8201FL take the same segment as the CDJ-2000's:
+`nxs_vm --link-hub` connects them to a `link_hub` (or to anything else that
+speaks QEMU's framed stream), and `--link-mac` gives each deck its own
+address. Stock NXS 1.44 reads its MAC from the same flash record as 4.33
+(the sector at 0x3f8000), so `--link-mac` writes it into a run-local copy of
+the flash, and takes its link-local address from the MAC's last two bytes:
+`02:43:44:10:01:01` is 169.254.1.1. A blank record gives every deck
+00:00:00:00:00:01 and 169.254.0.1.
+
+```sh
+H=runs/link/nxs; mkdir -p $H
+python -m tools.cdj_main.link_hub $H --listen unix:$PWD/$H/hub.sock &
+python -m tools.cdj_main.nxs_vm runs/nxs-a --seconds 600 --lightweight \
+    --link-hub unix:$PWD/$H/hub.sock --link-mac 02:43:44:10:01:01 &
+python -m tools.cdj_main.nxs_vm runs/nxs-b --seconds 600 --lightweight \
+    --link-hub unix:$PWD/$H/hub.sock --link-mac 02:43:44:10:02:02 &
+```
+
+- **Speed decides whether this works, and the measurements below need the
+  series #33-#38.** With the synchronous DSP, the only mode before #36, MAIN
+  is starved. It sends its DHCP discovers 38 s and 76 s apart, where a real
+  NXS sends them 1 s and 2 s apart, and in 240 s sends no Pro DJ Link
+  packet. With the DSP on its own thread (#36) and the launcher defaults of
+  #38, each deck runs the start-up a real NXS 1.44 does:
+  - three DHCP discovers (0, 1.35, 4.0 s)
+  - three ARP probes for its address
+  - three hellos (type 0x0a), about 400 ms apart
+  - three each of the MAC, IP and number claims (0x00, 0x02, 0x04)
+  - keep-alives (0x06) every 2.7 s, where a real deck sends them every 2.0 s
+
+  That is about 0.74x real time (macOS arm64, two decks at about 190% CPU
+  each).
+- **The second deck takes the next free number on AUTO:** players 1 and 2.
+  Each then sends the other its status (UDP 50002, type 0x0a, 284 bytes)
+  four to five times a second. Neither ARPs for the other: a keep-alive
+  carries its sender's MAC.
+- **A Linux peer on the segment** (another emulator's NIC through a stream
+  or dgram netdev) needs the EtherC to pad its short frames: its ARP
+  replies are 42 bytes.
+
 ## One QEMU at a time
 
 Run QEMU serially. Several TCG instances distort the timing races this firmware
