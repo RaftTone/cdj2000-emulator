@@ -20,8 +20,10 @@ cd "$(dirname "$0")/.."
 H=$OUT/hub
 rm -rf "$H" "$OUT/a" "$OUT/b" "runs/tmp-$A" "runs/tmp-$B"
 mkdir -p "$H"
-cp -c "$CARD" "$H/cardA.img"
-cp -c "$CARD" "$H/cardB.img"
+# a copy-on-write clone where the file system has one: macOS `cp -c`, GNU `cp --reflink=auto` (cp -c is something else there)
+if [ "$(uname)" = Darwin ]; then CLONE="cp -c"; else CLONE="cp --reflink=auto"; fi
+$CLONE "$CARD" "$H/cardA.img"
+$CLONE "$CARD" "$H/cardB.img"
 # nohup and no deadline worth the name: the hub must outlive this script and a closed shell (it used to end by itself
 # after 3600 s, and the decks then ran on alone: "Connection reset by peer").  Why it ended is in hub/events.jsonl.
 nohup .venv/bin/python -m tools.cdj_main.link_hub --sync --decks 2 --seconds "${HUB_SECONDS:-86400}" \

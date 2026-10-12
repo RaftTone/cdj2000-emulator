@@ -1673,6 +1673,18 @@ def plan_coverage(name: str = "keys") -> list[str]:
 
 
 # ------------------------------------------------------------------- CLI ----
+def parse_sequence_item(item: str) -> tuple[str, int, int]:
+    """BUTTON:HOLD_MS:GAP_MS -> (button, hold, gap); BUTTON:HOLD_MS keeps the board's 300 ms gap; a bare BUTTON holds
+    100 ms.  A bare BYTE:BIT name uses ':' too, so three or more fields are split from the right, and two fields
+    whose first is a number are a BYTE:BIT name, not a hold."""
+    parts = item.split(":")
+    if len(parts) > 2:
+        return ":".join(parts[:-2]), int(parts[-2]), int(parts[-1])
+    if len(parts) == 2 and not parts[0].isdigit():
+        return parts[0], int(parts[1]), 300
+    return item, 100, 300
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1691,8 +1703,8 @@ def main(argv: list[str] | None = None) -> int:
     press.add_argument("--gap-ms", type=int, default=None,
                        help="quiet time after the press in guest ms (default: the board's gap, 300 ms)")
     press.add_argument("--repeat", type=int, default=1)
-    seq = sub.add_parser("sequence", help="presses with exact guest-time spacing: BUTTON:HOLD_MS:GAP_MS ...")
-    seq.add_argument("items", nargs="+", help="BUTTON:HOLD_MS:GAP_MS, e.g. 17.0:30:40 17.1:30:0; the next "
+    seq = sub.add_parser("sequence", help="presses with exact guest-time spacing: BUTTON[:HOLD_MS[:GAP_MS]] ...")
+    seq.add_argument("items", nargs="+", help="BUTTON:HOLD_MS:GAP_MS, e.g. 17.0:30:40 17.1:30:0 (delete:30 holds 30 ms, gap 300; a bare button 100/300); the next "
                      "press goes down HOLD+GAP ms of guest time after this one (floor ~10 ms)")
     press.add_argument("--gap", type=float, default=0.0,
                        help="host-side seconds between repeats")
@@ -1912,14 +1924,7 @@ def main(argv: list[str] | None = None) -> int:
                     else:
                         print(panel.press(args.button, args.hold_ms, args.gap_ms))
             elif args.command == "sequence":
-                parsed = []
-                for item in args.items:
-                    parts = item.split(":")
-                    # a bare BYTE:BIT name uses ':' too, so the numbers are the last two fields
-                    button = ":".join(parts[:-2]) if len(parts) > 2 else parts[0]
-                    hold_gap = parts[-2:] if len(parts) > 2 else []
-                    hold, gap = (int(hold_gap[0]), int(hold_gap[1])) if len(hold_gap) == 2 else (100, 300)
-                    parsed.append((button, hold, gap))
+                parsed = [parse_sequence_item(item) for item in args.items]
                 print(" ".join(str(i) for i in panel.sequence(parsed)))
             elif args.command == "ack":
                 print(panel.ack(args.id))

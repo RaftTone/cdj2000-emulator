@@ -348,16 +348,21 @@ def err_matching(run: Run, pattern: str, after: int = 0):
     return check
 
 
-def turn_down(run: Run, steps: int, since: int) -> None:
+PREVIEW_LIST = "0007"       # the previews of a list of lists (the root, the playlists)
+PREVIEW_TRACKS = "000a"     # the previews of a track list
+
+
+def turn_down(run: Run, steps: int, since: int, kind: str = PREVIEW_LIST) -> None:
     """Turn the select encoder STEPS clicks down, one at a time: after each click wait for the browse preview request
-    of the row it should have reached (or a later one) and click again when it does not come.  The GUI drops a click
+    of the row it should have reached (or a later one) and click again when it does not come.  KIND is the list the
+    previews belong to: PREVIEW_LIST for the root and the playlists, PREVIEW_TRACKS inside a playlist.  The GUI drops a click
     that lands while it refreshes its list; sent blind with 0.3 s of wall time between them, the cursor stayed on row 0
     in runs/emu-b1 ("no preview of row 4").  A click that came late is not repeated: any row at or past the wanted
     one counts."""
     def reached(row: int):
         def check():
             for _, words in run.requests(since):
-                m = re.match(r"^0000 0001 000b 0007 0002 ([0-9a-f]{4})$", words)
+                m = re.match(r"^0000 0001 000b %s 0002 ([0-9a-f]{4})$" % kind, words)
                 if m and int(m.group(1), 16) >= visible_row(row):
                     return words
             return None
@@ -426,7 +431,7 @@ def scenario(run: Run, args) -> None:
     run.wait("list", payload_after(run, mark), 30)
     run.wait("settle", lambda: run.guest() >= got[0] + 3, 30)
 
-    turn_down(run, args.track_row, mark)
+    turn_down(run, args.track_row, mark, PREVIEW_TRACKS)
     mark = len(run.main_lines())
     got = run.press_for("load", "17.0", request_matching(run, mark, r"^0000 0007 "), 20)
     if not got:
@@ -547,7 +552,8 @@ def then_keys(run: Run, spec: str, name: str = "then") -> None:
             for gkey, gsecs in group:
                 button, _, hold = gkey.partition("@")
                 interval = max(10, round(float(gsecs) * 1000)) if sub_second((gkey, gsecs)) else 0
-                hold_ms = int(hold) if hold else max(5, min(100, interval // 2))
+                # a press that carries a normal pause (interval 0) holds like every other normal press: 100 ms
+                hold_ms = int(hold) if hold else (max(5, min(100, interval // 2)) if interval else 100)
                 gap_ms = max(0, interval - hold_ms) if interval else 300
                 batch.append(f"{button}:{hold_ms}:{gap_ms}")
             at = run.guest()

@@ -161,7 +161,10 @@ class DenseFrames:
             except OSError:
                 pass        # the simulator is still writing it; the next sweep takes it
             except Exception:
-                path.unlink(missing_ok=True)
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass    # on Windows a file the simulator still has open cannot go; the next sweep takes it
 
     def _run(self) -> None:
         lo, hi = self.window

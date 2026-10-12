@@ -50,3 +50,25 @@ def test_sweep_keeps_thinned_pngs_deletes_every_ppm_and_writes_a_gif(tmp_path):
     assert len(list((tmp_path / "png").glob("*.png"))) == 10
     assert dense.stop() == 10
     assert (tmp_path / "out.gif").stat().st_size > 0
+
+
+def test_sweep_survives_a_file_that_cannot_be_deleted(tmp_path, monkeypatch):
+    """On Windows a PPM the simulator still has open raises PermissionError on delete; that must not end the thread."""
+    dense = fa.DenseFrames(tmp_path, (0, 100), 10, lambda: None)
+    (tmp_path / "png").mkdir()
+    _ppm(tmp_path / "f000001-t00001.0000.ppm", 1)
+    _ppm(tmp_path / "f000002-t00002.0000.ppm", 2)
+    real_unlink = Path.unlink
+
+    def unlink(self, missing_ok=False):
+        if self.name.startswith("f000001"):
+            raise PermissionError(13, "in use", str(self))
+        return real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    monkeypatch.setattr(fa, "ppm_to_png", lambda src, dst: (_ for _ in ()).throw(ValueError("bad frame")))
+    dense.sweep()                                   # neither the ValueError nor the PermissionError escapes
+    assert [p.name for p in tmp_path.glob("*.ppm")] == ["f000001-t00001.0000.ppm"]
+    monkeypatch.setattr(Path, "unlink", real_unlink)
+    dense.sweep()                                   # the next sweep takes it
+    assert not list(tmp_path.glob("*.ppm"))

@@ -1032,3 +1032,13 @@ def test_needle_touches_the_pad_and_lifts():
 def test_direction_forces_the_lever_level():
     assert _sent_by(lambda panel: panel.direction(True)) == ["level 15 02 0"]
     assert _sent_by(lambda panel: panel.direction(False)) == ["level 15 02 1"]
+
+
+def test_sequence_items_keep_the_numbers_they_carry():
+    from tools.cdj_main.panel_control import parse_sequence_item as parse
+    assert parse("17.0:30:40") == ("17.0", 30, 40)
+    assert parse("delete:30") == ("delete", 30, 300)        # used to drop the 30 and hold 100
+    assert parse("delete:30:0") == ("delete", 30, 0)
+    assert parse("delete") == ("delete", 100, 300)
+    assert parse("21:2") == ("21:2", 100, 300)              # a bare BYTE:BIT name
+    assert parse("21:2:30:40") == ("21:2", 30, 40)

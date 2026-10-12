@@ -99,3 +99,57 @@ def test_after_three_lost_clicks_it_gives_up_on_that_row_and_goes_on(monkeypatch
     gui = FakeGui(drop=[True, True, True])
     cs.turn_down(gui, 1, 0)
     assert gui.clicks == 3 and gui.row == 0
+
+
+class FakeTrackList(FakeGui):
+    """A track list: its previews carry 000a, those of the playlist list before it carry 0007 (runs/tmp-6380)."""
+
+    def __init__(self, drop=()):
+        super().__init__(drop)
+        self.lines = [(0.0, "0000 0001 000b 0007 0002 0004")]      # the playlist list, row 4, from before the ENTER
+
+    def panel(self, *words, timeout=30):
+        self.clicks += 1
+        if not (self.drop.pop(0) if self.drop else False):
+            self.row += 1
+            self.lines.append((float(self.clicks), "0000 0001 000b 000a 0002 %04x" % self.row))
+
+
+def test_a_track_list_click_is_seen_in_the_000a_previews_and_not_by_a_playlist_preview(monkeypatch):
+    monkeypatch.setattr(cs.time, "sleep", lambda s: None)
+    gui = FakeTrackList()
+    cs.turn_down(gui, 1, 0, cs.PREVIEW_TRACKS)
+    assert gui.row == 1 and gui.clicks == 1 and gui.repeats == []     # one click, not three
+
+
+def test_a_dropped_click_in_a_track_list_is_repeated(monkeypatch):
+    monkeypatch.setattr(cs.time, "sleep", lambda s: None)
+    gui = FakeTrackList(drop=[True, False])
+    cs.turn_down(gui, 1, 0, cs.PREVIEW_TRACKS)
+    assert gui.row == 1 and gui.clicks == 2 and gui.repeats == ["turn"]
+
+
+def test_a_playlist_preview_from_before_the_enter_does_not_satisfy_a_track_list_click(monkeypatch):
+    monkeypatch.setattr(cs.time, "sleep", lambda s: None)
+    gui = FakeTrackList(drop=[True, True, True])
+    cs.turn_down(gui, 1, 0, cs.PREVIEW_TRACKS)
+    assert gui.clicks == 3 and gui.row == 0                           # the 0007 row 4 in the list did not count
+
+
+def run_then_keys(monkeypatch, spec):
+    sent = []
+    monkeypatch.setattr(cs.subprocess, "run", lambda cmd, **kw: (sent.append(cmd), SimpleNamespace(
+        stdout="1 2 3", stderr=""))[1])
+    run = SimpleNamespace(port=6480, err=cs.ROOT / "no-such-qemu.err", out=cs.ROOT / "no-such-dir",
+                          frame=cs.ROOT / "no-such-frame", guest=lambda: 0.0, wait=lambda *a, **k: True)
+    cs.then_keys(run, spec)
+    return sent[0][sent[0].index("sequence") + 1:]
+
+
+def test_the_last_press_of_a_fast_group_with_a_normal_pause_holds_like_every_other_normal_press(monkeypatch):
+    batch = run_then_keys(monkeypatch, "17.0:0.07,17.1:0.07,17.0:3")
+    assert batch == ["17.0:35:35", "17.1:35:35", "17.0:100:300"]
+
+
+def test_a_hold_given_with_at_wins(monkeypatch):
+    assert run_then_keys(monkeypatch, "17.0@30:0.07,17.1@20:3") == ["17.0:30:40", "17.1:20:300"]
