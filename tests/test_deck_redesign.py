@@ -294,13 +294,16 @@ def test_nxs_window_attaches_and_closing_it_stops_owned_boards(tmp_path, monkeyp
                                                             media, trace_media,
                                                             capture_dsp_tx):
     from tools.cdj_main import nxs_vm
-    for name in ('bin/cdj-run', 'build/qemu/build/qemu-system-sh4',
+    for name in ('bin/cdj-run', 'bin/cdj-gui-run', 'build/qemu/build/qemu-system-sh4',
                  'firmware/nxs/main-firmware.bin', 'firmware/nxs/gui-boot-memory.elf',
                  'firmware/nxs/gui-flash-image.bin'):
         path = tmp_path / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.touch()
     monkeypatch.setattr(nxs_vm, 'ROOT', tmp_path)
+    # The default GUI is the fast core, found through tools.paths in the real
+    # checkout, where a machine that has not built it has none.
+    monkeypatch.setattr(nxs_vm, 'GUI_RUN', tmp_path / 'bin/cdj-gui-run')
     argv = ['nxs_vm', 'run', '--ui', '--gui-head-start', '0']
     if media:
         media_path = tmp_path / 'track.img'

@@ -132,7 +132,7 @@ def test_gui_firmware_override_launches_with_generated_board_and_records_it(
 
 
 def test_stop_request_cleanly_stops_owned_processes(tmp_path, monkeypatch):
-    for name in ('bin/cdj-run', 'build/qemu/build/qemu-system-sh4',
+    for name in ('bin/cdj-run', 'bin/cdj-gui-run', 'build/qemu/build/qemu-system-sh4',
                  'firmware/nxs/main-firmware.bin',
                  'firmware/nxs/gui-boot-memory.elf',
                  'firmware/nxs/gui-flash-image.bin'):
@@ -140,6 +140,8 @@ def test_stop_request_cleanly_stops_owned_processes(tmp_path, monkeypatch):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(name.encode())
     monkeypatch.setattr(nxs_vm, 'ROOT', tmp_path)
+    # The default GUI is the fast core; see test_deck_redesign.
+    monkeypatch.setattr(nxs_vm, 'GUI_RUN', tmp_path / 'bin/cdj-gui-run')
     monkeypatch.setattr(nxs_vm, 'occupied_local_ports', lambda base, debug: [])
     monkeypatch.setattr(nxs_vm.sys, 'argv', [
         'nxs_vm', 'run', '--seconds', '60', '--lightweight', '--debug',
