@@ -200,7 +200,11 @@ static void timer_fire(bf531 *s, int n)
         s->timer_status |= 1u << n;
         sic_set(s, IRQ_TIMER0 + n, 1);
     }
-    t->due = t->period ? t->due + sclk_to_cclk(s, t->period) : NEVER;
+    uint64_t step = sclk_to_cclk(s, t->period);
+
+    /* A period under one core cycle (CSEL can shift a small one to 0) still
+     * moves on: advance() fires until the timer is ahead of the clock. */
+    t->due = t->period ? t->due + (step ? step : 1) : NEVER;
 }
 
 static uint32_t timer_read(bf531 *s, uint32_t off)
@@ -226,6 +230,9 @@ static uint32_t timer_read(bf531 *s, uint32_t off)
         }
         }
         return 0;
+    }
+    if (off >= TIMER0 + 3 * 0x10) {
+        return 0;               /* 0x630..0x63C: there is no fourth timer */
     }
     bf531_timer *t = &s->timer[(off - TIMER0) / 0x10];
 
@@ -256,6 +263,9 @@ static void timer_write(bf531 *s, uint32_t off, uint32_t v)
                 sic_set(s, IRQ_TIMER0 + n, (s->timer_status >> n) & 1);
             }
         }
+        return;
+    }
+    if (off >= TIMER0 + 3 * 0x10) {
         return;
     }
     bf531_timer *t = &s->timer[(off - TIMER0) / 0x10];
@@ -477,6 +487,9 @@ static void sport1_tx_send(bf531 *s)
     size_t len = (d->reg[D_XCOUNT / 4] & 0xFFFF) * dma_elem(d);
     static uint8_t pkt[0x10000 * 4];     /* X_COUNT's ceiling of words */
 
+    if (len > sizeof(pkt)) {
+        len = sizeof(pkt);      /* WDSIZE 3 is reserved; dma_elem makes it 8 bytes */
+    }
     for (size_t i = 0; i < len; i++) {
         pkt[i] = mem_read(s, d->reg[D_START / 4] + i, 1);
     }

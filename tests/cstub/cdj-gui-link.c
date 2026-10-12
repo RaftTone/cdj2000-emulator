@@ -476,6 +476,51 @@ static void test_dma(void)
     bf531_free(s);
 }
 
+/* Register values only a broken guest writes, which left the model's arrays
+ * or never let it return. */
+static void test_register_bounds(void)
+{
+    static const uint8_t spin[] = { 0x00, 0x80, 0xA0, 0xFF, 2, 0, 0, 0, 0x00, 0x80, 0x00, 0x20 };
+    bf531_host host = { .sport1_rx = host_rx, .sport1_tx = host_tx };
+    bf531 *s = bf531_new(1 << 20, &host, NULL);
+
+    assert(bf531_boot_ldr(s, spin, sizeof(spin)) == 0);
+
+    /* 0x630..0x63C is no fourth timer: it reads zero, and a write there used
+     * to land in what follows the three timers (TIMER_STATUS, DMA0). */
+    bf531_write(s, MMR(0xC00), 0x11223344, 4);              /* DMA0_NEXT_DESC_PTR */
+    bf531_write(s, MMR(0xC04), 0x55667788, 4);              /* DMA0_START_ADDR */
+    for (unsigned off = 0x630; off < 0x640; off += 4) {
+        bf531_write(s, MMR(off), 0xDEADBEEF, 4);
+        assert(bf531_read(s, MMR(off), 4) == 0);
+    }
+    assert(bf531_read(s, MMR(0xC00), 4) == 0x11223344);
+    assert(bf531_read(s, MMR(0xC04), 4) == 0x55667788);
+    assert(bf531_read(s, MMR(0x648), 4) == 0);              /* TIMER_STATUS */
+
+    /* A transmit with the reserved word size 3 and the largest count stays
+     * inside the packet buffer (it used to write 524280 bytes into 262144). */
+    tx_len = 0;
+    bf531_write(s, DMA4(0x04), 0x3000, 4);
+    bf531_write(s, DMA4(0x10), 0xFFFF, 2);
+    bf531_write(s, DMA4(0x14), 8, 2);
+    bf531_write(s, DMA4(0x08), 0x0001 | 0x000C | 0x0080, 2);
+    bf531_write(s, MMR(0x900), 1, 2);                       /* TSPEN */
+    bf531_run(s, 400000);
+    assert(tx_len == 0x40000);
+    bf531_write(s, DMA4(0x08), 0, 2);
+
+    /* A timer period under one core cycle: SSEL 1 with CSEL 3 shifts a
+     * period of 1 to nothing, and the timer never passed the clock. */
+    bf531_write(s, MMR(0x004), 0x0031, 2);                  /* PLL_DIV */
+    bf531_write(s, MMR(0x608), 1, 4);                       /* TIMER0_PERIOD */
+    bf531_write(s, MMR(0x600), 0x0001 | 0x0010, 2);         /* PWM_OUT, IRQ_ENA */
+    bf531_write(s, MMR(0x640), 1, 2);                       /* TIMER_ENABLE */
+    bf531_run(s, 1000);
+    assert(bf531_read(s, MMR(0x648), 4) & 1);               /* TIMIL0 */
+    bf531_free(s);
+}
+
 /* The dsp32alu forms bfin-link added (BYTEUNPACK, BYTEPACK, A0 += A1),
  * values worked from GNU sim's decode_dsp32alu_0. */
 static void test_dsp_alu(void)
@@ -523,6 +568,7 @@ int main(int argc, char **argv)
     test_flat_peer();
     test_cosim();
     test_dma();
+    test_register_bounds();
     test_dsp_alu();
     puts("ok");
     return 0;
