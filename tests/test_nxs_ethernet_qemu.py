@@ -1,8 +1,9 @@
 """Optional stopped-CPU QEMU controller integration, NOT a firmware boot test.
 
 CDJ_ETH_QEMU_TEST=1 python -m pytest -q tests/test_nxs_ethernet_qemu.py
-Requires rebuilt QEMU, local MAIN BIOS, and permission for loopback sockets.
-Uses only synthetic guest RAM descriptors/frames; firmware never executes.
+Requires rebuilt QEMU and permission for loopback sockets. Uses only
+synthetic guest RAM descriptors/frames; firmware never executes, so a blank
+flash stands in for the MAIN BIOS and no firmware is needed.
 """
 import os
 from pathlib import Path
@@ -22,9 +23,10 @@ def test_nxs_ethernet_qemu(tmp_path):
     if os.environ.get("CDJ_ETH_QEMU_TEST") != "1":
         pytest.skip("opt-in QEMU/socket controller integration")
     qemu = Path(os.environ.get("CDJ_QEMU", ROOT / "build/qemu/build/qemu-system-sh4"))
-    bios = ROOT / "firmware/nxs/main-firmware.bin"
-    if not qemu.is_file() or not bios.is_file():
-        pytest.skip("requires built SH4 QEMU and local MAIN BIOS")
+    if not qemu.is_file():
+        pytest.skip("requires built SH4 QEMU")
+    bios = tmp_path / "blank-flash.bin"  # the CPU never runs (qtest)
+    bios.write_bytes(b"\xff" * 0x10000)
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         listener.listen(1)
@@ -171,6 +173,21 @@ def test_nxs_ethernet_qemu(tmp_path):
                 assert rd(rx + 4) == (128 << 16) | len(frame)
                 assert read_mem(dest, len(frame)) == frame
                 assert rd(0x1FD400C4) == 0x10000
+                # A frame under Ethernet's 60-byte minimum, as a host stack
+                # writes an ARP reply into a stream netdev, arrives padded as
+                # the wire pads it: no runt count, no frame error.
+                wr(BASE + 0x28, 0x40000)  # FR
+                write_mem(rx, struct.pack("<I", 0xC0000000))
+                short = bytes.fromhex("ffffffffffff020000000002") + b"\x08\x06" + b"\xa5" * 28
+                assert len(short) == 42
+                peer.sendall(struct.pack("!I", len(short)) + short)
+                deadline = time.monotonic() + 5
+                while rd(rx) & 0x80000000 and time.monotonic() < deadline:
+                    time.sleep(0.005)
+                assert rd(rx) == 0x70000000
+                assert rd(rx + 4) == (128 << 16) | 60
+                assert read_mem(dest, 60) == short + bytes(18)
+                assert rd(BASE + 0x1EC) == 0
                 wr(BASE, 1)
                 assert rd(BASE + 0x18) == tx and rd(BASE + 0x20) == rx
                 assert rd(BASE + 0x100) == 0 and rd(BASE + 0x28) == 0

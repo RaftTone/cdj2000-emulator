@@ -22,6 +22,7 @@
 #include "hw/core/qdev-properties.h"
 #include "hw/core/qdev-properties-system.h"
 #include "migration/vmstate.h"
+#include "net/eth.h"
 #include "net/net.h"
 #include "system/address-spaces.h"
 #include "cdj_nxs_eth.h"
@@ -212,27 +213,36 @@ static uint64_t status_read(void *opaque, hwaddr off, unsigned size)
 static const MemoryRegionOps status_ops = {
     .read = status_read, .endianness = DEVICE_LITTLE_ENDIAN,
 };
-static ssize_t receive_frame(NetClientState *nc, const uint8_t *buf, size_t len)
+/* A frame shorter than Ethernet's 60-byte minimum is padded as the wire pads
+ * it.  The stream, dgram and socket netdevs deliver a frame as its sender
+ * wrote it, and a host stack writes a 42-byte ARP reply; only slirp and tap
+ * pad (net_peer_needs_padding).  No PHY hands the EtherC a runt from a
+ * conforming sender, so counting one (RFS bit 2) would drop an ARP reply
+ * the real board receives, and MAIN would never learn the peer's address. */
+static void deliver(NxsEth *s, const uint8_t *buf, size_t len)
 {
-    NxsEth *s = qemu_get_nic_opaque(nc);
+    uint8_t padded[ETH_ZLEN];
+    size_t padded_len = sizeof padded;
+    if (eth_pad_short_frame(padded, &padded_len, buf, len)) {
+        buf = padded; len = padded_len;
+    }
     synchronize(s);
     if (!cdj_sh7764_eth_receive(&s->core, buf, len)) fatal(s, "receive", 0);
     qemu_log("%s: rx-input=%" PRIu64 " bytes=%zu virtual_ns=%" PRId64 "\n",
              TAG(s), ++s->rx, len,
              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
     update_irq(s);
+}
+static ssize_t receive_frame(NetClientState *nc, const uint8_t *buf, size_t len)
+{
+    deliver(qemu_get_nic_opaque(nc), buf, len);
     return len;
 }
 static void link_changed(NetClientState *nc) { synchronize(qemu_get_nic_opaque(nc)); }
 /* A frame from the synchronising hub, at the guest time it arrives. */
 static void netsim_frame(void *opaque, const uint8_t *buf, unsigned len)
 {
-    NxsEth *s = opaque;
-    synchronize(s);
-    if (!cdj_sh7764_eth_receive(&s->core, buf, len)) fatal(s, "receive", 0);
-    qemu_log("%s: rx-input=%" PRIu64 " bytes=%u virtual_ns=%" PRId64 "\n",
-             TAG(s), ++s->rx, len, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
-    update_irq(s);
+    deliver(opaque, buf, len);
 }
 static NetClientInfo net_info = {
     .type = NET_CLIENT_DRIVER_NIC, .size = sizeof(NICState),
