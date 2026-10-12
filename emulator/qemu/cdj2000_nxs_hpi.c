@@ -2298,7 +2298,15 @@ static void dsp_thread_shutdown(Notifier *notifier, void *data)
     qatomic_set(&dsp_thread.quit, true);
     qemu_cond_signal(&dsp_thread.wake);
     main_unlock();
+    /* Not with the BQL held: a vCPU that was waiting for @lock in main_lock()
+     * can take it before the DSP thread does, skips its wait for @quit, and
+     * then waits for the BQL with @lock still held.  The DSP thread needs
+     * @lock to leave its loop, so the join would wait for a thread that
+     * waits for one that waits for us. */
+    bool locked = bql_locked();
+    if (locked) bql_unlock();
     qemu_thread_join(&dsp_thread.thread);
+    if (locked) bql_lock();
     info_report("nxs-dsp-thread: stopped packets=%" PRIu64
                 " lag-max=%.3fs slipped=%.3fs main-waits=%" PRIu64
                 " main-wait=%.3fs chunks=%" PRIu64 " host-breaks=%" PRIu64,
