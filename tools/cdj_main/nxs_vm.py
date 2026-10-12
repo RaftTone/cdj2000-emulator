@@ -351,6 +351,31 @@ def free_port_block(debug: bool, cosim: bool) -> int | None:
     return None
 
 
+def hold_free_port_block(debug: bool, cosim: bool) -> tuple[int | None, list[socket.socket]]:
+    """The block free_port_block() finds, with every port of it bound until
+    the caller closes the sockets, which it does just before it starts MAIN.
+
+    A block that only looked free is not reserved: MAIN binds it seconds
+    later (after the GUI's head start), and a second launcher started in
+    between found the same block free. Its MAIN then ended with "Failed to
+    find an available port", as the second of two decks started together
+    for one Pro DJ Link segment did."""
+    for base in range(DEFAULT_PORT, DEFAULT_PORT + PORT_STRIDE * PORT_TRIES, PORT_STRIDE):
+        ports = dict.fromkeys(launch_ports(base, debug) + ((base + 5,) if cosim else ()))
+        if occupied_local_ports(base, debug) or (cosim and _port_taken(base + 5)):
+            continue
+        held = []
+        try:
+            for port in ports:
+                held.append(socket.socket(socket.AF_INET, socket.SOCK_STREAM))
+                held[-1].bind(('127.0.0.1', port))
+            return base, held
+        except OSError:     # another launcher took it since the probe: the next block
+            for probe in held:
+                probe.close()
+    return None, []
+
+
 def _port_taken(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         try:
@@ -1073,18 +1098,21 @@ def main():
         parser.error(f'run directory already exists: {run}')
     if args.cosim and args.qemu_sync_profile and not UNIX_CONTROL:
         parser.error('--cosim takes --port + 5, which --qemu-sync-profile uses for the monitor here')
+    held_ports = []
     try:
         if args.port is None:
-            args.port = free_port_block(args.debug, args.cosim)
+            args.port, held_ports = hold_free_port_block(args.debug, args.cosim)
             if args.port is None:
                 parser.error(f'no free localhost port block from {DEFAULT_PORT}; pass --port')
-        occupied = occupied_local_ports(args.port, args.debug)
-        if args.cosim:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-                try:
-                    probe.bind(('127.0.0.1', args.port + 5))
-                except OSError:
-                    occupied.append(args.port + 5)
+            occupied = []       # they are this launcher's own until MAIN starts
+        else:
+            occupied = occupied_local_ports(args.port, args.debug)
+            if args.cosim:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                    try:
+                        probe.bind(('127.0.0.1', args.port + 5))
+                    except OSError:
+                        occupied.append(args.port + 5)
     except PermissionError as error:
         parser.error(f'localhost port preflight unavailable: {error}; grant socket probe permission or choose a permitted environment')
     except OSError as error:
@@ -1477,6 +1505,8 @@ def main():
                 processes.append(gui)
                 session['processes']['gui'] = gui.pid
                 time.sleep(args.gui_head_start)
+            for probe in held_ports:        # MAIN binds them now
+                probe.close()
             main_process = lifeline.popen(main_command, cwd=ROOT, env=qemu_environment(main_env), stdin=subprocess.DEVNULL, stdout=mainlog, stderr=mainlog)
             processes.append(main_process)
             session['processes']['main'] = main_process.pid

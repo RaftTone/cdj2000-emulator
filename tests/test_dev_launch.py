@@ -295,6 +295,24 @@ def test_port_defaults_to_first_free_block(monkeypatch):
     assert nxs_vm.free_port_block(True, False) is None
 
 
+def test_an_automatic_port_block_is_held_until_the_launcher_lets_it_go():
+    # Two launchers started together (two decks for one link segment) must
+    # not both take the first free block: nothing else binds it for seconds.
+    first, held_first = nxs_vm.hold_free_port_block(True, False)
+    second, held_second = nxs_vm.hold_free_port_block(True, False)
+    try:
+        assert first is not None and second is not None and first != second
+        assert set(nxs_vm.occupied_local_ports(first, True)) == set(nxs_vm.launch_ports(first, True))
+    finally:
+        for probe in held_first + held_second:
+            probe.close()
+    assert nxs_vm.occupied_local_ports(first, True) == []
+    again, held = nxs_vm.hold_free_port_block(True, False)
+    for probe in held:
+        probe.close()
+    assert again == first
+
+
 def test_dsp_thread_is_default_unless_a_mode_needs_the_synchronous_dsp():
     from types import SimpleNamespace
     base = dict(dsp_model=False, lightweight=True, cosim=False, dsp_legacy_budget=None,
