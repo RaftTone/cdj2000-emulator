@@ -6,6 +6,19 @@ import json
 from pathlib import Path
 
 
+# The clock a record's slot came from, as the board names it
+# (cdj2000_nxs_hpi.c, where it writes the capture), and what that says about timing.
+TIMING = {
+    'functional-coarse-packet-slot':
+        'functional coarse packet slots; not serializer-clock or audio timing',
+    'virtual-clock-batch':
+        'experimental virtual-time slot batches; not host audio timing',
+    'dsp-thread-virtual':
+        "slots on the DSP thread's virtual clock; not host audio timing",
+    'dsp-sysclk1-cycle':
+        'experimental slots from modeled DSP SYSCLK1 cycles; not host audio timing',
+}
+
 def tx_capture_metadata(path: Path) -> dict:
     counts = Counter()
     nonzero_counts = Counter()
@@ -34,8 +47,7 @@ def tx_capture_metadata(path: Path) -> dict:
                     not 0 <= event['word'] <= 0xffffffff or
                     event['xbuf_sequence'] <= 0 or event['packets'] < 0 or
                     event['cycles'] < 0 or event['source'] != 'genuine_xbuf' or
-                    event['clock'] not in ('functional-coarse-packet-slot',
-                                           'virtual-clock-batch')):
+                    event['clock'] not in TIMING):
                 raise ValueError(f'invalid DSP transmit capture record {sequence}')
             if clock_mode is None:
                 clock_mode = event['clock']
@@ -70,7 +82,5 @@ def tx_capture_metadata(path: Path) -> dict:
                 virtual_time_span_ns=(last_virtual_ns - first_virtual_ns
                                       if virtual_time_records else None),
                 sample_encoding='unsigned 32-bit serializer word; not PCM interpretation',
-                timing=('experimental virtual-time slot batches; not host audio timing'
-                        if clock_mode == 'virtual-clock-batch' else
-                        'functional coarse packet slots; not serializer-clock or audio timing'),
+                timing=TIMING.get(clock_mode, TIMING['functional-coarse-packet-slot']),
                 synthesized_samples=False)
