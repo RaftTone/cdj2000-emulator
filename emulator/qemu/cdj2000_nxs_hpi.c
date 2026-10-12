@@ -14,6 +14,7 @@
 #include "qemu/atomic.h"
 #include "qemu/main-loop.h"
 #include "qemu/thread.h"
+#include <sched.h>   /* sched_yield: MinGW declares it only here */
 #include "qapi/error.h"
 #include "system/runstate.h"
 #include "cdj2000_nxs_hpi.h"
