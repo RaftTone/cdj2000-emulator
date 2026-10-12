@@ -38,7 +38,7 @@ import time
 from pathlib import Path
 
 from tools.cdj_main import caution
-from tools.cdj_main.parent_watch import Lifeline, watch
+from tools.cdj_main.parent_watch import Lifeline, watch as watch_parent
 from tools.cdj_main.procs import stop_tree
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -725,7 +725,7 @@ def main() -> int:
     if args.stderr:
         print(f"# MAIN stderr -> {args.stderr}")
     lifeline = Lifeline()
-    watch(lambda: os.kill(os.getpid(), signal.SIGINT))
+    watch_parent(lambda: os.kill(os.getpid(), signal.SIGINT))
     board = lifeline.popen(
         [
             str(QEMU), "-M", "cdj2000-main",
