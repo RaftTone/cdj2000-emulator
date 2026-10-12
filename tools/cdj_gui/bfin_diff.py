@@ -250,8 +250,9 @@ def program(pre, chunk):
             '_spin: JUMP.S _spin;', '.data', '_args: .long 0, 0, 0, 0',
             '.global _first', '_first: .long 0', '.global _is_gdb', '_is_gdb: .long 0',
             '.global _cases', '_cases: .long ' + ', '.join(f'_c{k}' for k in range(len(chunk))),
-            '.section .tdata_in, "aw"', f'.incbin "{pre}.in.bin"',
-            '.section .tdata_blk, "aw"', f'.incbin "{pre}.blk.bin"']
+            # as_posix: the assembler reads a backslash in a string as an escape
+            '.section .tdata_in, "aw"', f'.incbin "{Path(pre).as_posix()}.in.bin"',
+            '.section .tdata_blk, "aw"', f'.incbin "{Path(pre).as_posix()}.blk.bin"']
     Path(pre + '.s').write_text('\n'.join(asm) + '\n')
     Path(pre + '.in.bin').write_bytes(b''.join(ins))
     Path(pre + '.blk.bin').write_bytes(b''.join(blks))
@@ -297,7 +298,10 @@ def run_chunk(pre, chunk, runner, gdb):
     shutil.copy(pre + '.elf', g_elf)
     elf_patch(g_elf, nm['_is_gdb'], 1)
     ref, first = {}, 0
-    env = {'PATH': '/usr/bin:/bin', 'BFIN_TIME_BASE': 'insn', 'BFIN_PARALLEL_WRITEBACK': '1'}
+    # The caller's environment without its BFIN_ switches (a bare POSIX PATH
+    # does not start a Windows binary that needs its DLLs).
+    env = {k: v for k, v in os.environ.items() if not k.startswith('BFIN_')}
+    env.update(BFIN_TIME_BASE='insn', BFIN_PARALLEL_WRITEBACK='1')
     while first < n:
         elf_patch(g_elf, nm['_first'], first)
         r = subprocess.run([str(gdb), '--model', 'bf531', '--environment', 'virtual',
@@ -309,6 +313,11 @@ def run_chunk(pre, chunk, runner, gdb):
             break
         ref[first + k] = 'fault'
         first += k + 1
+    if chunk and not any(isinstance(g, bytes) for g in ref.values()):
+        # Not one record: the reference did not run.  Counting every case as
+        # a GNU sim fault would report "divergent cases 0".
+        raise RuntimeError(f'{gdb} returned no record for {pre} (exit status '
+                           f'{r.returncode}): {r.stderr[-300:]!r}')
     bad = []
     for k, (h, mode, seed) in enumerate(chunk):
         g, f = ref.get(k), fast.get(k, 'missing')

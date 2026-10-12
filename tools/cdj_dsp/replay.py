@@ -481,8 +481,13 @@ def main():
         snapshot.write_bytes(data)
         event_snapshot = Path(temp) / 'events.jsonl'
         if event_data is not None:
-            if subprocess.run(['cp', '-c', str(args.events), str(event_snapshot)],
-                              stderr=subprocess.DEVNULL).returncode:
+            try:        # a copy-on-write clone where cp has one (macOS)
+                cloned = not subprocess.run(
+                    ['cp', '-c', str(args.events), str(event_snapshot)],
+                    stderr=subprocess.DEVNULL).returncode
+            except OSError:     # no cp at all (Windows)
+                cloned = False
+            if not cloned:
                 shutil.copyfile(args.events, event_snapshot)
             if file_sha256(event_snapshot) != event_data:
                 parser.error('event transcript changed while it was being snapshotted')

@@ -14,6 +14,10 @@
 #include "bf531.h"
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
 
 #define BLK 416
 
@@ -25,6 +29,9 @@ int main(int argc, char **argv)
         fprintf(stderr, "usage: %s ELF EMIT CASES FIRST NCASES\n", argv[0]);
         return 2;
     }
+#ifdef _WIN32
+    _setmode(_fileno(stdout), _O_BINARY);   /* the records are binary */
+#endif
     FILE *f = fopen(argv[1], "rb");
     size_t n = f ? fread(elf, 1, sizeof elf, f) : 0;
     uint32_t emit = strtoul(argv[2], 0, 0), cases = strtoul(argv[3], 0, 0);

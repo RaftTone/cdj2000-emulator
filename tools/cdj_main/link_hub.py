@@ -144,7 +144,11 @@ class Bpf:
     and what it writes keeps the deck's source MAC."""
 
     def __init__(self, interface: str, size: int = 1 << 20):
-        import fcntl
+        try:
+            import fcntl
+        except ImportError:     # Windows
+            raise SystemExit("link_hub: --bridge needs BPF (/dev/bpf*), which "
+                             "this system does not have") from None
         self.fd = None
         for n in range(256):
             try:

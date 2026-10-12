@@ -28,6 +28,7 @@ import argparse
 import collections
 import json
 import re
+import shutil
 import struct
 import subprocess
 import sys
@@ -207,7 +208,9 @@ def main(argv=None):
     ap.add_argument('output', type=Path)
     ap.add_argument('--tool', type=Path, required=True,
                     help='built tools/cdj_dsp/decode_crosscheck.c')
-    ap.add_argument('--objdump', default='gobjdump')
+    # Homebrew binutils names it gobjdump; a tic6x cross build tic6x-elf-objdump.
+    ap.add_argument('--objdump', default=shutil.which('gobjdump') or
+                    shutil.which('tic6x-elf-objdump') or 'objdump')
     ap.add_argument('--range', action='append', dest='ranges')
     args = ap.parse_args(argv)
     reports = []

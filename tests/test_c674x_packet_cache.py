@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -56,6 +57,6 @@ def test_decode_crosscheck_whole_image(tmp_path):
                     str(ROOT / 'tools/cdj_dsp/decode_crosscheck.c'),
                     *[str(p) for p in SOURCES if p.name != 'replay.c'],
                     '-o', str(tool), '-lm'], check=True)
-    subprocess.run(['python3', '-m', 'tools.cdj_dsp.decode_crosscheck', checkpoint,
+    subprocess.run([sys.executable, '-m', 'tools.cdj_dsp.decode_crosscheck', checkpoint,
                     str(tmp_path / 'report.json'), '--tool', str(tool),
                     '--objdump', objdump], cwd=ROOT, check=True, timeout=600)
