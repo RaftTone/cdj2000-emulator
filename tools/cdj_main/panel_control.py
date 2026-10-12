@@ -1680,8 +1680,11 @@ def parse_sequence_item(item: str) -> tuple[str, int, int]:
     parts = item.split(":")
     if len(parts) > 2:
         return ":".join(parts[:-2]), int(parts[-2]), int(parts[-1])
-    if len(parts) == 2 and not parts[0].isdigit():
-        return parts[0], int(parts[1]), 300
+    if len(parts) == 2:
+        try:
+            int(parts[0], 0)        # as button_mask reads the byte: 21 and 0x15 alike
+        except ValueError:
+            return parts[0], int(parts[1]), 300
     return item, 100, 300
 
 

@@ -1041,4 +1041,5 @@ def test_sequence_items_keep_the_numbers_they_carry():
     assert parse("delete:30:0") == ("delete", 30, 0)
     assert parse("delete") == ("delete", 100, 300)
     assert parse("21:2") == ("21:2", 100, 300)              # a bare BYTE:BIT name
+    assert parse("0x15:02") == ("0x15:02", 100, 300)        # the same name with a hex byte, as button_mask takes it
     assert parse("21:2:30:40") == ("21:2", 30, 40)
