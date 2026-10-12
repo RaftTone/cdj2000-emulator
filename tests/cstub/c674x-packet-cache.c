@@ -1258,6 +1258,121 @@ static void dt_directed_smc(void)
     test_direct = direct;
 }
 
+/* The same, with the rewritten instruction in a fetch block that lies on
+ * two host pages.  The code checks work per 4 KB host page - a board's
+ * counted writes through cdj_c674x_may_hold_code, the core's direct stores
+ * through its own page test - and a block is 32 host bytes wherever the
+ * board's memory happens to start, so its tail can be on the page after the
+ * one its first byte is on.  A write to the tail alone must still be seen.
+ *
+ * System A is placed (aligned for its type: the address is a multiple of
+ * 16) so that ram[0x50] starts a host page.  The block at 0x1040 then has
+ * its first four words, NOPs, on one page and the target (0x1050) on the
+ * next, and no other block that runs starts on that next page: the passes
+ * stop while the loop is still looping, before it could fall through into
+ * the blocks behind.  The tick word (ram[SIZE - 4]) is on that page too.
+ * With a write counter registered, as on the NXS board, nothing else moves
+ * the code generation inside these runs, so a core that marks only the page
+ * of a block's first byte keeps running the old ADDK.
+ *
+ * The page marks are hashed by page number and never cleared, so the pages
+ * are the test's own allocation, and of those a pair that
+ * cdj_c674x_may_hold_code reports clean: the outcome does not depend on
+ * what ran before in the process.  A failure reads "seed 9000 step N" (to
+ * 9003: + 1 with direct stores, + 2 with run steps). */
+static void dt_directed_straddle(void)
+{
+    enum { PAGE = 4096, PAGES = 64, HEAD = 0x50 };
+    _Static_assert(HEAD % _Alignof(System) == 0 && PAGE % _Alignof(System) == 0,
+                   "system A is aligned for its type");
+    const uint32_t code[] = {
+        0, 0, 0, 0, 0, 0, 0, 0,                         /* 1000 */
+        5u << 23 | 10u << 18 | 1u << 9 | 1u << 7 | 7u << 4 | 4 | 2, /* 1020 STW B5,*B10 */
+        3u << 29 | 5u << 23 | 128u << 7 | 0x50 | 2,     /* [B2] ADDK 128,B5 */
+        3u << 29 | 2u << 23 | 0u << 7 | 0x28 | 2 | 1,   /* [B2] MVK 0,B2 */
+        3u << 29 | 1u << 28 | 2u << 23 | 1u << 7 | 0x28 | 2 | 1, /* || [!B2] MVK 1,B2 */
+        9u << 23 | 10u << 18 | 0x3e2,                   /* || MVC TSCL,B9: the
+                                                           interpreter's, and
+                                                           the store commits
+                                                           in it */
+        8u << 7 | 0x10,                                 /* B .S1 0x1040 */
+        4u << 13,                                       /* NOP 5 */
+        0,
+        0, 0, 0, 0,                                     /* 1040: the first page */
+        3u << 23 | 1u << 7 | 0x50,                      /* 1050 ADDK k,A3 (target):
+                                                           the second page */
+        1u << 23 | 0xffffu << 7 | 0x50 | 2,             /* ADDK -1,B1 */
+        2u << 29 | (uint32_t)(-8 & 0x1fffff) << 7 | 0x10, /* [B1] B .S1 0x1020 */
+        4u << 13,                                       /* NOP 5 */
+    };
+    static unsigned char *arena;
+    static System sb;
+    static CdjC674x a, b;
+    if (!arena) arena = calloc(PAGES + 1, PAGE);
+    assert(arena);
+    unsigned char *first = arena + (PAGE - (uintptr_t)arena % PAGE) % PAGE;
+    /* Page i takes the target, the blocks behind it and the tick word;
+     * system A reaches from page i - 1 into page i + 1. */
+    System *sa = NULL;
+    for (unsigned i = 1; i + 2 < PAGES && !sa; ++i)
+        if (!cdj_c674x_may_hold_code(first + i * PAGE, 2 * PAGE))
+            sa = (System *)(void *)(first + i * PAGE - HEAD);
+    assert(sa);
+    bool direct = test_direct;
+    cdj_c674x_set_code_writes(&test_code_writes);
+    for (unsigned mode = 0; mode < 4; ++mode) {
+        memset(sa, 0, sizeof *sa);
+        memcpy(sa->ram, code, sizeof code);
+        memset(&sb, 0, sizeof sb);
+        memcpy(sb.ram, code, sizeof code);
+        ++test_epoch;
+        for (unsigned side = 0; side < 2; ++side) {
+            CdjC674x *cpu = side ? &b : &a;
+            cdj_c674x_reset(cpu, BASE);
+            cpu->cycle_tick = sys_tick;
+            cpu->cycle_opaque = side ? &sb : sa;
+            setup_smc(cpu);
+            cpu->r[1][10] = 0x1050;
+        }
+        test_direct = mode & 1;
+        cdj_c674x_set_run_steps(mode & 2);
+        count_sys = NULL;
+        cdj_c674x_set_horizon(current_horizon = &test_horizon);
+        test_horizon.until = UINT64_MAX;
+        test_horizon.break_pc = 0;
+        event_mask = 0;
+        JitPair p = {&a, &b, sa, &sb, 9000 + mode, 0};
+        while (p.step < 600 && !a.fault) {
+            unsigned status;
+            unsigned n = cdj_c674x_run(&a, sys_read, sys_write, sa, 64,
+                                       never_between, NULL, &status);
+            if (status == CDJ_C674X_RUN_FAULT) {
+                catch_up(&p);
+                step_b(&p, false);
+                break;
+            }
+            if (status == CDJ_C674X_RUN_BETWEEN) {
+                catch_up_compare(&p);
+                continue;
+            }
+            if (n) {                    /* the limit: the last packet's */
+                step_b(&p, true);
+                continue;
+            }
+            bool ra = cdj_c674x_step(&a, sys_read, sys_write, sa);
+            step_b(&p, ra);
+            if (!ra) break;
+        }
+        /* Still looping (B1): nothing ran from the blocks behind. */
+        assert(a.r[0][3] && a.r[1][1] && p.step >= 600);
+    }
+    ++test_epoch;                       /* no host pointer into A is kept */
+    test_horizon.until = 0;
+    cdj_c674x_set_horizon(current_horizon = NULL);
+    cdj_c674x_set_run_steps(false);
+    test_direct = direct;
+}
+
 /* The compact stack transfers on the lean path: a Dpp pair turned
  * unaligned after its schedule was built, and a Dpp writing B15 in parallel
  * with a (predicated) ADDK to it (the interpreter's faults; the lean path
@@ -1482,6 +1597,7 @@ int main(void)
     dt_directed_faucr();
     dt_directed_ctl();
     dt_directed_smc();
+    dt_directed_straddle();
     {
         CdjC674xJitStats s0, s1;
         cdj_c674x_jit_stats(&s0);

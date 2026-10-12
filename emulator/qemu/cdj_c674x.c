@@ -5469,7 +5469,12 @@ static bool entry_current(CdjC674xCacheEntry *e, void *opaque, bool in_run)
         e->host_opaque = opaque;
         e->host_epoch = *fetch_epoch;
         e->host_valid = true;
-        for (unsigned i = 0; i < e->blocks; ++i) code_page_mark(e->host[i]);
+        /* both ends: a block is 32 host bytes wherever the board's memory
+         * starts, so its tail can lie on the page after its first byte's */
+        for (unsigned i = 0; i < e->blocks; ++i) {
+            code_page_mark(e->host[i]);
+            code_page_mark(e->host[i] + 31);
+        }
         e->checked_gen = code_gen;
     }
     return true;
