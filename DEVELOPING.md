@@ -171,6 +171,16 @@ cc -shared -fPIC -I build/qemu/include/plugins $(pkg-config --cflags glib-2.0) \
   emulator/qemu-plugins/rangecount.c -o build/rangecount.so
 ```
 
+On Windows (MSYS2 MINGW64) a plugin is a DLL, linked the way QEMU links its
+own: with `plugins/win32_linker.c` and the import library the QEMU build
+leaves in `build/plugins`. With QEMU in `/c/qemu-src`:
+
+```sh
+cc -shared -I /c/qemu-src/include/plugins $(pkg-config --cflags glib-2.0) \
+  emulator/qemu-plugins/rangecount.c /c/qemu-src/plugins/win32_linker.c \
+  -L /c/qemu-src/build/plugins -lqemu_plugin_api -o build/rangecount.dll
+```
+
 Then pass it to QEMU, for example through `boot_vm.py`:
 
 ```sh

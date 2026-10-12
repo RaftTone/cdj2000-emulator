@@ -15,6 +15,7 @@ from tools import paths
 
 ROOT = Path(__file__).resolve().parents[1]
 QEMU_SRC = Path(os.environ.get("CDJ_QEMU_SRC", ROOT / "build/qemu"))
+WINDOWS = os.name == "nt"
 
 # At 0xa0000000, the SH-4 reset address:
 #   0: mov  #5,r1
@@ -36,14 +37,24 @@ def build_plugin(tmp_path):
                           capture_output=True, text=True)
     if glib.returncode:
         pytest.skip("requires glib-2.0 development files")
-    plugin = tmp_path / "rangecount.so"
-    subprocess.run([
-        cc, "-std=gnu11", "-Wall", "-Wextra", "-Wno-unused-parameter",
-        "-Werror", "-shared", "-fPIC", "-I", str(header.parent),
-        *glib.stdout.split(),
-        str(ROOT / "emulator/qemu-plugins/rangecount.c"),
-        "-o", str(plugin),
-    ], check=True)
+    command = [cc, "-std=gnu11", "-Wall", "-Wextra", "-Wno-unused-parameter",
+               "-Werror", "-shared", "-I", str(header.parent),
+               *glib.stdout.split(),
+               str(ROOT / "emulator/qemu-plugins/rangecount.c")]
+    if WINDOWS:
+        # A plugin is a DLL there, and its imports from QEMU are bound at load
+        # time: QEMU's own plugins link win32_linker.c and the import library
+        # the build leaves in build/plugins.
+        api = QEMU_SRC / "build/plugins/libqemu_plugin_api.a"
+        if not api.exists():
+            pytest.skip(f"{api} is not there; build QEMU with plugin support")
+        plugin = tmp_path / "rangecount.dll"
+        command += [str(QEMU_SRC / "plugins/win32_linker.c"),
+                    "-L", str(api.parent), "-lqemu_plugin_api"]
+    else:
+        plugin = tmp_path / "rangecount.so"
+        command += ["-fPIC"]
+    subprocess.run(command + ["-o", str(plugin)], check=True)
     return plugin
 
 
@@ -52,18 +63,33 @@ def run_qemu(tmp_path, plugin_args):
     if not qemu:
         pytest.skip(f"{paths.QEMU} is not there; set CDJ_QEMU")
     (tmp_path / "loop.bin").write_bytes(LOOP)
+    # The report is written when QEMU exits by itself.  SIGTERM does that; on
+    # Windows terminate() kills the process outright, so the monitor is told
+    # to quit there.
     process = subprocess.Popen(
         [qemu, "-M", "cdj2000-main", "-bios", "loop.bin", "-display", "none",
-         "-monitor", "none", "-serial", "null", "-serial", "null",
-         "-serial", "null", "-plugin", plugin_args],
+         "-monitor", "stdio" if WINDOWS else "none", "-serial", "null",
+         "-serial", "null", "-serial", "null", "-plugin", plugin_args],
         cwd=tmp_path, env=paths.qemu_environment(),
+        stdin=subprocess.PIPE if WINDOWS else None,
         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
     try:
-        process.wait(timeout=1)
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            if WINDOWS:
+                # Wait with the pipe open: the stdio monitor can lose a line
+                # that is followed at once by end of file (1 run in 12 here).
+                process.stdin.write("quit\n")
+                process.stdin.flush()
+                process.wait(timeout=10)
+            else:
+                process.terminate()     # QEMU exits cleanly, so the atexit report runs
+        _, stderr = process.communicate(timeout=10)
     except subprocess.TimeoutExpired:
-        process.terminate()     # QEMU exits cleanly, so the atexit report runs
-    _, stderr = process.communicate(timeout=10)
-    if "plugin" in stderr and "not supported" in stderr:
+        process.kill()                  # leave no QEMU behind a failed test
+        raise
+    if "plugin interface not enabled" in stderr:
         pytest.skip("this qemu-system-sh4 has no plugin support")
     return stderr
 
