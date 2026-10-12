@@ -156,6 +156,39 @@ For source-level stepping and breakpoints, connect an SH-4-capable GDB to the
 localhost endpoint printed by the launcher (base port + 3), using symbols that
 match your firmware build.
 
+### Count the instructions in an address range
+
+`emulator/qemu-plugins/rangecount.c` is a QEMU TCG plugin. It counts the
+instructions that run in one address range, and it prints the running count
+each time an instruction at a mark address runs. The difference between two
+marks is the cost of the code between them, in instructions. Use it to compare
+two versions of a routine, or to find where MAIN spends its time.
+
+Build it against the QEMU tree that `scripts/build-qemu-sh4.sh` built:
+
+```sh
+cc -shared -fPIC -I build/qemu/include/plugins $(pkg-config --cflags glib-2.0) \
+  emulator/qemu-plugins/rangecount.c -o build/rangecount.so
+```
+
+Then pass it to QEMU, for example through `boot_vm.py`:
+
+```sh
+--qemu-arg=-plugin \
+--qemu-arg=build/rangecount.so,lo=0x0c001000,hi=0x0c002000,mark=0x0c001000,mark=0x0c0010f0
+```
+
+- `lo` and `hi` bound the range. `hi` is exclusive.
+- Each `mark` (up to 16) prints `rangecount MARK COUNT` to stderr.
+- `prof=FILE` also writes a profile: one `ADDRESS COUNT` line for each 16-byte
+  block of the range. It charges whole translation blocks, so it is an
+  approximation. The mark counts and the total are exact.
+- The plugin clears the top three address bits, so the P1 and P2 aliases of an
+  address match.
+
+`tests/test_rangecount_plugin.py` checks the counts on a small loop. It needs
+`CDJ_QEMU_SRC` (default `build/qemu`) and `CDJ_QEMU`, and it skips without them.
+
 Request an on-demand DSP checkpoint at the next safe DSP/HPI boundary while
 the run is active:
 
