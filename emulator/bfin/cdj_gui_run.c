@@ -58,6 +58,9 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #define FLASH_APP 0x10000u
 
@@ -69,6 +72,7 @@ typedef struct runner {
     size_t rgb_size;
     unsigned w, h;
     uint64_t published_n;
+    int republish;              /* the last frame did not reach r->out */
     bf531 *s;
     cdj_link *link;
     double cclk;                /* core cycles per second of guest time */
@@ -92,6 +96,22 @@ static unsigned on_rx(void *opaque, uint8_t *dst, unsigned cap, uint32_t addr)
     return cdj_link_rx(((runner *)opaque)->link, dst, cap, addr);
 }
 
+/* Put the finished frame where the published one is. rename() does that on
+ * POSIX; on Windows it refuses an existing destination, and the replacing
+ * move fails while a reader has the frame open. */
+static int replace_file(const char *from, const char *to)
+{
+#ifdef _WIN32
+    return MoveFileExA(from, to, MOVEFILE_REPLACE_EXISTING) ? 0 : -1;
+#else
+    if (rename(from, to) != 0) {
+        perror(to);
+        return -1;
+    }
+    return 0;
+#endif
+}
+
 static void on_frame(void *opaque, const uint16_t *px, unsigned w, unsigned h)
 {
     runner *r = opaque;
@@ -104,7 +124,7 @@ static void on_frame(void *opaque, const uint16_t *px, unsigned w, unsigned h)
         r->raw = realloc(r->raw, n * 2);
         r->rgb_size = size;
         r->published_n = 0;
-    } else if (!memcmp(r->raw, px, n * 2)) {
+    } else if (!r->republish && !memcmp(r->raw, px, n * 2)) {
         return;                 /* the PPI rescans an unchanged picture */
     }
     memcpy(r->raw, px, n * 2);
@@ -115,10 +135,11 @@ static void on_frame(void *opaque, const uint16_t *px, unsigned w, unsigned h)
             r->rgb[k * 3 + j] = (c[j] << 3) | (c[j] >> 2);
         }
     }
-    if (r->published_n && w == r->w && h == r->h &&
+    if (!r->republish && r->published_n && w == r->w && h == r->h &&
         !memcmp(r->rgb, r->published, size)) {
         return;
     }
+    r->republish = 0;
     memcpy(r->published, r->rgb, size);
     r->w = w;
     r->h = h;
@@ -129,8 +150,11 @@ static void on_frame(void *opaque, const uint16_t *px, unsigned w, unsigned h)
     }
     fprintf(f, "P6\n%u %u\n255\n", w, h);
     fwrite(r->rgb, 1, size, f);
-    if (fclose(f) == 0 && rename(r->tmp, r->out) != 0) {
-        perror(r->out);
+    if (fclose(f) == 0 && replace_file(r->tmp, r->out) != 0) {
+        /* Not published: the next scan of this picture writes it again,
+         * rather than leave an older frame on show until the screen changes. */
+        r->published_n--;
+        r->republish = 1;
     }
 }
 
@@ -172,6 +196,36 @@ static double now(void)
     return t.tv_sec + t.tv_nsec / 1e9;
 }
 
+/* Sleep() and MinGW's nanosleep wake on the 15.6 ms system tick; the
+ * high-resolution timer bin/cdj-run waits on (patch 02) wakes on time. */
+static void wall_sleep(double seconds)
+{
+#ifdef _WIN32
+    static HANDLE timer;
+    static int tried;
+    LARGE_INTEGER due;
+
+    if (!tried) {
+        tried = 1;
+        timer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                       TIMER_ALL_ACCESS);
+        if (!timer) {
+            timer = CreateWaitableTimerW(NULL, TRUE, NULL);
+        }
+    }
+    due.QuadPart = -(LONGLONG)(seconds * 1e7);
+    if (timer && SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE)) {
+        WaitForSingleObject(timer, INFINITE);
+    } else {
+        Sleep((DWORD)(seconds * 1000));
+    }
+#else
+    struct timespec ts = { (time_t)seconds, (long)((seconds - (time_t)seconds) * 1e9) };
+
+    nanosleep(&ts, NULL);
+#endif
+}
+
 static double env_num(const char *name, double fallback)
 {
     const char *v = getenv(name);
@@ -195,9 +249,14 @@ static void warn_unsupported(void)
         /* gdb-only switches with nothing to do here */
         "BFIN_PARALLEL_WRITEBACK", "BFIN_EXCEPTION_TRACE",
     };
+#ifdef _WIN32
+    char **env = _environ;
+#else
     extern char **environ;
+    char **env = environ;
+#endif
 
-    for (char **e = environ; *e; e++) {
+    for (char **e = env; e && *e; e++) {
         size_t n = strcspn(*e, "=");
         int ok = strncmp(*e, "BFIN_", 5) != 0;
 
@@ -279,7 +338,9 @@ int main(int argc, char **argv)
     strcpy(r.tmp, r.out);
     strcat(r.tmp, ".tmp");
 
+#ifdef SIGPIPE
     signal(SIGPIPE, SIG_IGN);
+#endif
     signal(SIGTERM, on_stop_signal);
     signal(SIGINT, on_stop_signal);
     warn_unsupported();
@@ -377,11 +438,7 @@ int main(int argc, char **argv)
             double ahead = (double)(bf531_cycles(s) - r.epoch) / r.cclk - wall;
 
             if (ahead > 0.0003) {
-                double sleep_s = ahead - 0.0002;
-                struct timespec ts = { (time_t)sleep_s,
-                                       (long)((sleep_s - (time_t)sleep_s) * 1e9) };
-
-                nanosleep(&ts, NULL);
+                wall_sleep(ahead - 0.0002);
             } else if (-ahead > lag) {
                 t0 += -ahead - lag;     /* forgive the excess once */
             }

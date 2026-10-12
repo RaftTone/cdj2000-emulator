@@ -7,16 +7,210 @@
  */
 #define _GNU_SOURCE     /* memmem */
 #include "cdj_link.h"
-#include <arpa/inet.h>
 #include <errno.h>
+#include <stdlib.h>
+#include <string.h>
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#else
+#include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
-#include <stdlib.h>
-#include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#endif
+
+/* ---- the host's sockets -------------------------------------------------
+ * Winsock (MinGW) has the same calls under other names: a socket is closed
+ * with closesocket, made non-blocking with ioctlsocket, and its errors come
+ * from WSAGetLastError, not errno. A SOCKET is kept in an int as bin/cdj-run
+ * keeps it (patch 02): the handles Windows gives out fit. */
+#ifdef _WIN32
+#define SOCK_EINTR WSAEINTR
+#define sock_send(fd, p, n) send((SOCKET)(fd), (const char *)(p), (int)(n), 0)
+#define sock_recv(fd, p, n) recv((SOCKET)(fd), (char *)(p), (int)(n), 0)
+
+static void sock_start(void)
+{
+    WSADATA data;
+
+    WSAStartup(MAKEWORD(2, 2), &data);
+}
+
+static int sock_errno(void)
+{
+    return WSAGetLastError();
+}
+
+static int sock_would_block(int e)
+{
+    return e == WSAEWOULDBLOCK;
+}
+
+static const char *sock_strerror(int e)
+{
+    static char text[32];
+
+    snprintf(text, sizeof(text), "Winsock error %d", e);
+    return text;
+}
+
+static void sock_close(int fd)
+{
+    closesocket((SOCKET)fd);
+}
+
+static void sock_nonblocking(int fd)
+{
+    u_long on = 1;
+
+    ioctlsocket((SOCKET)fd, FIONBIO, &on);
+}
+
+/* A refused connect to a loopback port takes Windows two seconds, and the
+ * link is tried again on every transfer until MAIN listens, a millisecond of
+ * guest time apart: the board would stand still for as long as MAIN is not
+ * there. So a try gives up after 20 ms, which a listening loopback port never
+ * needs, and the next one waits 100 ms. */
+static int sock_connect(int fd, const struct sockaddr *a, int len)
+{
+    struct timeval wait = { 0, 20000 };
+    u_long mode = 1;
+    fd_set wr;
+
+    ioctlsocket((SOCKET)fd, FIONBIO, &mode);
+    if (connect((SOCKET)fd, a, len) != 0) {
+        if (WSAGetLastError() != WSAEWOULDBLOCK) {
+            return -1;
+        }
+        FD_ZERO(&wr);
+        FD_SET((SOCKET)fd, &wr);
+        if (select(0, NULL, &wr, NULL, &wait) <= 0) {
+            return -1;
+        }
+    }
+    mode = 0;
+    ioctlsocket((SOCKET)fd, FIONBIO, &mode);
+    return 0;
+}
+
+static uint32_t sock_retry_at(void)
+{
+    return GetTickCount() + 100;
+}
+
+static int sock_retry_due(uint32_t at)
+{
+    return !at || (int32_t)(GetTickCount() - at) >= 0;
+}
+
+static int sock_readable(int fd, int ms)
+{
+    struct timeval wait = { ms / 1000, ms % 1000 * 1000 };
+    fd_set rd;
+
+    FD_ZERO(&rd);
+    FD_SET((SOCKET)fd, &rd);
+    return select(0, &rd, NULL, NULL, &wait) > 0;
+}
+
+/* recv(MSG_DONTWAIT) on a blocking socket. */
+static ssize_t sock_recv_nowait(int fd, void *p, size_t n)
+{
+    if (!sock_readable(fd, 0)) {
+        WSASetLastError(WSAEWOULDBLOCK);
+        return -1;
+    }
+    return sock_recv(fd, p, n);
+}
+
+static void sleep_ms(unsigned ms)
+{
+    Sleep(ms);
+}
+
+static const void *memmem(const void *hay, size_t hay_len, const void *needle, size_t len)
+{
+    const uint8_t *h = hay;
+
+    for (size_t i = 0; len && i + len <= hay_len; i++) {
+        if (!memcmp(h + i, needle, len)) {
+            return h + i;
+        }
+    }
+    return NULL;
+}
+#else
+#define SOCK_EINTR EINTR
+#define sock_send(fd, p, n) send(fd, p, n, 0)
+#define sock_recv(fd, p, n) recv(fd, p, n, 0)
+
+static void sock_start(void)
+{
+}
+
+static int sock_errno(void)
+{
+    return errno;
+}
+
+static int sock_would_block(int e)
+{
+    return e == EAGAIN || e == EWOULDBLOCK;
+}
+
+static const char *sock_strerror(int e)
+{
+    return strerror(e);
+}
+
+static void sock_close(int fd)
+{
+    close(fd);
+}
+
+static void sock_nonblocking(int fd)
+{
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
+}
+
+static int sock_connect(int fd, const struct sockaddr *a, socklen_t len)
+{
+    return connect(fd, a, len);
+}
+
+/* A refused connect returns at once here: every transfer may try again. */
+static uint32_t sock_retry_at(void)
+{
+    return 0;
+}
+
+static int sock_retry_due(uint32_t at)
+{
+    return 1;
+}
+
+static int sock_readable(int fd, int ms)
+{
+    struct pollfd w = { .fd = fd, .events = POLLIN };
+
+    return poll(&w, 1, ms) > 0;
+}
+
+static ssize_t sock_recv_nowait(int fd, void *p, size_t n)
+{
+    return recv(fd, p, n, MSG_DONTWAIT);
+}
+
+static void sleep_ms(unsigned ms)
+{
+    usleep(ms * 1000);
+}
+#endif
 
 /* The firmware validates an announced payload against 1..2048 halfwords. */
 #define FRAME_MAX   4096
@@ -51,6 +245,7 @@ struct cdj_link {
 
     /* the two sockets of BFIN_MAIN_LINK */
     int opened, req_fd, rec_fd;
+    uint32_t retry_at;          /* host tick before which no new try (Windows) */
     uint8_t in[16384];
     size_t in_len;
     int framed;
@@ -125,6 +320,7 @@ cdj_link *cdj_link_new(void)
     cdj_link *l = calloc(1, sizeof(*l));
     const char *v;
 
+    sock_start();
     l->req_fd = l->rec_fd = l->cosim_fd = -1;
     v = getenv("BFIN_COSIM");
     if (v && *v) {
@@ -180,9 +376,9 @@ static void dump_close(FILE **f)
 
 void cdj_link_free(cdj_link *l)
 {
-    if (l->req_fd >= 0) close(l->req_fd);
-    if (l->rec_fd >= 0) close(l->rec_fd);
-    if (l->cosim_fd >= 0) close(l->cosim_fd);
+    if (l->req_fd >= 0) sock_close(l->req_fd);
+    if (l->rec_fd >= 0) sock_close(l->rec_fd);
+    if (l->cosim_fd >= 0) sock_close(l->cosim_fd);
     dump_close(&l->rx_dump);
     dump_close(&l->tx_dump);
     while (l->head) {
@@ -433,22 +629,26 @@ static unsigned take(cdj_link *l, uint8_t *dst, unsigned n)
 static int connect_to(const char *host, unsigned port, int nonblocking)
 {
     struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons((uint16_t)port) };
-    int fd = socket(AF_INET, SOCK_STREAM, 0), one = 1;
+    int fd = (int)socket(AF_INET, SOCK_STREAM, 0), one = 1;
 
     if (fd < 0) {
         return -1;
     }
-    inet_pton(AF_INET, host, &a.sin_addr);
-    if (connect(fd, (struct sockaddr *)&a, sizeof(a)) != 0) {
-        close(fd);
+    /* A name is not resolved; "localhost" only worked where the 0.0.0.0 a
+     * failed inet_pton leaves happens to reach the loopback. */
+    if (inet_pton(AF_INET, host, &a.sin_addr) != 1 && !strcmp(host, "localhost")) {
+        a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    }
+    if (sock_connect(fd, (struct sockaddr *)&a, sizeof(a)) != 0) {
+        sock_close(fd);
         return -1;
     }
-    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (const void *)&one, sizeof(one));
 #ifdef SO_NOSIGPIPE
     setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
 #endif
     if (nonblocking) {
-        fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
+        sock_nonblocking(fd);
     }
     return fd;
 }
@@ -463,7 +663,7 @@ static void link_open(cdj_link *l)
         l->opened = 1;      /* the run loop owns the connection */
         return;
     }
-    if (!l->link) {
+    if (!l->link || !sock_retry_due(l->retry_at)) {
         return;
     }
     l->req_fd = connect_to(l->host, l->port, 1);
@@ -474,15 +674,16 @@ static void link_open(cdj_link *l)
         return;
     }
     if (l->req_fd >= 0) {
-        close(l->req_fd);
+        sock_close(l->req_fd);
     }
     l->req_fd = -1;
+    l->retry_at = sock_retry_at();
 }
 
 static void link_poll(cdj_link *l)
 {
     while (!l->cosim && l->rec_fd >= 0 && l->in_len < sizeof(l->in)) {
-        ssize_t got = recv(l->rec_fd, l->in + l->in_len, sizeof(l->in) - l->in_len, 0);
+        ssize_t got = sock_recv(l->rec_fd, l->in + l->in_len, sizeof(l->in) - l->in_len);
 
         if (got <= 0) {
             break;
@@ -585,15 +786,15 @@ static void cosim_send(cdj_link *l, unsigned type, int64_t t, const uint8_t *p, 
     put_le(h + 16, len, 4);
     for (int i = 0; i < 2; i++) {
         while (sizes[i]) {
-            ssize_t n = send(l->cosim_fd, parts[i], sizes[i], 0);
+            ssize_t n = sock_send(l->cosim_fd, parts[i], sizes[i]);
 
             if (n > 0) {
                 parts[i] += n;
                 sizes[i] -= (size_t)n;
-            } else if (n < 0 && errno == EINTR) {
+            } else if (n < 0 && sock_errno() == SOCK_EINTR) {
                 continue;
             } else {
-                cosim_lost(l, n < 0 ? strerror(errno) : "the link closed");
+                cosim_lost(l, n < 0 ? sock_strerror(sock_errno()) : "the link closed");
             }
         }
     }
@@ -606,7 +807,7 @@ void cdj_link_cosim_connect(cdj_link *l)
 {
     for (int tries = 0; tries < 600 && l->cosim_fd < 0; tries++) {
         if ((l->cosim_fd = connect_to(l->host, l->port, 0)) < 0) {
-            usleep(100000);
+            sleep_ms(100);
         }
     }
     if (l->cosim_fd < 0) {
@@ -683,17 +884,17 @@ static void cosim_drain(cdj_link *l, int64_t now)
                 cosim_lost(l, "a message larger than the input buffer");
             }
         }
-        got = recv(l->cosim_fd, l->cin + l->cin_len, sizeof(l->cin) - l->cin_len, MSG_DONTWAIT);
+        got = sock_recv_nowait(l->cosim_fd, l->cin + l->cin_len, sizeof(l->cin) - l->cin_len);
         if (got > 0) {
             l->cin_len += (size_t)got;
         } else if (got == 0) {
             cosim_lost(l, "MAIN closed the link");
-        } else if (errno == EINTR) {
+        } else if (sock_errno() == SOCK_EINTR) {
             continue;
-        } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        } else if (sock_would_block(sock_errno())) {
             break;
         } else {
-            cosim_lost(l, strerror(errno));
+            cosim_lost(l, sock_strerror(sock_errno()));
         }
     }
     cosim_parse(l, now);
@@ -740,12 +941,10 @@ int64_t cdj_link_cosim_step(cdj_link *l, int64_t now)
         l->waits++;
     }
     while (now >= l->peer_promise + l->quantum) {
-        struct pollfd w = { .fd = l->cosim_fd, .events = POLLIN };
-
         if (l->reported != now) {
             cosim_report(l, now, now);
         }
-        if (poll(&w, 1, 1000) > 0) {
+        if (sock_readable(l->cosim_fd, 1000)) {
             cosim_drain(l, now);
             cosim_deliver(l, now);
         }
@@ -768,7 +967,7 @@ void cdj_link_tx(cdj_link *l, const uint8_t *data, unsigned len, int64_t now_ns)
             l->requests++;
             cosim_send(l, COSIM_REQUEST, now_ns, data, len);
         } else if (l->opened) {
-            ssize_t n = send(l->req_fd, data, len, 0);
+            ssize_t n = sock_send(l->req_fd, data, len);
 
             l->sent += n == (ssize_t)len;
         }

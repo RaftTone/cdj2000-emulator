@@ -4,7 +4,11 @@
  * the launcher keeps the write end of a pipe and passes the read end as
  * CDJ_PARENT_FD; read() returning 0 means the launcher is gone, even after
  * SIGKILL, so exit rather than run on as an orphan. Unset means no watchdog.
+ *
+ * Not on Windows: a child inherits handles there, not descriptor numbers, so
+ * the launcher passes no pipe (tools/cdj_main/parent_watch.py).
  */
+#ifndef _WIN32
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -35,3 +39,4 @@ __attribute__((constructor)) static void watch_init(void)
     if (pthread_create(&thread, NULL, watch, (void *)fd) == 0)
         pthread_detach(thread);
 }
+#endif

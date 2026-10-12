@@ -342,6 +342,12 @@ sh scripts/build-cdj-gui-run.sh            # installs bin/cdj-gui-run
 python -m tools.cdj_gui.gui_run --seconds 60   # runs/gui-run/screen.ppm
 ```
 
+On Windows run it in the MSYS2 MINGW64 shell, like the other two build
+scripts; it installs `bin/cdj-gui-run.exe`, linked statically so that it needs
+no MSYS2 DLL beside it. The link to MAIN is Winsock there, and the launcher's
+orphan watchdog is not available (a run that loses its launcher has to be
+ended by hand).
+
 `emulator/bfin/` is the plain-C BF531 interpreter from Stijn Jacobs'
 cdj-nxs2-qemu (commit `08d5cb1`, GPL-2.0-or-later; see THIRD_PARTY.md) with our
 board additions, and `cdj_gui_run.c` a runner for it. No GDB and no MAIN: it

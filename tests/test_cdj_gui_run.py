@@ -12,7 +12,6 @@ its extension, to prove the mod's code ran).
 from __future__ import annotations
 
 import os
-import resource
 import shutil
 import struct
 import subprocess
@@ -20,6 +19,11 @@ import time
 from pathlib import Path
 
 import pytest
+
+try:
+    import resource
+except ImportError:             # Windows
+    resource = None
 
 from tools.cdj_gui.gui_run import command
 from tools.paths import BFIN_SIM, FIRMWARE, REPO_ROOT
@@ -35,13 +39,17 @@ def runner(tmp_path_factory) -> Path:
     if not shutil.which("make") or not shutil.which(os.environ.get("CC", "cc")):
         pytest.skip("no C toolchain")
     out = tmp_path_factory.mktemp("cdj-gui-run")
-    subprocess.run(["make", "-s", "-C", str(REPO_ROOT / "emulator/bfin"), f"O={out}"],
-                   check=True, capture_output=True)
-    return out / "cdj-gui-run"
+    # Forward slashes: make's shell would eat a Windows path's backslashes.
+    subprocess.run(["make", "-s", "-C", (REPO_ROOT / "emulator/bfin").as_posix(),
+                    f"O={out.as_posix()}"], check=True, capture_output=True)
+    return out / ("cdj-gui-run.exe" if os.name == "nt" else "cdj-gui-run")
 
 
 def cpu_seconds() -> float:
-    """Children's CPU time: unlike wall time, not inflated by a loaded host."""
+    """Children's CPU time: unlike wall time, not inflated by a loaded host.
+    Windows keeps no such total, so there it is wall time after all."""
+    if resource is None:
+        return time.perf_counter()
     usage = resource.getrusage(resource.RUSAGE_CHILDREN)
     return usage.ru_utime + usage.ru_stime
 
@@ -116,10 +124,16 @@ def test_flash_boot_at_dump_and_top_boot_erase(runner, tmp_path):
     boot, dump = tmp_path / "flash.bin", tmp_path / "dump.bin"
     boot.write_bytes(bytes(flash))
     env = dict(os.environ, BFIN_FLASH_BOOT_AT="0x10000", BFIN_CFI_DUMP=str(dump))
+    windows = os.name == "nt"
+    if windows:
+        # No SIGTERM there: terminate() kills the process before it can write
+        # the dump, so the run ends itself after the same second.
+        env["BFIN_EXIT_AFTER_WALL"] = "1"
     proc = subprocess.Popen([str(runner), "-o", str(tmp_path / "s.ppm"), str(boot)], env=env,
                             stdin=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-    time.sleep(1)
-    proc.terminate()
+    if not windows:
+        time.sleep(1)
+        proc.terminate()
     _, err = proc.communicate(timeout=30)
     assert proc.returncode == 0, err
     assert "booting the flash's LDR at 0x10000" in err

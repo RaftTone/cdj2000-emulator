@@ -12,13 +12,29 @@
  */
 #include "bf531.h"
 #include "cdj_link.h"
-#include <arpa/inet.h>
 #include <assert.h>
-#include <netinet/in.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
 #include <unistd.h>
+#ifdef _WIN32
+/* The same fake MAIN on Winsock (MinGW): a socket is closed with closesocket
+ * and its buffers are char.  The C runtime cannot set an empty variable, so
+ * a flag that is read by its presence gets a value. */
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#define close(fd) closesocket(fd)
+#define usleep(us) Sleep((us) / 1000)
+#define send(fd, p, n, flags) send(fd, (const char *)(p), (int)(n), flags)
+#define recv(fd, p, n, flags) recv(fd, (char *)(p), (int)(n), flags)
+#define setsockopt(fd, level, name, p, n) setsockopt(fd, level, name, (const char *)(p), n)
+#define setenv(name, value, overwrite) _putenv_s(name, *(value) ? (value) : "1")
+#define unsetenv(name) _putenv_s(name, "")
+#else
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#endif
 
 static const char *dir;
 static int req_l, rec_l, req_c, rec_c;  /* fake MAIN: listeners, accepted */
@@ -494,6 +510,11 @@ int main(int argc, char **argv)
 {
     assert(argc == 2);
     dir = argv[1];
+#ifdef _WIN32
+    WSADATA winsock;
+
+    WSAStartup(MAKEWORD(2, 2), &winsock);   /* the fake MAIN listens before the link exists */
+#endif
     unsetenv("BFIN_COSIM");
     test_framing_slots_fresh_only();
     test_native_partial_bursts();

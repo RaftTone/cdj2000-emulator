@@ -29,7 +29,8 @@ def test_link_and_sport_dma(tmp_path):
     subprocess.run([cc, "-std=gnu11", "-O1", "-g", "-Wall", "-Wextra", "-Werror",
                     "-Wno-unused-parameter", "-I", str(BFIN),
                     str(REPO_ROOT / "tests/cstub/cdj-gui-link.c"),
-                    *(str(BFIN / s) for s in SOURCES), "-o", str(exe)], check=True)
+                    *(str(BFIN / s) for s in SOURCES), "-o", str(exe),
+                    *(["-lws2_32"] if os.name == "nt" else [])], check=True)
     env = {k: v for k, v in os.environ.items() if not k.startswith("BFIN_")}
     result = subprocess.run([str(exe), str(tmp_path)], env=env, capture_output=True,
                             text=True, timeout=60, stdin=subprocess.DEVNULL)
