@@ -585,7 +585,8 @@ static void cdj_input_command(char *line)
             cdj_input_held[first] |= (uint8_t)second;
             cdj_input_note_event(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL),
                                  "down %ld mask %#lx", first, second);
-            info_report("cdj2000-input: byte %ld mask %#lx down", first, second);
+            info_report("cdj2000-input: byte %ld mask %#lx down at %.3f s", first,
+                        second, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / 1e9);
             cdj_input_reply("ok down\n");
             return;
         }
@@ -593,7 +594,8 @@ static void cdj_input_command(char *line)
             cdj_input_held[first] &= (uint8_t)~second;
             cdj_input_note_event(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL),
                                  "up %ld mask %#lx", first, second);
-            info_report("cdj2000-input: byte %ld mask %#lx up", first, second);
+            info_report("cdj2000-input: byte %ld mask %#lx up at %.3f s", first,
+                        second, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / 1e9);
             cdj_input_reply("ok up\n");
             return;
         }

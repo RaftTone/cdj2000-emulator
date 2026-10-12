@@ -10,6 +10,7 @@
 #include "qemu/error-report.h"
 #include "qemu/bswap.h"
 #include "system/system.h"
+#include "qemu/timer.h"
 /*
  * Host playback of the older decks' DSP output.
  *
@@ -23,7 +24,9 @@
  *   the DSP's own clock, as 44.1 kHz 16-bit stereo: the file's time line is
  *   the deck's, with no ring, rate control or host clock in between, so a
  *   silence in it is a silence the DSP produced. The header's sizes are
- *   written at exit. (This tap is ours, not cdj-nxs2-qemu's.)
+ *   written at exit. (This tap is ours, not cdj-nxs2-qemu's.) Its first
+ *   frame and every 10 s of frames log the virtual clock ("PCM tap frame N
+ *   at t=..."), to put the file on the same time line as the panel presses.
  */
 #define DAC_MCASP       1
 
@@ -94,6 +97,10 @@ void cdj_dsp_audio_frame(unsigned mcasp, uint32_t left, uint32_t right)
         stw_le_p(f, (int32_t)left >> 16);
         stw_le_p(f + 2, (int32_t)right >> 16);
         fwrite(f, 1, sizeof(f), tap);
+        if (tap_frames % 441000 == 0) {
+            info_report("dsp: PCM tap frame %" PRIu64 " at t=%.6f", tap_frames,
+                        qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / 1e9);
+        }
         tap_frames++;
     }
     if (sink && mcasp == DAC_MCASP) {
