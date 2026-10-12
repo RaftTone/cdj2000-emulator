@@ -5,6 +5,7 @@
 #include <string.h>
 #define BFIN_LINK_SIZES 1
 struct bfin_sport {
+    unsigned long long link_native_order[1][2], link_native_next;
     unsigned link_frame_len[1], link_frame_get[1], link_frame_put[1];
     int link_frame_fresh[1][2];
     unsigned char link_frame[1][2][512], link_last[64];

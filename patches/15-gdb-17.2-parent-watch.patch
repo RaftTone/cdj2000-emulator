@@ -1,0 +1,45 @@
+--- a/sim/bfin/machs.c
++++ b/sim/bfin/machs.c
+@@ -2029,3 +2029,42 @@
+   SIM_ASSERT (STATE_MAGIC (sd) == SIM_MAGIC_NUMBER);
+   return sim_add_option_table (sd, NULL, bfin_mach_options);
+ }
++
++/* CDJ: parent-death watchdog.  The launcher keeps the write end of a pipe and
++   passes the read end as CDJ_PARENT_FD; read() returning 0 means the launcher
++   (and every holder of the write end) is gone, even after SIGKILL, so exit
++   rather than run on as an orphan.  Unset CDJ_PARENT_FD means no watchdog.  */
++#include <pthread.h>
++#include <unistd.h>
++#include <fcntl.h>
++#include <errno.h>
++
++static void *
++cdj_parent_watch (void *arg)
++{
++  int fd = (int) (long) arg;
++  char buf[64];
++  ssize_t n;
++
++  do
++    n = read (fd, buf, sizeof buf);
++  while (n > 0 || (n < 0 && errno == EINTR));
++  _exit (0);
++}
++
++__attribute__ ((constructor)) static void
++cdj_parent_watch_init (void)
++{
++  const char *env = getenv ("CDJ_PARENT_FD");
++  char *end;
++  long fd;
++  pthread_t thread;
++
++  if (!env || !*env)
++    return;
++  fd = strtol (env, &end, 10);
++  if (*end || fd < 3 || fcntl ((int) fd, F_GETFD) < 0)
++    return;
++  if (pthread_create (&thread, NULL, cdj_parent_watch, (void *) fd) == 0)
++    pthread_detach (thread);
++}

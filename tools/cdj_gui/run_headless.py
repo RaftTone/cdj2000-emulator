@@ -17,6 +17,8 @@ import sys
 import time
 from pathlib import Path
 
+from tools.cdj_main.parent_watch import inherited_fds
+
 from tools.paths import (BFIN_SIM, BOARDS, FIRMWARE, PACKETS, REPO_ROOT,
                          RUNS, board_path)
 
@@ -94,6 +96,7 @@ def run(args: argparse.Namespace) -> int:
             # No console for the simulator: the UART model polls stdin, and on
             # MinGW that read blocks inside the run loop with a console attached.
             stdin=subprocess.DEVNULL,
+            pass_fds=inherited_fds(),  # the launcher's lifeline; see parent_watch
             stdout=log_stream,
             stderr=subprocess.STDOUT,
             creationflags=(
@@ -179,6 +182,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    from tools.cdj_main.parent_watch import exit_with_parent
+    exit_with_parent()
     return run(parse_args())
 
 

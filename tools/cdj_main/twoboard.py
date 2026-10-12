@@ -43,6 +43,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from tools.cdj_main.parent_watch import Lifeline
 from tools.cdj_main.procs import stop_tree
 
 REPO = Path(__file__).resolve().parents[2]
@@ -170,20 +171,21 @@ def run(plan: Plan, card: Path) -> int:
     (plan.run_dir / "README.txt").write_text("\n".join(readme), encoding="utf-8")
     start = time.monotonic()
     procs = []
+    lifeline = Lifeline()
     try:
         with open(plan.run_dir / "boot_vm.log", "w", encoding="utf-8") as log:
-            main = subprocess.Popen(plan.boot_vm, stdout=log, stderr=subprocess.STDOUT, env=env, cwd=REPO)
+            main = lifeline.popen(plan.boot_vm, stdout=log, stderr=subprocess.STDOUT, env=env, cwd=REPO)
         procs.append(main)
         time.sleep(3)
         if main.poll() is not None:
             print("boot_vm exited at once; see boot_vm.log", file=sys.stderr)
             return 3
         with open(plan.run_dir / "proxy.log", "w", encoding="utf-8") as log:
-            proxy = subprocess.Popen(plan.proxy, stdout=log, stderr=subprocess.STDOUT, env=env, cwd=REPO)
+            proxy = lifeline.popen(plan.proxy, stdout=log, stderr=subprocess.STDOUT, env=env, cwd=REPO)
         procs.append(proxy)
         time.sleep(2)
         with open(plan.run_dir / "run_headless.out", "w", encoding="utf-8") as log:
-            gui = subprocess.Popen(plan.gui, stdout=log, stderr=subprocess.STDOUT, env=env, cwd=REPO)
+            gui = lifeline.popen(plan.gui, stdout=log, stderr=subprocess.STDOUT, env=env, cwd=REPO)
         procs.append(gui)
         panel = [sys.executable, "-m", "tools.cdj_main.panel_control", "--port", plan.env["CDJ_INPUT_PORT"]]
         for at, args in plan.keys:

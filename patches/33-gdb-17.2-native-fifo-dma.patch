@@ -1,0 +1,59 @@
+--- a/sim/bfin/dv-bfin_ppi.c
++++ b/sim/bfin/dv-bfin_ppi.c
+@@ -479,6 +479,8 @@
+ 			  [BFIN_LINK_FRAME_MAX];
+   unsigned link_frame_len[BFIN_LINK_SIZES];
+   int link_frame_fresh[BFIN_LINK_SIZES][BFIN_LINK_DEPTH_MAX];
++  unsigned long long link_native_order[BFIN_LINK_SIZES][BFIN_LINK_DEPTH_MAX];
++  unsigned long long link_native_next;
+   /* Where the next arrival is written, and where the next take reads.  With
+      depth 1 both are always 0 and every expression below collapses to the
+      single-slot code it replaced.  */
+@@ -1399,6 +1401,7 @@
+ 	    }
+ 	  sport->link_frame_len[slot] = length;
+ 	  sport->link_frame_fresh[slot][put] = 1;
++  sport->link_native_order[slot][put] = ++sport->link_native_next;
+ 	  sport->link_frame_put[slot] = (put + 1) % depth;
+ 	  /* Who earns a turn on the shared DMA channel.  Granting the budget only
+ 	     for the 64-byte status record starves the payload, and that is
+@@ -1697,7 +1700,11 @@
+ {
+   const char *env = getenv ("BFIN_LINK_NATIVE_PARTIAL_DMA");
+   unsigned slot, step, depth = bfin_sport_link_depth ();
++  unsigned selected = BFIN_LINK_SIZES, selected_entry = 0;
++  unsigned long long oldest = ~0ULL;
+   if (!env || strcmp (env, "1")) return 0;
++  /* Length slots are a legacy cache. Native bursts must preserve global
++     arrival order across sizes, not prioritize the lowest slot number. */
+   for (slot = 0; slot < BFIN_LINK_SIZES; slot++)
+     {
+       unsigned n = sport->link_frame_len[slot];
+@@ -1708,12 +1715,22 @@
+           unsigned entry = (get + step) % depth;
+           if (!sport->link_frame_fresh[slot][entry]
+               || memcmp (sport->link_frame[slot][entry], "DLNK", 4)) continue;
+-          memcpy (dest, sport->link_frame[slot][entry], n);
+-          sport->link_frame_fresh[slot][entry] = 0;
+-          sport->link_frame_get[slot] = (entry + 1) % depth;
+-          sport->link_take_fresh = 1;
+-          return n;
++          if (sport->link_native_order[slot][entry] < oldest)
++            {
++              oldest = sport->link_native_order[slot][entry];
++              selected = slot;
++              selected_entry = entry;
++            }
+         }
++    }
++  if (selected != BFIN_LINK_SIZES)
++    {
++      unsigned n = sport->link_frame_len[selected];
++      memcpy (dest, sport->link_frame[selected][selected_entry], n);
++      sport->link_frame_fresh[selected][selected_entry] = 0;
++      sport->link_frame_get[selected] = (selected_entry + 1) % depth;
++      sport->link_take_fresh = 1;
++      return n;
+     }
+   return 0;
+ }

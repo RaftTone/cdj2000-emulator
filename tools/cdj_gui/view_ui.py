@@ -2039,6 +2039,8 @@ def print_coverage(nxs: bool = False) -> int:
 
 
 def main() -> int:
+    from tools.cdj_main.parent_watch import exit_with_parent
+    exit_with_parent()
     args = parse_args()
     if args.coverage:
         return print_coverage(args.nxs_panel)

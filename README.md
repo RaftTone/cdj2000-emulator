@@ -254,6 +254,12 @@ cannot turn those tests into skips.
 `GPL-2.0-or-later`. See [LICENSE](LICENSE), and [THIRD_PARTY.md](THIRD_PARTY.md)
 for what is patched and under what terms.
 
+One exception: `cdj-gui-run`, built from `emulator/bfin/`, is
+GPL-3.0-or-later as a whole, because `emulator/bfin/bfin_dsp.c` carries GNU
+sim (GDB 17.2) code; see [emulator/bfin/LICENSE.md](emulator/bfin/LICENSE.md).
+The rest of the repository, `emulator/qemu/` in particular, stays
+GPL-2.0-or-later.
+
 ## Not affiliated with Pioneer
 
 This is an independent project, not endorsed by, affiliated with, or supported

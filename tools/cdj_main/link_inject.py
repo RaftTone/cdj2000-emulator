@@ -721,6 +721,8 @@ def run_proxy(listen_host: str, listen_port: int, main_host: str, main_port: int
 
 
 def main(argv: list[str] | None = None) -> int:
+    from .parent_watch import exit_with_parent
+    exit_with_parent()
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0],
                                      epilog="See the module docstring for the request vocabulary.")
     parser.add_argument("--listen-host", default="127.0.0.1")

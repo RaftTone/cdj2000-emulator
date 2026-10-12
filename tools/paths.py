@@ -43,6 +43,10 @@ _EXE = ".exe" if os.name == "nt" else ""
 # The Blackfin simulator, as scripts/build-bfin-sim.sh installs it.
 BFIN_SIM = Path(os.environ.get("CDJ_BFIN_SIM", BIN / ("cdj-run" + _EXE)))
 
+# The GUI board on the vendored Blackfin core (emulator/bfin/), as
+# scripts/build-cdj-gui-run.sh installs it.  GUI-only so far.
+GUI_RUN = Path(os.environ.get("CDJ_GUI_RUN", BIN / ("cdj-gui-run" + _EXE)))
+
 # qemu-system-sh4 with the cdj2000-main board, as scripts/build-qemu-sh4.sh
 # builds it.  A bare name is resolved through PATH; set CDJ_QEMU to the full
 # path of the binary you built if it is not installed.

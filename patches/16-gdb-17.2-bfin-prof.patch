@@ -1,0 +1,367 @@
+--- a/sim/bfin/bfin-sim.h
++++ b/sim/bfin/bfin-sim.h
+@@ -441,6 +441,12 @@
+   return (f->ok >> ((supv << 1) | (unsigned) write)) & 1;
+ }
+ 
++/* BFIN_PROF (interp.c): per-PC store accounting while a profile window is
++   open.  Plain memory only; the host bytes are compared before the write.  */
++extern int bfin_prof_stores;
++void bfin_prof_store (SIM_CPU *cpu, bu32 addr, const unsigned char *host,
++		      const void *value, int bytes);
++
+ #define __PUT_MEM(taddr, v, size) \
+ do { \
+   bu##size __v = (v); \
+@@ -452,6 +458,8 @@
+   __host = bfin_fast_host (cpu, write_map, __taddr, __bytes); \
+   if (__builtin_expect (__host != NULL, 1)) \
+     { \
++      if (__builtin_expect (bfin_prof_stores, 0)) \
++	bfin_prof_store (cpu, __taddr, __host, &__v, __bytes); \
+       memcpy (__host, &__v, __bytes); \
+       __cnt = __bytes; \
+     } \
+--- a/sim/bfin/interp.c
++++ b/sim/bfin/interp.c
+@@ -1004,6 +1004,324 @@
+ 	 / bfin_wall.cclk_hz;
+ }
+ 
++/* BFIN_PROF=<file>: a guest profiler for the GUI firmware.
++
++     BFIN_PROF_START=<guest s>   open the window (default 0)
++     BFIN_PROF_STOP=<guest s>    close it and write <file> (default: at exit)
++     BFIN_PROF_SAMPLE=<n>        stack sample every n instructions (4099)
++     BFIN_PROF_TASK=<addr>       u32 recorded with each sample (the current
++                                 thread pointer), for a per-task split
++     BFIN_PROF_PIXELS=lo:hi,...  up to 8 address ranges counted as pixel
++                                 stores (frame rows and pixel_* totals)
++
++   Inside the window every retired instruction is counted at its PC with the
++   cycles the core model charged it (CYCLE_DELAY), and every store to plain
++   memory is counted at the storing PC, with the bytes that already held the
++   stored value.  <file> is text: a header, "pc" rows (pc insns cycles
++   store_bytes unchanged_bytes, nonzero only), "page" rows (64 KB destination
++   pages below 32 MB: store bytes, unchanged bytes) and "frame" rows (one per
++   display frame the PPI model scanned: guest ticks, insns, cycles, store
++   bytes, unchanged bytes, pixel store bytes, pixel unchanged bytes, all
++   cumulative).  <file>.stk holds the stack samples:
++   u32 count, then count words -- ipend, task, pc, rets, then the return
++   addresses of the frame-pointer chain ([FP+4], FP = [FP]) up to 32 deep.
++
++   Counts are exact for the interpreter; cycles are its model, which does not
++   know SDRAM, cache or DMA contention.  Nothing is compiled out: a run without
++   BFIN_PROF pays one predicted branch per instruction and per store.  */
++#define BFIN_PROF_CODE_LO 0x00c00000u
++#define BFIN_PROF_CODE_HI 0x01000000u
++#define BFIN_PROF_L1_LO   0xffa00000u
++#define BFIN_PROF_L1_HI   0xffa20000u
++#define BFIN_PROF_SLOTS \
++  (((BFIN_PROF_CODE_HI - BFIN_PROF_CODE_LO) + (BFIN_PROF_L1_HI - BFIN_PROF_L1_LO)) / 2 + 1)
++
++struct bfin_prof_slot
++{
++  uint64_t insns, cycles, stored, unchanged;
++};
++
++static struct
++{
++  int state;			/* 0 off, 1 armed, 2 open, 3 done */
++  const char *path;
++  double start, stop;
++  unsigned sample_every, sample_left;
++  bu32 task_addr;
++  struct bfin_prof_slot *slot;
++  uint64_t page_stored[512], page_unchanged[512];
++  bu32 pix_lo[8], pix_hi[8];
++  unsigned pix_nr;
++  uint64_t pix_stored, pix_unchanged;
++  uint64_t insns, cycles, stored, unchanged;
++  int64_t t0, now;
++  unsigned long frames0, last_frame;
++  FILE *stk, *frames;
++  char *frames_buf;
++  size_t frames_len;
++} bfin_prof;
++int bfin_prof_stores;
++
++static inline unsigned
++bfin_prof_index (bu32 pc)
++{
++  if (pc >= BFIN_PROF_CODE_LO && pc < BFIN_PROF_CODE_HI)
++    return (pc - BFIN_PROF_CODE_LO) >> 1;
++  if (pc >= BFIN_PROF_L1_LO && pc < BFIN_PROF_L1_HI)
++    return ((BFIN_PROF_CODE_HI - BFIN_PROF_CODE_LO) + (pc - BFIN_PROF_L1_LO)) >> 1;
++  return BFIN_PROF_SLOTS - 1;	/* everything else */
++}
++
++static bu32
++bfin_prof_index_pc (unsigned i)
++{
++  bu32 off = (bu32) i << 1;
++
++  if (i == BFIN_PROF_SLOTS - 1)
++    return 0xffffffffu;
++  if (off < BFIN_PROF_CODE_HI - BFIN_PROF_CODE_LO)
++    return BFIN_PROF_CODE_LO + off;
++  return BFIN_PROF_L1_LO + off - (BFIN_PROF_CODE_HI - BFIN_PROF_CODE_LO);
++}
++
++void
++bfin_prof_store (SIM_CPU *cpu, bu32 addr, const unsigned char *host,
++		 const void *value, int bytes)
++{
++  const unsigned char *v = value;
++  struct bfin_prof_slot *s = &bfin_prof.slot[bfin_prof_index (PCREG)];
++  unsigned same = 0;
++  int i;
++
++  for (i = 0; i < bytes; ++i)
++    same += host[i] == v[i];
++  s->stored += bytes;
++  s->unchanged += same;
++  bfin_prof.stored += bytes;
++  bfin_prof.unchanged += same;
++  if (addr < 0x02000000u)
++    {
++      bfin_prof.page_stored[addr >> 16] += bytes;
++      bfin_prof.page_unchanged[addr >> 16] += same;
++    }
++  for (i = 0; i < (int) bfin_prof.pix_nr; ++i)
++    if (addr >= bfin_prof.pix_lo[i] && addr < bfin_prof.pix_hi[i])
++      {
++	bfin_prof.pix_stored += bytes;
++	bfin_prof.pix_unchanged += same;
++	break;
++      }
++}
++
++static int
++bfin_prof_read32 (SIM_CPU *cpu, bu32 addr, bu32 *out)
++{
++  unsigned char *host;
++
++  /* SDRAM and L1 data only: never a device read with side effects.  */
++  if ((addr & 3) || !(addr < 0x02000000u
++		      || (addr >= 0xff800000u && addr < 0xff908000u)))
++    return 0;
++  host = bfin_fast_host (cpu, read_map, addr, 4);
++  if (!host)
++    return 0;
++  memcpy (out, host, 4);
++  return 1;
++}
++
++static void
++bfin_prof_open (SIM_DESC sd)
++{
++  char stk_path[4096];
++
++  bfin_prof.slot = calloc (BFIN_PROF_SLOTS, sizeof (*bfin_prof.slot));
++  snprintf (stk_path, sizeof (stk_path), "%s.stk", bfin_prof.path);
++  bfin_prof.stk = fopen (stk_path, "wb");
++  bfin_prof.frames = open_memstream (&bfin_prof.frames_buf,
++				     &bfin_prof.frames_len);
++  if (!bfin_prof.slot || !bfin_prof.stk || !bfin_prof.frames)
++    {
++      fprintf (stderr, "bfin: BFIN_PROF cannot allocate or open %s\n",
++	       stk_path);
++      bfin_prof.state = 3;
++      return;
++    }
++  bfin_prof.t0 = bfin_prof.now = sim_events_time (sd);
++  bfin_prof.frames0 = bfin_prof.last_frame = bfin_stat_frames;
++  bfin_prof.sample_left = bfin_prof.sample_every;
++  bfin_prof.state = 2;
++  bfin_prof_stores = 1;
++  fprintf (stderr, "bfin: profile window open at guest %.3f s\n",
++	   bfin_guest_seconds ());
++  fflush (stderr);
++}
++
++static void
++bfin_prof_close (SIM_DESC sd)
++{
++  FILE *out;
++  unsigned i;
++
++  if (bfin_prof.state != 2)
++    return;
++  bfin_prof.state = 3;
++  bfin_prof_stores = 0;
++  fclose (bfin_prof.stk);
++  fclose (bfin_prof.frames);
++  out = fopen (bfin_prof.path, "w");
++  if (!out)
++    return;
++  fprintf (out, "bfinprof 1\n");
++  fprintf (out, "window_ticks %" PRId64 "\n", bfin_prof.now - bfin_prof.t0);
++  fprintf (out, "cclk_hz %.0f\n", bfin_wall.cclk_hz);
++  fprintf (out, "insns %" PRIu64 "\ncycles %" PRIu64 "\n", bfin_prof.insns,
++	   bfin_prof.cycles);
++  fprintf (out, "stored %" PRIu64 "\nunchanged %" PRIu64 "\n",
++	   bfin_prof.stored, bfin_prof.unchanged);
++  fprintf (out, "frames %lu\n", bfin_stat_frames - bfin_prof.frames0);
++  fprintf (out, "sample_every %u\n", bfin_prof.sample_every);
++  for (i = 0; i < BFIN_PROF_SLOTS; ++i)
++    {
++      struct bfin_prof_slot *s = &bfin_prof.slot[i];
++
++      if (s->insns || s->stored)
++	fprintf (out, "pc %#x %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 "\n",
++		 bfin_prof_index_pc (i), s->insns, s->cycles, s->stored,
++		 s->unchanged);
++    }
++  fprintf (out, "pixel_stored %" PRIu64 "\npixel_unchanged %" PRIu64 "\n",
++	   bfin_prof.pix_stored, bfin_prof.pix_unchanged);
++  for (i = 0; i < 512; ++i)
++    if (bfin_prof.page_stored[i])
++      fprintf (out, "page %#x %" PRIu64 " %" PRIu64 "\n", i << 16,
++	       bfin_prof.page_stored[i], bfin_prof.page_unchanged[i]);
++  fwrite (bfin_prof.frames_buf, 1, bfin_prof.frames_len, out);
++  fclose (out);
++  free (bfin_prof.frames_buf);
++  free (bfin_prof.slot);
++  fprintf (stderr, "bfin: profile window closed after %.3f guest s -> %s\n",
++	   (double) (bfin_prof.now - bfin_prof.t0) / bfin_wall.cclk_hz,
++	   bfin_prof.path);
++  fflush (stderr);
++}
++
++static void
++bfin_prof_atexit (void)
++{
++  if (bfin_time_sd)
++    bfin_prof_close (bfin_time_sd);
++}
++
++/* nxs_vm ends a run with SIGTERM (dev stop, teardown): write the window
++   first.  Not async-signal-safe; this is a diagnostic path at exit.  */
++static void
++bfin_prof_on_term (int sig)
++{
++  bfin_prof_atexit ();
++  signal (sig, SIG_DFL);
++  raise (sig);
++}
++
++static void
++bfin_prof_init (void)
++{
++  static int done;
++  const char *v = getenv ("BFIN_PROF");
++
++  if (done)
++    return;
++  done = 1;
++  if (!v || !*v)
++    return;
++  bfin_prof.path = v;
++  v = getenv ("BFIN_PROF_START");
++  bfin_prof.start = v && *v ? strtod (v, NULL) : 0.0;
++  v = getenv ("BFIN_PROF_STOP");
++  bfin_prof.stop = v && *v ? strtod (v, NULL) : 0.0;
++  v = getenv ("BFIN_PROF_SAMPLE");
++  bfin_prof.sample_every = v && *v ? strtoul (v, NULL, 0) : 4099;
++  if (bfin_prof.sample_every == 0)
++    bfin_prof.sample_every = 4099;
++  v = getenv ("BFIN_PROF_PIXELS");
++  while (v && *v && bfin_prof.pix_nr < 8)
++    {
++      char *end;
++
++      bfin_prof.pix_lo[bfin_prof.pix_nr] = strtoul (v, &end, 0);
++      if (*end != ':')
++	break;
++      bfin_prof.pix_hi[bfin_prof.pix_nr++] = strtoul (end + 1, &end, 0);
++      v = *end == ',' ? end + 1 : NULL;
++    }
++  v = getenv ("BFIN_PROF_TASK");
++  bfin_prof.task_addr = v && *v ? strtoul (v, NULL, 0) : 0;
++  bfin_prof.state = 1;
++  atexit (bfin_prof_atexit);
++  signal (SIGTERM, bfin_prof_on_term);
++}
++
++static void
++bfin_prof_step (SIM_DESC sd, SIM_CPU *cpu, bu32 pc)
++{
++  struct bfin_prof_slot *s;
++
++  if (bfin_prof.state == 1)
++    {
++      if ((bfin_stats.insns & 0xfff) == 0
++	  && bfin_guest_seconds () >= bfin_prof.start)
++	bfin_prof_open (sd);
++      return;
++    }
++  if (bfin_prof.state != 2)
++    return;
++
++  s = &bfin_prof.slot[bfin_prof_index (pc)];
++  ++s->insns;
++  s->cycles += CYCLE_DELAY;
++  ++bfin_prof.insns;
++  bfin_prof.cycles += CYCLE_DELAY;
++
++  if ((bfin_stats.insns & 0xfff) == 0)
++    bfin_prof.now = sim_events_time (sd);
++  if (bfin_stat_frames != bfin_prof.last_frame)
++    {
++      bfin_prof.now = sim_events_time (sd);
++      bfin_prof.last_frame = bfin_stat_frames;
++      fprintf (bfin_prof.frames, "frame %" PRId64 " %" PRIu64 " %" PRIu64
++	       " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 "\n",
++	       sim_events_time (sd) - bfin_prof.t0, bfin_prof.insns,
++	       bfin_prof.cycles, bfin_prof.stored, bfin_prof.unchanged,
++	       bfin_prof.pix_stored, bfin_prof.pix_unchanged);
++    }
++
++  if (--bfin_prof.sample_left == 0)
++    {
++      bu32 rec[37], fp = FPREG, word;
++      unsigned n = 0;
++
++      bfin_prof.sample_left = bfin_prof.sample_every;
++      rec[++n] = *bfin_cec_ipend_ptr;
++      rec[++n] = 0;
++      if (bfin_prof.task_addr)
++	bfin_prof_read32 (cpu, bfin_prof.task_addr, &rec[n]);
++      rec[++n] = pc;
++      rec[++n] = RETSREG;
++      while (n < 36 && fp && bfin_prof_read32 (cpu, fp + 4, &word))
++	{
++	  rec[++n] = word;
++	  if (!bfin_prof_read32 (cpu, fp, &word) || word <= fp)
++	    break;
++	  fp = word;
++	}
++      rec[0] = n;
++      fwrite (rec, 4, n + 1, bfin_prof.stk);
++    }
++
++  if ((bfin_stats.insns & 0xfff) == 0 && bfin_prof.stop > 0
++      && bfin_guest_seconds () >= bfin_prof.stop)
++    bfin_prof_close (sd);
++}
++
+ /* A paced time base: the wall clock or the virtual one.  The device models
+    ask this to pace the display per frame and the link retries in guest
+    microseconds rather than per tick.  */
+@@ -1772,12 +2090,15 @@
+     bfin_stats_init ();
+   if (!bfin_wall.init)
+     bfin_wall_init (sd);
++  bfin_prof_init ();
+ 
+   while (1)
+     {
+       bu32 oldpc = step_once (cpu);
+ 
+       ++bfin_stats.insns;
++      if (__builtin_expect (bfin_prof.state, 0))
++	bfin_prof_step (sd, cpu, oldpc);
+       if (bfin_wall.active)
+ 	{
+ 	  /* Parked: a jump to itself outside a hardware loop, or IDLE.  */
