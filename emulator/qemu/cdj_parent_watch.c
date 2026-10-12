@@ -9,12 +9,17 @@
  *
  * On EOF we ask for the normal shutdown, then force the exit if the main loop
  * has not got there within a few seconds.
+ *
+ * Not on Windows: a child inherits handles there, not descriptor numbers, so
+ * the launcher passes no pipe (tools/cdj_main/parent_watch.py) and there is
+ * no fcntl to check one with.
  */
 #include "qemu/osdep.h"
 #include "qemu/thread.h"
 #include "qemu/module.h"
 #include "system/runstate.h"
 
+#ifndef _WIN32
 static void *cdj_parent_watch_thread(void *opaque)
 {
     int fd = GPOINTER_TO_INT(opaque);
@@ -50,3 +55,4 @@ static void cdj_parent_watch_init(void)
                        GINT_TO_POINTER((int)fd), QEMU_THREAD_DETACHED);
 }
 type_init(cdj_parent_watch_init)
+#endif
