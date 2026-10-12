@@ -54,6 +54,7 @@
 #include "cdj2000_ata.h"
 #include "cdj2000_cosim.h"
 #include "cdj2000_dsp.h"
+#include "cdj_c6727.h"
 #include "cdj2000_nxs_hpi.h"
 #include "cdj_nxs_iic.h"
 #include "cdj_nxs_eth.h"
@@ -1935,6 +1936,16 @@ typedef struct {
 #define DSP_RESET_BIT   0x0040
 #define DSP_PHASE_REG   0xfff1005c
 #define DSP_PHASE_MASK  0x0007
+#define DSP_CMD_MASK    0x0003
+
+/*
+ * CDJ_DSP_CORE=c6727: the real DSP program on the C66x core (cdj_c6727.c)
+ * instead of the behavioural model. Its wires replace the model's line: MAIN
+ * gives the loader its 2-bit command through 0xfff1005c bits 1:0, and bit 4 of
+ * 0xfff10040 is the DSP's HINT pin, active low -- 0x41c7ce4 takes a clear bit
+ * as a DSP event and acknowledges it by setting HINT in the HPIC (0xac000000).
+ */
+static const CdjDspWires *cdj_c6727_wires;
 
 typedef struct {
     CdjIntc2State *intc2;
@@ -1983,6 +1994,17 @@ static uint64_t cdj_link_flag_read(void *opaque, hwaddr offset, unsigned size)
         }
         return value;
     }
+    if (cdj_c6727_wires && offset == DSP_EVENT_REG - SOC_BLOCK_BASE) {
+        uint32_t value = flag->reg[offset >> 1] & ~DSP_EVENT_BIT;
+
+        if (cdj_c6727_wires->busy(cdj_c6727_wires->opaque)) {
+            value |= DSP_EVENT_BIT;
+        }
+        if (size > 2) {
+            value |= (uint32_t)flag->reg[(offset >> 1) + 1] << 16;
+        }
+        return value;
+    }
     if (offset == DSP_EVENT_REG - SOC_BLOCK_BASE && flag->dsp_event) {
         return flag->reg[offset >> 1] | DSP_EVENT_BIT;
     }
@@ -2014,6 +2036,9 @@ static void cdj_link_flag_write(void *opaque, hwaddr offset, uint64_t value,
     }
     if (cdj_nxs_profile && offset == DSP_PHASE_REG - SOC_BLOCK_BASE) {
         cdj_nxs_hpi_boot_phase(value & DSP_PHASE_MASK);
+    }
+    if (cdj_c6727_wires && offset == DSP_PHASE_REG - SOC_BLOCK_BASE) {
+        cdj_c6727_wires->command(cdj_c6727_wires->opaque, value & DSP_CMD_MASK);
     }
 }
 
@@ -5034,8 +5059,19 @@ static void cdj_intc_timer_init(MemoryRegion *system, SuperHCPU *cpu)
      */
     const char *dsp_chardev = getenv("CDJ_DSP_CHARDEV");
 
+    const char *dsp_core = getenv("CDJ_DSP_CORE");
+
     if (cdj_nxs_profile) {
         cdj_nxs_hpi_init(system, cdj_nxs_hint_level, cdj_dsp_event_sink.flag);
+    } else if (dsp_core && !strcmp(dsp_core, "c6727")) {
+        /*
+         * fw 4.33's DSP application polls in a main loop at 0x80047B80, its
+         * stack at B15 0x100064B0 on entry. The window, HPIC and mailbox all
+         * belong to the chip then; DMA into the window goes through it.
+         */
+        cdj_c6727_set_idle_loop(0x80047B80, 0x10005000, 0x10006600);
+        cdj_c6727_wires = cdj_c6727_init(system, 0x0C000000);
+        qemu_log("cdj2000-main: DSP = C6727 on the C66x core (CDJ_DSP_CORE=c6727)\n");
     } else {
     cdj_dsp_init(system, dsp_chardev ? qemu_chr_find(dsp_chardev) : NULL,
                  intc->irqs[CDJ_INTC_DSP_EVENT], cdj_dsp_event_pending,
