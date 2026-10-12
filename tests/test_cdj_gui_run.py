@@ -16,6 +16,7 @@ import resource
 import shutil
 import struct
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -89,6 +90,44 @@ def test_bare_ldr_boot_and_trap_report(runner, tmp_path):
     junk = tmp_path / "junk.bin"
     junk.write_bytes(b"\x00" * 7)
     assert run(runner, junk, tmp_path / "c.ppm", 0.01)[0].returncode == 2
+
+
+# bfin-elf-as of:
+#   P0.L = 0x0AAA; P0.H = 0x2000; P1.L = 0x0554; P1.H = 0x2000;
+#   P2.L = 0xA000; P2.H = 0x201F;
+#   R0 = 0xAA (Z); R1 = 0x55 (Z); R2 = 0x80 (Z); R3 = 0x30 (Z);
+#   W[P0] = R0; W[P1] = R1; W[P0] = R2; W[P0] = R0; W[P1] = R1; W[P2] = R3;
+#   L: JUMP.S L;
+# -- the AMD sector erase of 0x1FA000, then a spin.
+ERASE_1FA000 = bytes.fromhex(
+    "08e1aa0a48e1002009e1540549e100200ae100a04ae11f2080e1aa0081e1550082e18000"
+    "83e1300000970997029700970997139700200000")
+
+
+def test_flash_boot_at_dump_and_top_boot_erase(runner, tmp_path):
+    # A 2 MiB flash with the program's LDR at 0x10000 and a pattern in sector
+    # 0 boots from 0x10000 with BFIN_FLASH_BOOT_AT; the erase of the 8 KiB
+    # sector at 0x1FA000 leaves its 8 KiB neighbour and the 16 KiB journal
+    # sector at 0x1FC000 alone (MX29LV160DT top boot), and BFIN_CFI_DUMP
+    # writes the flash at exit, also when the run is ended by SIGTERM.
+    flash = bytearray(b"\x5a" * 0x200000)
+    stream = ldr([(0xFFA08000, ERASE_1FA000, 0x8000)])
+    flash[0x10000:0x10000 + len(stream)] = stream
+    boot, dump = tmp_path / "flash.bin", tmp_path / "dump.bin"
+    boot.write_bytes(bytes(flash))
+    env = dict(os.environ, BFIN_FLASH_BOOT_AT="0x10000", BFIN_CFI_DUMP=str(dump))
+    proc = subprocess.Popen([str(runner), "-o", str(tmp_path / "s.ppm"), str(boot)], env=env,
+                            stdin=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    time.sleep(1)
+    proc.terminate()
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == 0, err
+    assert "booting the flash's LDR at 0x10000" in err
+    assert "flash erase 0x201fa000 +0x2000" in err
+    after = dump.read_bytes()
+    assert after[0x1FA000:0x1FC000] == b"\xff" * 0x2000
+    assert after[:0x1FA000] == bytes(flash[:0x1FA000])
+    assert after[0x1FC000:] == bytes(flash[0x1FC000:])
 
 
 @needs_firmware

@@ -14,6 +14,7 @@ import struct
 import subprocess
 import tempfile
 import sys
+import time
 
 from .coverage import build_coverage
 from .tx_capture import tx_capture_metadata
@@ -209,6 +210,52 @@ def checkpoint_provenance(path: Path, data: bytes, info: dict) -> dict:
     raise ValueError('checkpoint is absent from a complete connected manifest or replay provenance')
 
 
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open('rb') as source:
+        for chunk in iter(lambda: source.read(1 << 22), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+OVERLAY_MAGIC = 0x4c564f43
+
+
+def parse_overlay(data: bytes) -> dict:
+    """Validate an A/B overlay: {"schema":1,"trigger_pc":"0x..."|null,
+    "writes":[{"address":"0x...","hex":"..."}]}; returns its native form."""
+    try:
+        overlay = json.loads(data)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError(f'overlay is not JSON: {error}') from error
+    if (not isinstance(overlay, dict) or overlay.get('schema') != 1 or
+            set(overlay) - {'schema', 'trigger_pc', 'writes', 'note'} or
+            not isinstance(overlay.get('writes'), list) or not overlay['writes']):
+        raise ValueError('overlay needs schema 1, trigger_pc and a non-empty writes list')
+    trigger = overlay.get('trigger_pc', 'missing')
+    if trigger == 'missing':
+        raise ValueError('overlay trigger_pc is required (null applies at replay start)')
+    if trigger is not None:
+        if not isinstance(trigger, str):
+            raise ValueError('overlay trigger_pc must be a hex string or null')
+        trigger = int(trigger, 16)
+        if not 0 < trigger <= 0xffffffff:
+            raise ValueError('overlay trigger_pc must be a nonzero 32-bit address')
+    writes = []
+    for item in overlay['writes']:
+        if not isinstance(item, dict) or set(item) != {'address', 'hex'}:
+            raise ValueError('each overlay write is {"address","hex"}')
+        address = int(item['address'], 16)
+        payload = bytes.fromhex(item['hex'])
+        if not payload or not 0 <= address <= 0x100000000 - len(payload):
+            raise ValueError(f'overlay write {item["address"]} is empty or wraps')
+        writes.append((address, payload))
+    native = struct.pack('<4I', OVERLAY_MAGIC, trigger is not None, trigger or 0, len(writes))
+    native += b''.join(struct.pack('<2I', a, len(b)) + b for a, b in writes)
+    return dict(trigger_pc=trigger, writes=len(writes),
+                bytes=sum(len(b) for _, b in writes), native=native)
+
+
 def write_manifest(output: Path, manifest: dict):
     """Persist the run manifest, never claiming eligibility for an unfinished run.
 
@@ -307,6 +354,18 @@ def main():
                         help='schedule labeled coarse McASP slots; deterministic but not audio-timing evidence')
     parser.add_argument('--capture-dsp-tx', action='store_true',
                         help='capture genuine McASP XBUF words consumed at functional slot boundaries')
+    parser.add_argument('--ab', action='store_true',
+                        help='A/B capture: write mcasp1.bin, mcasp2.bin and host.bin '
+                             '(tools/cdj_dsp/ab_compare.py), drop per-store trace records '
+                             'and coverage, and default the compiled fast paths on '
+                             '(CDJ_C674X_JIT, CDJ_DSP_REPLAY_HORIZON, CDJ_DSP_REPLAY_RAM_DIRECT=1; '
+                             'set any to 0 in the environment to turn it off)')
+    parser.add_argument('--lenient', action='store_true',
+                        help='with --events: check only what MAIN observes (HPI data reads, DSP '
+                             'HPIC writes, activation lengths); log mismatches and continue')
+    parser.add_argument('--overlay', type=Path,
+                        help='JSON overlay of DSP memory writes applied when the DSP first '
+                             'reaches trigger_pc (null: at replay start)')
     parser.add_argument('--formats', type=Path, default=DEFAULT_FORMATS,
                         help='GNU tic6x-insn-formats.h used for automatic coverage')
     args = parser.parse_args()
@@ -314,12 +373,25 @@ def main():
         parser.error('--connected-stops requires --events and a count from 1 to 4294967295')
     if args.capture_dsp_tx and not args.functional_dsp_audio:
         parser.error('--capture-dsp-tx requires --functional-dsp-audio')
-    if (not 0 < args.steps <= 100000000 or
+    if args.lenient and not args.events:
+        parser.error('--lenient requires --events')
+    if args.ab and args.verify_repeat:
+        parser.error('--ab replays are compared with ab_compare.py, not --verify-repeat')
+    overlay = None
+    if args.overlay is not None:
+        try:
+            overlay_data = args.overlay.read_bytes()
+            overlay = parse_overlay(overlay_data)
+        except (OSError, ValueError) as error:
+            parser.error(f'overlay: {error}')
+        overlay['sha256'] = hashlib.sha256(overlay_data).hexdigest()
+        overlay['path'] = str(args.overlay.resolve())
+    if (not 0 < args.steps <= 1 << 62 or
             not 0 <= args.packets <= 0xffffffffffffffff or
             not 0 <= args.cycles <= 0xffffffffffffffff or
             not 0 <= args.break_pc <= 0xffffffff or
             not 0 <= args.boot_phase <= 7):
-        parser.error('steps must be 1..100000000; packets/cycles must fit 64 bits; '
+        parser.error('steps must be 1..2^62; packets/cycles must fit 64 bits; '
                      'breakpoint must fit 32 bits; boot phase must be 0..7')
     selected_checkpoint = None
     selected_provenance = None
@@ -329,7 +401,7 @@ def main():
                 args.dump,
                 timing_mode='functional-runahead' if args.functional_dsp_timing else 'strict',
                 audio_mode='coarse-packet-slots' if args.functional_dsp_audio else 'stopped-clock',
-                event_hash=hashlib.sha256(args.events.read_bytes()).hexdigest()
+                event_hash=file_sha256(args.events)
                 if args.events is not None else None)
         except (OSError, ValueError) as error:
             parser.error(str(error))
@@ -367,7 +439,9 @@ def main():
         checkpoint_gate_sha256 = provenance['gate_sha256']
     elif len(data) != 0x40000:
         parser.error('legacy dump must be exactly 256 KiB')
-    event_data = args.events.read_bytes() if args.events is not None else None
+    # A transcript can be gigabytes: hash it streaming and give the replay an
+    # APFS clone (copy-on-write, so the hashed bytes are the replayed ones).
+    event_data = file_sha256(args.events) if args.events is not None else None
     checkpoint_scheduler_mode = (input_checkpoint['dsp_scheduler_mode']
                                  if input_checkpoint else 'legacy')
     dsp_scheduler_mode = (capture_manifest.get('dsp_scheduler_mode',
@@ -387,7 +461,7 @@ def main():
                                else capture_manifest.get('event_transcript_sha256'))
         if not isinstance(expected_event_hash, str):
             parser.error('checkpoint manifest has no complete event-transcript provenance')
-        if hashlib.sha256(event_data).hexdigest() != expected_event_hash:
+        if event_data != expected_event_hash:
             parser.error('event transcript does not match the checkpoint manifest')
     expected = args.expect_trace.read_bytes() if args.expect_trace is not None else None
     # Compile the exact source/header bytes whose hashes are recorded. A later
@@ -396,6 +470,7 @@ def main():
     # .c has to be listed explicitly or the standalone build cannot find it.
     inputs = (SOURCES + [p.with_suffix('.h') for p in SOURCES[1:]] +
               [ROOT / 'emulator/qemu/cdj_c6747_spi_clock.h',
+               ROOT / 'emulator/qemu/cdj_dsp_ticks.h',
                ROOT / 'emulator/qemu/cdj_c674x_multicycle.h'])
     source_data = {p: p.read_bytes() for p in inputs}
     format_data = args.formats.read_bytes()
@@ -406,7 +481,11 @@ def main():
         snapshot.write_bytes(data)
         event_snapshot = Path(temp) / 'events.jsonl'
         if event_data is not None:
-            event_snapshot.write_bytes(event_data)
+            if subprocess.run(['cp', '-c', str(args.events), str(event_snapshot)],
+                              stderr=subprocess.DEVNULL).returncode:
+                shutil.copyfile(args.events, event_snapshot)
+            if file_sha256(event_snapshot) != event_data:
+                parser.error('event transcript changed while it was being snapshotted')
         for path, content in source_data.items():
             (Path(temp) / path.name).write_bytes(content)
         binary, build = build_native(cc, Path(temp),
@@ -491,8 +570,10 @@ def main():
                         input_checkpoint=input_checkpoint,
                         input_manifest_sha256=checkpoint_manifest_sha256,
                         input_gate_sha256=checkpoint_gate_sha256,
-                        event_transcript_sha256=(hashlib.sha256(event_data).hexdigest()
-                                                 if event_data is not None else None),
+                        event_transcript_sha256=event_data,
+                        ab_capture=args.ab, lenient=args.lenient,
+                        overlay=({k: v for k, v in overlay.items() if k != 'native'}
+                                 if overlay else None),
                         capture_source_sha256=(capture_manifest.get('source_sha256') or
                                                capture_manifest.get('capture_source_sha256'))
                                               if capture_manifest else None,
@@ -549,8 +630,31 @@ def main():
             replay_env['CDJ_NXS_DSP_TX_CAPTURE'] = str(args.output / 'dsp-tx.jsonl')
         else:
             replay_env.pop('CDJ_NXS_DSP_TX_CAPTURE', None)
+        for name in ('CDJ_DSP_AB_DIR', 'CDJ_DSP_LENIENT', 'CDJ_DSP_OVERLAY'):
+            replay_env.pop(name, None)
+        if args.ab:
+            replay_env['CDJ_DSP_AB_DIR'] = str(args.output)
+            for name in ('CDJ_C674X_JIT', 'CDJ_DSP_REPLAY_HORIZON',
+                         'CDJ_DSP_REPLAY_RAM_DIRECT'):
+                replay_env.setdefault(name, '1')
+            manifest['fast_paths'] = {name: replay_env.get(name) for name in (
+                'CDJ_C674X_JIT', 'CDJ_DSP_REPLAY_HORIZON', 'CDJ_DSP_REPLAY_RAM_DIRECT',
+                'CDJ_C674X_AOT', 'CDJ_C674X_STATIC', 'CDJ_C674X_PACKET_CACHE')}
+        if args.lenient:
+            replay_env['CDJ_DSP_LENIENT'] = '1'
+        if overlay:
+            native_overlay = Path(temp) / 'overlay.bin'
+            native_overlay.write_bytes(overlay['native'])
+            replay_env['CDJ_DSP_OVERLAY'] = str(native_overlay)
+        started = time.monotonic()
         with (args.output / 'trace.jsonl').open('w') as trace:
             result = subprocess.run(command, stdout=trace, env=replay_env)
+        manifest['replay_wall_seconds'] = round(time.monotonic() - started, 3)
+        if result.returncode == 4 and overlay:
+            manifest.update(outcome='overlay_trigger_not_reached')
+            write_manifest(args.output, manifest)
+            print('overlay trigger PC was never reached', file=sys.stderr)
+            raise SystemExit(1)
         if result.returncode == 3:
             try:
                 diagnostic = event_budget_diagnostic(args.output / 'trace.jsonl')
@@ -608,6 +712,8 @@ def main():
                     args.output / 'repeat-dsp-tx.jsonl')
             with (args.output / 'repeat.jsonl').open('w') as trace:
                 subprocess.run(repeat_command, stdout=trace, check=True, env=repeat_env)
+    if args.ab:
+        return finish_ab(args, manifest, overlay)
     coverage_data = {}
     for trace_name, checkpoint_name, output_name in [
             ('trace.jsonl', 'final.cdjdsp', 'coverage.json'),
@@ -762,6 +868,52 @@ def main():
         if not gate['passed']:
             print('Replay equivalence gate failed; inspect gate.json and saved traces', file=sys.stderr)
             raise SystemExit(1)
+
+
+def finish_ab(args, manifest, overlay):
+    """A/B outputs: no coverage (the trace has no per-store records); record
+    the capture hashes, the lenient summary and where the overlay landed."""
+    events = {}
+    mismatches = []
+    with (args.output / 'trace.jsonl').open() as trace:
+        for line in trace:
+            event = json.loads(line)
+            kind = event.get('event')
+            if kind == 'lenient_mismatch':
+                mismatches.append(event)
+            elif kind in ('stop', 'lenient_summary', 'ab_capture', 'overlay_applied'):
+                events[kind] = event
+    if 'stop' not in events:
+        print('replay trace has no terminal stop record', file=sys.stderr)
+        raise SystemExit(1)
+    stop = events['stop']
+    manifest['stop'] = {key: stop.get(key) for key in
+                        ('reason', 'fault', 'pc', 'fault_pc', 'fault_word',
+                         'packets', 'cycles')}
+    words = events['ab_capture']['words']
+    manifest['ab_files'] = {
+        name: dict(sha256=file_sha256(args.output / name),
+                   bytes=(args.output / name).stat().st_size)
+        for name in ('mcasp1.bin', 'mcasp2.bin', 'host.bin')}
+    manifest['ab_words_per_serializer'] = {
+        f'mcasp{i + 1}': {str(s): n for s, n in enumerate(words[i]) if n}
+        for i in range(2)}
+    if args.lenient:
+        manifest['lenient_summary'] = events.get('lenient_summary')
+        manifest['lenient_first_mismatches'] = mismatches[:100]
+    if overlay:
+        manifest['overlay']['applied'] = 'overlay_applied' in events
+        manifest['overlay']['applied_at'] = events.get('overlay_applied')
+    manifest['output_checkpoint'] = {
+        'file': 'final.cdjdsp',
+        **checkpoint_info((args.output / 'final.cdjdsp').read_bytes())}
+    manifest['coverage'] = None
+    manifest['complete'] = True
+    write_manifest(args.output, manifest)
+    print(json.dumps(dict(stop=manifest['stop'], wall_seconds=manifest['replay_wall_seconds'],
+                          lenient=manifest.get('lenient_summary'),
+                          overlay_applied=events.get('overlay_applied')),
+                     separators=(',', ':')))
 
 
 if __name__ == '__main__':

@@ -27,6 +27,9 @@ bool cdj_c6747_cache_write(CdjC6747Cache *cache, uint32_t address,
                            uint64_t value, unsigned size, bool commit);
 /* Translate a currently exposed local/global L1D SRAM span to its physical
  * 32 KiB backing-store offset. Reserved cache modes expose no SRAM. */
+/* Bytes of L1D configured as SRAM (the window cdj_c6747_l1d_sram_span maps
+ * at 0x00f00000 and 0x11f00000). */
+uint32_t cdj_c6747_l1d_sram_bytes(const CdjC6747Cache *cache);
 bool cdj_c6747_l1d_sram_span(const CdjC6747Cache *cache, uint32_t address,
                              size_t size, uint32_t *offset);
 

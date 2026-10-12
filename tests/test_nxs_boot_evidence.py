@@ -266,8 +266,8 @@ def test_dsp_pcm_render_requires_functional_audio(monkeypatch):
     assert error.value.code == 2
 
 
-@pytest.mark.parametrize('interval,deferred,profile', [
-    (0, False, False), (0.5, False, False), (0, True, False), (0, True, True),
+@pytest.mark.parametrize('interval,profile', [
+    (0, False), (0.5, False), (0, True),
 ])
 @pytest.mark.parametrize('fresh_link,trace_link',
                          [(None, False), (False, False), (True, True)])
@@ -276,7 +276,7 @@ def test_dsp_pcm_render_requires_functional_audio(monkeypatch):
 @pytest.mark.parametrize('disc_attached', [False, True])
 @pytest.mark.parametrize('fast_dsp', [False, True])
 def test_run_manifest_records_launched_inputs_and_optional_observations(
-        tmp_path, monkeypatch, interval, deferred, profile, fresh_link, trace_link,
+        tmp_path, monkeypatch, interval, profile, fresh_link, trace_link,
         virtual_clock,
         custom_main, disc_attached, fast_dsp):
     paths = ('bin/cdj-run', 'build/qemu/build/qemu-system-sh4',
@@ -299,10 +299,8 @@ def test_run_manifest_records_launched_inputs_and_optional_observations(
         selected_main = tmp_path / 'modified-main.bin'
         selected_main.write_bytes(b'independent modified MAIN image')
         argv += ['--main-firmware', str(selected_main), '--trace-bus', '--ethernet-peer-port', '6123']
-    if deferred:
-        argv.append('--deferred-dsp-scheduling')
     if fast_dsp:
-        argv.append('--fast-dsp')
+        argv.extend(('--dsp-legacy-budget', '65536'))
     if profile:
         argv.append('--qemu-sync-profile')
     if fresh_link is not None:
@@ -358,7 +356,7 @@ def test_run_manifest_records_launched_inputs_and_optional_observations(
             assert kwargs['env']['CDJ_REQ_STATUS_FRESH'] == '0'
             assert kwargs['env']['CDJ_LINK_LINK_ROWS'] == 'off'
             assert kwargs['env']['CDJ_NXS_DSP_SCHEDULER'] == (
-                'deferred-v1' if deferred else 'legacy')
+                'legacy')
             assert kwargs['env']['CDJ_NXS_DSP_LEGACY_BUDGET'] == (
                 '65536' if fast_dsp else '1000000')
             assert kwargs['env'].get('CDJ_NXS_DSP_VIRTUAL_MCASP') == (
@@ -390,7 +388,7 @@ def test_run_manifest_records_launched_inputs_and_optional_observations(
     assert not any(neutral[:15] + neutral[16:])
     assert manifest['link_delivery'] == ('fresh-only diagnostic' if expected_fresh
                                          else 'legacy cached repeats')
-    expected_scheduler = 'deferred-v1' if deferred else 'legacy'
+    expected_scheduler = 'legacy'
     assert manifest['main_environment']['CDJ_NXS_DSP_SCHEDULER'] == expected_scheduler
     assert manifest['dsp_scheduler_mode'] == expected_scheduler
     assert manifest['dsp_legacy_budget_packets'] == (65536 if fast_dsp else 1000000)
@@ -409,11 +407,9 @@ def test_run_manifest_records_launched_inputs_and_optional_observations(
     else:
         collector.assert_not_called()
     assert manifest['architectural_validation_eligible'] is not (
-        deferred or fast_dsp or virtual_clock or pcm_render)
+        True)  # fault-only (lightweight) capture is the default
     if virtual_clock:
         assert '4096-packet slices' in manifest['scheduling_provenance']
-    elif deferred:
-        assert 'not a DSP timing fix' in manifest['scheduling_provenance']
     elif fast_dsp:
         assert 'exploratory host-fairness mode' in manifest['scheduling_provenance']
     else:
@@ -436,17 +432,27 @@ def test_run_manifest_records_launched_inputs_and_optional_observations(
     else:
         assert 'frame_snapshots' not in manifest
         assert not (tmp_path / 'run/frames').exists()
-@pytest.mark.parametrize('fast,requested,expected', [
-    (False, None, 1000000),
-    (True, None, 65536),
-    (False, 4096, 4096),
-    (False, 1000000, 1000000),
+@pytest.mark.parametrize('requested,expected', [
+    (None, 1000000),
+    (65536, 65536),
+    (4096, 4096),
+    (1000000, 1000000),
 ])
-def test_legacy_dsp_budget_launcher_policy(fast, requested, expected):
-    assert nxs_vm.legacy_dsp_budget(fast, requested) == expected
+def test_legacy_dsp_budget_launcher_policy(requested, expected):
+    assert nxs_vm.legacy_dsp_budget(requested) == expected
+
+
+@pytest.mark.parametrize('option', ['--fast-dsp', '--deferred-dsp-scheduling',
+                                    '--timestamp-run'])
+def test_removed_options_fail_naming_the_replacement(monkeypatch, capsys, option):
+    monkeypatch.setattr(nxs_vm.sys, 'argv', ['nxs_vm', 'unused', option])
+    with pytest.raises(SystemExit) as error:
+        nxs_vm.main()
+    assert error.value.code == 2
+    assert f'{option} was removed' in capsys.readouterr().err
 
 
 @pytest.mark.parametrize('requested', [0, 4095, 1000001])
 def test_legacy_dsp_budget_launcher_rejects_unsafe_values(requested):
     with pytest.raises(ValueError, match='4096..1000000'):
-        nxs_vm.legacy_dsp_budget(False, requested)
+        nxs_vm.legacy_dsp_budget(requested)

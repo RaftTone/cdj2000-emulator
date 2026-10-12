@@ -113,13 +113,19 @@ static bool enqueue(PendingQueue *queue, EventKind kind, unsigned channel)
 
 static bool complete_one(CdjC6747Edma *s, EventKind kind, unsigned channel,
                          const CdjC6747EdmaBus *bus, bool commit,
-                         PendingQueue *queue)
+                         PendingQueue *queue, CdjC6747EdmaJournal *journal)
 {
     unsigned set = kind == EVENT_DMA ? channel :
                    ((s->qchmap[channel] >> 5) & 0x1ffu);
     if (set >= CDJ_C6747_EDMA_PARAMS) return false;
     uint32_t original[8];
     memcpy(original, s->param[set], sizeof(original));
+    /* The only PaRAM set an event changes is its own. */
+    if (journal && !(journal->saved[set / 64] >> (set % 64) & 1)) {
+        journal->saved[set / 64] |= UINT64_C(1) << (set % 64);
+        journal->set[journal->count] = set;
+        memcpy(journal->param[journal->count++], original, sizeof(original));
+    }
     if (!transfer_bytes(original, bus, commit)) return false;
 
     uint32_t opt = original[0];
@@ -217,7 +223,7 @@ static bool complete_one(CdjC6747Edma *s, EventKind kind, unsigned channel,
 
 static bool service(CdjC6747Edma *s, const PendingEvent *initial,
                     unsigned initial_count, const CdjC6747EdmaBus *bus,
-                    bool commit)
+                    bool commit, CdjC6747EdmaJournal *journal)
 {
     PendingQueue queue = {0};
     for (unsigned i = 0; i < initial_count; ++i)
@@ -228,7 +234,7 @@ static bool service(CdjC6747Edma *s, const PendingEvent *initial,
     while (queue.head < queue.tail) {
         PendingEvent event = queue.items[queue.head++];
         if (!complete_one(s, event.kind, event.channel, bus, commit,
-                          &queue)) {
+                          &queue, journal)) {
             ok = false;
             break;
         }
@@ -357,11 +363,11 @@ static bool write_channel(CdjC6747Edma *s, uint32_t local, uint32_t dmask,
             if (d & (1u << ch)) events[count++] = (PendingEvent){EVENT_DMA, ch};
         {
             CdjC6747Edma preview = *s; preview.esr |= d;
-            if (!service(&preview, events, count, bus, false)) return false;
+            if (!service(&preview, events, count, bus, false, NULL)) return false;
         }
         if (!commit) return true;
         s->esr |= d;
-        return service(s, events, count, bus, true);
+        return service(s, events, count, bus, true, NULL);
     case 0x28: if (commit) s->eer &= ~d; return true;
     case 0x30:
         /* A previously latched external event is serviced on enable. */
@@ -371,11 +377,11 @@ static bool write_channel(CdjC6747Edma *s, uint32_t local, uint32_t dmask,
             if (d & (1u << ch)) events[count++] = (PendingEvent){EVENT_DMA, ch};
         if (count) {
             CdjC6747Edma preview = *s; preview.eer |= value & dmask;
-            if (!service(&preview, events, count, bus, false)) return false;
+            if (!service(&preview, events, count, bus, false, NULL)) return false;
         }
         if (!commit) return true;
         s->eer |= value & dmask;
-        return count ? service(s, events, count, bus, true) : true;
+        return count ? service(s, events, count, bus, true, NULL) : true;
     case 0x40: if (commit) s->ser &= ~d; return true;
     case 0x58: if (commit) s->ier &= ~d; return true;
     case 0x60: if (commit) s->ier |= d; return true;
@@ -428,12 +434,12 @@ bool cdj_c6747_edma_write(CdjC6747Edma *s, uint32_t address, uint64_t value,
         PendingEvent events[CDJ_C6747_EDMA_QCHANNELS];
         for (unsigned i = 0; i < n; ++i)
             events[i] = (PendingEvent){EVENT_QDMA, matches[i]};
-        if (n && !service(&preview, events, n, bus, false)) return false;
+        if (n && !service(&preview, events, n, bus, false, NULL)) return false;
         if (!commit) return true;
         for (unsigned i = 0; i < word_count; ++i)
             s->param[set][word + i] = words[i];
         for (unsigned i = 0; i < n; ++i) s->qer |= 1u << matches[i];
-        return n ? service(s, events, n, bus, true) : true;
+        return n ? service(s, events, n, bus, true, NULL) : true;
     }
     if (o >= 0x200u && o <= 0x21cu) {
         if (!legal_qchmap(v)) return false;
@@ -498,10 +504,33 @@ bool cdj_c6747_edma_event(CdjC6747Edma *s, unsigned channel,
     CdjC6747Edma preview = *s;
     if (preview.er & bit) preview.emr |= bit;
     preview.er |= bit;
-    if (!service(&preview, &event, 1, bus, false)) return false;
+    if (!service(&preview, &event, 1, bus, false, NULL)) return false;
     if (s->er & bit) s->emr |= bit;
     s->er |= bit;
-    return service(s, &event, 1, bus, true);
+    return service(s, &event, 1, bus, true, NULL);
+}
+
+/* The commit pass alone: it runs what the trial run did, on the same state,
+ * with writes, so it fails where the trial would have. */
+bool cdj_c6747_edma_event_unchecked(CdjC6747Edma *s, unsigned channel,
+                                    const CdjC6747EdmaBus *bus,
+                                    CdjC6747EdmaJournal *journal)
+{
+    if (channel >= CDJ_C6747_EDMA_CHANNELS) return false;
+    uint32_t bit = 1u << channel;
+    if (!(s->eer & bit)) { s->er |= bit; return true; }
+    PendingEvent event = {EVENT_DMA, channel};
+    if (s->er & bit) s->emr |= bit;
+    s->er |= bit;
+    return service(s, &event, 1, bus, true, journal);
+}
+
+void cdj_c6747_edma_journal_undo(CdjC6747Edma *s,
+                                 const CdjC6747EdmaJournal *journal)
+{
+    for (unsigned i = 0; i < journal->count; ++i)
+        memcpy(s->param[journal->set[i]], journal->param[i],
+               sizeof(journal->param[i]));
 }
 
 bool cdj_c6747_edma_irq_pending(const CdjC6747Edma *s, unsigned region)

@@ -18,7 +18,7 @@ The NXS launcher resolves `bin/cdj-run.exe` and `CDJ_QEMU`. `--debug` and
 sockets on macOS.
 
 For the optional SH7764 EtherC/RTL8201FL localhost backend, custom Dante MAIN
-input, integration tests and evidence limitations, see [ETHERNET_LOCAL.md](ETHERNET_LOCAL.md).
+input, integration tests and evidence limitations, see ETHERNET_LOCAL.md.
 The normal QEMU build script includes the new controller/PHY automatically.
 Without `--ethernet-peer-port`, the launcher keeps the Ethernet link disconnected.
 
@@ -36,7 +36,9 @@ The tool hashes the transcript and names the firmware address-map hash, but
 does not authenticate its origin or establish boot, GUI liveness, or absence
 of a later error. Use it alongside strict replay and the connected visual gate.
 
-Deferred scheduling is an opt-in diagnostic, not a boot-validation mode:
+Deferred scheduling was an opt-in diagnostic, not a boot-validation mode.
+`nxs_vm --deferred-dsp-scheduling` has since been removed (use `--dsp-thread`);
+the board and replay still accept deferred-v1 state. Historical recipe:
 
 ```sh
 .venv/bin/python -m pytest -q tests/test_dsp_scheduler.py \
@@ -453,6 +455,34 @@ Check the board is there:
 ```sh
 qemu-system-sh4 -M help | grep cdj2000
 ```
+
+### Optional: ahead-of-time DSP regions from your own firmware
+
+`tools/cdj_dsp/aot_gen.py` compiles the hottest C674x packets of a DSP
+image to C. Its output is derived from the firmware, so it is never
+committed: you generate it from your own NXS firmware and hand it to the
+build.
+
+1. Capture DSP checkpoints of a run of your own firmware, e.g. boot and
+   play a track with `python -m tools.cdj_main.nxs_vm runs/aot-src
+   --no-lightweight --test-track` (checkpoints land in
+   `runs/aot-src/dsp-checkpoints/`).
+2. Profile one or more of them with the replay, with the compiled paths
+   on (`--ab` turns them on; without them the profile stays empty):
+   `CDJ_DSP_AOT_PROFILE=runs/aot-1.prof python -m tools.cdj_dsp.replay
+   CHECKPOINT runs/aot-replay-1 --ab --trace-mode compact
+   --functional-dsp-audio --steps 20000000`. A checkpoint needs the
+   `manifest.json` written beside it.
+3. Generate: `python tools/cdj_dsp/aot_gen.py runs/aot.inc runs/aot-*.prof`.
+4. Build with it: `CDJ_C674X_AOT_SOURCE=runs/aot.inc sh
+   scripts/build-qemu-sh4.sh QEMU_SRC` (without the variable, any earlier
+   copy is removed and the core builds without regions).
+
+`nxs_vm` turns compiled regions on when the binary has them (`--dsp-aot`,
+the default; `--no-dsp-aot` to compare). A region runs only for code whose
+bytes match what was profiled, so a stale file is slower, never wrong.
+Regenerate after changing `emulator/qemu/cdj_c674x.c`: the generator
+asserts the core's numbering and refuses a profile from another core.
 
 ### Rebuild immediately, and check the timestamp
 

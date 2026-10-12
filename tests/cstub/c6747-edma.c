@@ -187,6 +187,29 @@ int main(void)
     assert(wr(&s, &bus, EDMA + 0x2270, 1u << 3));
     assert(!cdj_c6747_edma_irq_pending(&s, 1));
     assert(s.transfer_requests == 32 && s.bytes_transferred == 128);
+    /* The unchecked event (no trial copy): the same 32 events give the
+     * same state and port words, and the journal holds each changed PaRAM
+     * set once, as it stood before. */
+    {
+        CdjC6747Edma u = before;
+        TestBus memory_u = memory_before;
+        const CdjC6747EdmaBus ubus = {bus_read, bus_write, &memory_u};
+        CdjC6747EdmaJournal j;
+        cdj_c6747_edma_journal_reset(&j);
+        for (unsigned event = 0; event < 32; ++event)
+            assert(cdj_c6747_edma_event_unchecked(&u, 3, &ubus, &j));
+        CdjC6747Edma c = before;
+        TestBus memory_c = memory_before;
+        const CdjC6747EdmaBus cbus = {bus_read, bus_write, &memory_c};
+        for (unsigned event = 0; event < 32; ++event)
+            assert(cdj_c6747_edma_event(&c, 3, &cbus));
+        assert(!memcmp(&u, &c, sizeof(u)));
+        assert(!memcmp(&memory_u, &memory_c, sizeof(memory_u)));
+        assert(j.count == 1 && j.set[0] == 3 &&
+               !memcmp(j.param[0], before.param[3], sizeof(j.param[0])));
+        cdj_c6747_edma_journal_undo(&u, &j);
+        assert(!memcmp(u.param, before.param, sizeof(u.param)));
+    }
     (void)before; (void)memory_before;
 
     /* Final chaining services the target DMA channel immediately. */
@@ -204,6 +227,30 @@ int main(void)
     assert(cdj_c6747_edma_write(&s, EDMA + 0x1010, 1, 4, true, &bus));
     assert(memory.memory[0x200] == 0xa5 && memory.memory[0x201] == 0x5a);
     assert(s.transfer_requests == 2 && (s.ipr & 2));
+
+    /* An unchecked event that fails in its chained transfer: the first
+     * transfer's set changed and is journalled; the registers (restored by
+     * the caller) and the journal put everything back. */
+    {
+        CdjC6747Edma u = before;
+        u.param[1][3] = 0x9000;             /* chained destination off the bus */
+        u.eer = 1;
+        const CdjC6747Edma start = u;
+        TestBus memory_u = memory_before;
+        const CdjC6747EdmaBus ubus = {bus_read, bus_write, &memory_u};
+        CdjC6747Edma c = start;
+        assert(!cdj_c6747_edma_event(&c, 0, &ubus));
+        assert(!memcmp(&c, &start, sizeof(c)));
+        CdjC6747EdmaJournal j;
+        cdj_c6747_edma_journal_reset(&j);
+        assert(!cdj_c6747_edma_event_unchecked(&u, 0, &ubus, &j));
+        assert(j.count == 2 && j.set[0] == 0 && j.set[1] == 1);
+        assert(memcmp(u.param[0], start.param[0], sizeof(u.param[0])));
+        const size_t regs = offsetof(CdjC6747Edma, qchmap);
+        memcpy((char *)&u + regs, (const char *)&start + regs, sizeof(u) - regs);
+        cdj_c6747_edma_journal_undo(&u, &j);
+        assert(!memcmp(&u, &start, sizeof(u)));
+    }
 
     /* STATIC suppresses every PaRAM update while preserving the movement. */
     cdj_c6747_edma_reset(&s); memset(&memory, 0, sizeof(memory));

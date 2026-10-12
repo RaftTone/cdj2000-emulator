@@ -9,20 +9,24 @@ binaries must already be installed; see README.md and BUILD.md for setup.
 From the repository root:
 
 ```sh
-python -m tools.cdj_main.nxs_vm --test-track --debug --lightweight --ui \
-  --seconds 1800 --functional-dsp-audio --source-key-when-ready
+python -m tools.cdj_main.launch deck
 ```
+
+(`deck` expands to `nxs_vm --ui --debug --seconds 3600 --functional-dsp-audio
+--source-key-when-ready --test-track`, or `--usb $CDJ_USB` when that is set;
+options you add override it.)
 
 The launcher chooses a fresh timestamped directory under `runs/` and prints its
 path and follow-up commands. You can also give an explicit new path as the first
 argument. Occupied ports and missing inputs are reported before starting the
-boards. Use `--port 6380` for a second independent session.
+boards. A second session picks the next free port block by itself; `--port`
+fixes it.
 
 `--test-track` creates a 512 MiB FAT32 image with a ten-second stereo PCM WAV
 inside the run. It cannot be combined with `--sd`; use `--sd IMAGE` to reuse an
-existing fixture. Guest media writes use disposable overlays. `--lightweight`
-omits the large normal DSP event capture while retaining fault-triggered
-checkpoints; omit it when the full event transcript is needed. Fresh-only link
+existing fixture. Guest media writes use disposable overlays. DSP capture is
+fault-only by default (`--lightweight`); pass `--no-lightweight` when the full
+event transcript and every checkpoint are needed. Fresh-only link
 delivery is the NXS default and is recorded in the manifest. `--cached-link`
 restores the old repeated-delivery diagnostic.
 

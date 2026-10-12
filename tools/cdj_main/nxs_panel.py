@@ -1,7 +1,7 @@
 """NXS physical contacts, decoded by MAIN 042f5810 (not the legacy panel).
 
 Names are from service tables 040b0eb4/040b0fac/040b0fdc and the
-name-pointer table at unpacked image offset 003c32f0. See NXS_PANEL_MAP.md.
+name-pointer table at unpacked image offset 003c32f0. See docs/NXS_PANEL_MAP.md.
 """
 from tools.cdj_main import panel_control as legacy
 

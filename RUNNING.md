@@ -4,6 +4,11 @@ Everything below assumes you have built both emulators (BUILD.md) and extracted
 your own firmware into `firmware/` (FIRMWARE.md). Run every command from the
 repository root.
 
+For the CDJ-2000NXS, the quickest start is `python -m tools.cdj_main.launch
+deck` (a generated test track, or `CDJ_USB=IMAGE` for your own USB image);
+README.md describes its defaults and DEVELOPING.md the agent workflow. The
+sections below are the original CDJ-2000 profile unless they say NXS.
+
 ## The whole player, in a window
 
 ```sh
@@ -324,6 +329,36 @@ Do not enable fresh-only delivery as a workaround: it remains diagnostic-only.
 E-7206 auth-chip emulation is still unresolved; USB/SD loading and audio playback
 are not yet validated.
 
+### NXS EMERGENCY LOOP at a track end (2026-10-06)
+
+`EMERGENCY LOOP` on the player screen is status-record word 20 = 0x46, a
+GUI message (`EMERGENCY LOOP(*)` in the GUI's message table). On a deck it
+is the loop the player falls back to when its buffered audio runs out on a
+stream it has not finished reading; MAIN's RS-232 `Emergency Loop Test`
+command forces it by flagging the PCM region reader. The MAIN code that
+raises 0x46 was not located. A normal track end does not show it, and the
+stock firmware on the real C674x does not: on the confirmed USB, Obey (MP3)
+played its last 28 s into track 06 with no message (`runs/el-real-5`,
+`--functional-dsp-audio`, needle search while paused, then PLAY; also
+`runs/el-real-3`).
+
+It came from the DSP model (`--dsp-model`). For a coded stream MAIN's input
+pump feeds 8 KiB file chunks beside each 0x28-frame header, one handshake
+each (MAIN writes 0x118381c4 = 1, 2 for the file's last chunk; the DSP
+clears it), and the stock DSP consumes the header only once it has decoded
+its frames: 2.77 chunks per header for Obey (`runs/el-real-8`). The model
+consumed every header on its first chunk, so its position ran 2.6x ahead of
+MAIN's file reader; at the track's length most of the file was unread, MAIN
+kept feeding the finished stream, showed EMERGENCY LOOP and started track 06
+25-60 s late (`runs/el-model-1`). The model now keeps a coded header pending
+until the chunks its frames take at the stream's mean rate (command +0x18
+bytes over +0x1c frames) have arrived, caps the deck stream at its length as
+the stock DSP does (its last-received word ends on length - 1), and treats
+the 0x3000100/0x3000200 status write (MAIN's end-of-file flag) as a
+status-block copy instead of frames. Obey now plays into track 06 with no
+message and no gap (`runs/el-model-9`, `runs/el-model-final`). PCM
+(AIFF/WAV, command 2) streams take their headers at once as before.
+
 ### Existing tracing tools
 
 ```sh
@@ -370,7 +405,11 @@ clock the firmware programs its core timer for), and when the firmware parks
 its main loop or executes `IDLE` the simulator sleeps until the next event or
 the next record from MAIN. Guest time never runs ahead of the wall clock, so
 this board and the QEMU board, which was always on the wall clock, see the same
-time. Bursts the interpreter cannot keep up with make guest time fall behind,
+time. (One exception: with `--dsp-thread`, the default, MAIN's virtual clock
+stops while MAIN waits for the interpreted DSP on an HPI access, so after PLAY
+MAIN's time runs behind the wall clock; `CDJ_NXS_DSP_HOST_TIME=1` in QEMU's
+environment restores the old behaviour. See PERFORMANCE.md, "Virtual time held
+while MAIN waits for the DSP".) Bursts the interpreter cannot keep up with make guest time fall behind,
 up to `BFIN_WALL_LAG_MS` (50); the excess is dropped and reported.
 
 The display DMA is paced per frame at `BFIN_PPI_FPS` (60) instead of one
@@ -438,7 +477,7 @@ in the following historical section describe CDJ-2000. They are not verified
 NXS addresses. NXS successfully lists TESTTONE.WAV with status halfword 26
 still at `0x1000`; that value does not establish a mount or browse blocker.
 Native NXS panel ENTER and LOAD are verified; see
-[NXS_LINK_LOADING.md](NXS_LINK_LOADING.md) for the actual captures and timing.
+NXS_LINK_LOADING.md for the actual captures and timing.
 
 **Switching to a medium.** With a card image (`--sd card.img`, a rekordbox
 export on it) the launchers put the card in at 10 s and press its key at

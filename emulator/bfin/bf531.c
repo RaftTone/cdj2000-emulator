@@ -12,6 +12,7 @@
  * every channel, SPORT1 registers modelled, the real SIC mask (no forced
  * DMA3 bit), PF straps, ELF boot, a configurable frame period, and the
  * flash's AMD program/erase commands (the GUI saves settings at run time).
+ * Changed 2026-10-07: sector erase follows the MX29LV160DT top-boot layout.
  */
 /*
  * ADSP-BF531 SoC model (see bf531.h). System MMRs sit at 0xFFC00000; the
@@ -638,9 +639,31 @@ static uint32_t mem_read(bf531 *s, uint32_t addr, unsigned size)
 
 /* The flash's AMD command set (cmdset 2, as the gdb board file's CFI
  * device): unlock AA/55 at word 0x555/0x2AA, then A0 programs the next word
- * (bits can only clear), 80 + unlock + 30 erases the 64 KB sector, + 10 the
+ * (bits can only clear), 80 + unlock + 30 erases the sector, + 10 the
  * chip. Reads stay in array mode, so the firmware's DQ7/DQ6 status polls
  * see the operation already done. Only the in-memory copy changes. */
+/* The NXS GUI's MX29LV160DT is a top-boot part: 31 64 KB sectors, then
+ * 32, 8, 8 and 16 KB. The installer (0x00d09db0) erases 0x1F0000, 0x1F8000
+ * and 0x1FA000 separately and leaves 0x1FC000 (the brightness journal)
+ * alone, which a uniform 64 KB model would wipe with them. */
+static void flash_sector(uint32_t off, uint32_t *at, uint32_t *len)
+{
+    static const uint32_t top[][2] = {
+        { 0x1FC000, 0x4000 }, { 0x1FA000, 0x2000 }, { 0x1F8000, 0x2000 },
+        { 0x1F0000, 0x8000 },
+    };
+
+    for (unsigned i = 0; i < 4; i++) {
+        if (off >= top[i][0]) {
+            *at = top[i][0];
+            *len = top[i][1];
+            return;
+        }
+    }
+    *at = off & ~0xFFFFu;
+    *len = 0x10000;
+}
+
 static void flash_write(bf531 *s, uint32_t off, uint32_t v, unsigned size)
 {
     unsigned word = (off >> 1) & 0x7FF;
@@ -676,10 +699,13 @@ static void flash_write(bf531 *s, uint32_t off, uint32_t v, unsigned size)
         break;
     case 5:
         if (cmd == 0x30 || (cmd == 0x10 && word == 0x555)) {
-            uint32_t at = cmd == 0x30 ? off & ~0xFFFFu : 0;
+            uint32_t at = 0, len = FLASH_SIZE;
 
-            memset(s->flash + at, 0xFF, cmd == 0x30 ? 0x10000 : FLASH_SIZE);
-            slog(s, "flash erase 0x%08x", ASYNC_BASE + at);
+            if (cmd == 0x30) {
+                flash_sector(off, &at, &len);
+            }
+            memset(s->flash + at, 0xFF, len);
+            slog(s, "flash erase 0x%08x +0x%x", ASYNC_BASE + at, len);
         }
         break;
     }

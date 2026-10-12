@@ -14,6 +14,9 @@
  * Changed 2026-10-05 (bfin-link): the MAIN link and co-simulation
  * (cdj_link.c), an ELF BOOT (gui-boot-memory.elf, as bin/cdj-run loads it),
  * wall-clock pacing, and bin/cdj-run's environment (below).
+ * Changed 2026-10-07 (nxs-gui-update): BFIN_CFI_DUMP, BFIN_FLASH_BOOT_AT,
+ * BFIN_CODE_RANGE and
+ * a clean stop on SIGTERM/SIGINT, for the GUI update round trip.
  *
  *   cdj-gui-run [-s seconds | -n cycles] [-o screen.ppm] [-f flash.bin]
  *               [-g mask] [-x lo:hi] [-q] BOOT
@@ -29,8 +32,14 @@
  * BFIN_TIME_BASE=virtual; with BFIN_COSIM it is virtual and kept within
  * MAIN's promise; alone it is unpaced unless BFIN_TIME_BASE=wall.
  *
- * -x reports how many 256-byte code lines in [lo, hi) ran (see
- * bfin_code_lines_run), e.g. a mod's extension range.
+ * BFIN_CFI_DUMP=<path> writes the flash, as the run left it, at exit
+ * (SIGTERM and SIGINT end the run cleanly so that still happens).
+ * BFIN_FLASH_BOOT_AT=<offset> boots a 2 MiB flash image's LDR stream from
+ * that offset (0x10000 for an updater-programmed flash) whatever sector 0
+ * holds: the real first-stage loader there is not in any file we have.
+ *
+ * -x (or BFIN_CODE_RANGE=lo:hi) reports how many 256-byte code lines in
+ * [lo, hi) ran (see bfin_code_lines_run), e.g. a mod's extension range.
  *
  * BOOT is an ELF (with -f for the flash), a C2KGUI.UPD (0x20-byte title),
  * its body, a bare LDR stream, or a 2 MiB flash image: firmware/nxs/gui-flash-image.bin (stream at 0, the
@@ -148,6 +157,13 @@ static uint8_t *read_file(const char *path, size_t *len)
     return buf;
 }
 
+static volatile sig_atomic_t stop_signal;
+
+static void on_stop_signal(int sig)
+{
+    stop_signal = sig;
+}
+
 static double now(void)
 {
     struct timespec t;
@@ -175,6 +191,7 @@ static void warn_unsupported(void)
         "BFIN_LINK_NATIVE_PARTIAL_DMA", "BFIN_LINK_DEPTH", "BFIN_SPORT_RX_ZERO_200",
         "BFIN_LINK_NO_ZERO200", "BFIN_MAIN_PEER", "BFIN_MAIN_PEER_STATUS",
         "BFIN_MAIN_PEER_STATUS_HOLD", "BFIN_COSIM", "BFIN_COSIM_QUANTUM_US",
+        "BFIN_CFI_DUMP", "BFIN_FLASH_BOOT_AT", "BFIN_CODE_RANGE",
         /* gdb-only switches with nothing to do here */
         "BFIN_PARALLEL_WRITEBACK", "BFIN_EXCEPTION_TRACE",
     };
@@ -247,6 +264,10 @@ int main(int argc, char **argv)
             return 2;
         }
     }
+    if (xhi <= xlo && getenv("BFIN_CODE_RANGE") && *getenv("BFIN_CODE_RANGE")) {
+        xlo = strtoul(getenv("BFIN_CODE_RANGE"), &end, 0);       /* -x, from nxs_vm */
+        xhi = *end == ':' ? strtoul(end + 1, NULL, 0) : xlo + 1;
+    }
     if (optind + 1 != argc || !(boot = read_file(argv[optind], &boot_len))) {
         fprintf(stderr, "%s: one boot image (UPD, body, LDR or flash) needed\n", argv[0]);
         return 2;
@@ -259,6 +280,8 @@ int main(int argc, char **argv)
     strcat(r.tmp, ".tmp");
 
     signal(SIGPIPE, SIG_IGN);
+    signal(SIGTERM, on_stop_signal);
+    signal(SIGINT, on_stop_signal);
     warn_unsupported();
     r.link = cdj_link_new();
     r.cclk = env_num("BFIN_CCLK_HZ", BF531_CCLK_HZ);
@@ -281,7 +304,17 @@ int main(int argc, char **argv)
         uint32_t first;
 
         memcpy(&first, boot, 4);
-        if (first == 0xFFFFFFFFu) {
+        if (getenv("BFIN_FLASH_BOOT_AT") && *getenv("BFIN_FLASH_BOOT_AT")) {
+            uint32_t at = strtoul(getenv("BFIN_FLASH_BOOT_AT"), NULL, 0);
+
+            if (at >= flash_size) {
+                fprintf(stderr, "%s: BFIN_FLASH_BOOT_AT past the flash\n", argv[0]);
+                return 2;
+            }
+            ldr += at;
+            ldr_len -= at;
+            fprintf(stderr, "cdj-gui-run: booting the flash's LDR at 0x%x\n", at);
+        } else if (first == 0xFFFFFFFFu) {
             ldr += FLASH_APP;
             ldr_len -= FLASH_APP;
         }
@@ -357,7 +390,7 @@ int main(int argc, char **argv)
             stats(&r, wall);
             next_stats += stats_every;
         }
-        if (exit_after > 0 && now() - start >= exit_after) {
+        if ((exit_after > 0 && now() - start >= exit_after) || stop_signal) {
             break;
         }
     }
@@ -384,6 +417,16 @@ int main(int argc, char **argv)
         fprintf(stderr, "idle with no event pending\n");
     } else if (stop == BFIN_STOP_BREAK) {
         fprintf(stderr, "break at 0x%08x\n", bfin_get_pc(c));
+    }
+    const char *dump = getenv("BFIN_CFI_DUMP");
+    if (dump && *dump) {
+        FILE *f = fopen(dump, "wb");
+
+        if (!f || fwrite(flash, 1, flash_size, f) != flash_size || fclose(f)) {
+            fprintf(stderr, "%s: cannot write the flash dump\n", dump);
+        } else {
+            fprintf(stderr, "flash dumped to %s\n", dump);
+        }
     }
     bf531_free(s);
     cdj_link_free(r.link);

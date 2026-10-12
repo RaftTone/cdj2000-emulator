@@ -279,3 +279,12 @@ def test_debug_chardev_stays_unix_on_posix_and_tcp_on_windows(tmp_path, monkeypa
         assert any(part.startswith('tcp:127.0.0.1:') and 'server=on' in part for part in main)
         assert any(part.startswith('telnet:127.0.0.1:') for part in main)
         assert not any(part.startswith('unix:') for part in main)
+
+
+def test_port_defaults_to_first_free_block(monkeypatch):
+    monkeypatch.setattr(nxs_vm, 'occupied_local_ports',
+                        lambda base, debug: [base] if base < 6000 else [])
+    monkeypatch.setattr(nxs_vm, '_port_taken', lambda port: False)
+    assert nxs_vm.free_port_block(True, False) == 6000
+    monkeypatch.setattr(nxs_vm, 'occupied_local_ports', lambda base, debug: [base])
+    assert nxs_vm.free_port_block(True, False) is None

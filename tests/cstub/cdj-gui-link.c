@@ -446,7 +446,12 @@ static void test_dma(void)
     for (int i = 0; i < 5; i++) {
         bf531_write(s, 0x20000000 + erase[i][0], erase[i][1], 2);
     }
-    bf531_write(s, 0x201f0000, 0x30, 2);
+    bf531_write(s, 0x201f0000, 0x30, 2);                /* the 32 KB sector only */
+    assert(bf531_read(s, 0x201fc000, 2) == 0x0300);
+    for (int i = 0; i < 5; i++) {
+        bf531_write(s, 0x20000000 + erase[i][0], erase[i][1], 2);
+    }
+    bf531_write(s, 0x201fc000, 0x30, 2);                /* the 16 KB top boot block */
     assert(bf531_read(s, 0x201fc000, 2) == 0xFFFF);
 
     /* Straps on the PF port. */

@@ -21,6 +21,7 @@ SHIM = r'''
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include "cdj_dsp_audio_clock.h"
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define NANOSECONDS_PER_SECOND 1000000000LL
@@ -28,6 +29,8 @@ SHIM = r'''
 #define qatomic_set(p, v) __atomic_store_n(p, v, __ATOMIC_SEQ_CST)
 #define qatomic_inc(p) __atomic_fetch_add(p, 1, __ATOMIC_SEQ_CST)
 #define qatomic_dec(p) __atomic_fetch_sub(p, 1, __ATOMIC_SEQ_CST)
+#define smp_mb() __atomic_thread_fence(__ATOMIC_SEQ_CST)
+static void dsp_thread_prefer_performance(void) {}
 typedef pthread_mutex_t QemuMutex;
 typedef pthread_cond_t QemuCond;
 typedef pthread_t QemuThread;
@@ -66,13 +69,26 @@ static bool bql_locked(void) { return bql_held; }
 static unsigned bh_scheduled;
 static void qemu_bh_schedule(QEMUBH *bh) { (void)bh; qatomic_inc(&bh_scheduled); }
 static void info_report(const char *format, ...) { (void)format; }
+static void dsp_jit_report(void) {}
+/* QEMU_CLOCK_VIRTUAL's run state: held while MAIN waits for the DSP. */
+static bool ticks_enabled = true, vm_running = true;
+static unsigned ticks_held;
+static void cpu_disable_ticks(void) { if (ticks_enabled) ++ticks_held; ticks_enabled = false; }
+static void cpu_enable_ticks(void) { assert(bql_locked()); ticks_enabled = true; }
+static bool runstate_is_running(void) { return vm_running; }
 
 typedef struct {
     bool dsp_started, dsp_halted;
     struct { uint64_t packets; uint32_t pc; } cpu;
     uint64_t idle_skipped_packets;
     uint64_t mailbox[2];   /* written non-atomically inside a chunk */
+    bool thread_audio_clock;   /* off: tests/test_dsp_audio_clock.py */
+    CdjDspAudioClock audio_clock;
+    uint64_t audio_clock_next_packets;
+    struct { uint64_t until; } horizon;    /* the board horizon's bound */
 } NxsHpi;
+static void dsp_horizon_close(NxsHpi *s) { qatomic_set(&s->horizon.until, 0); }
+static uint64_t audio_clock_packets(int64_t ns) { (void)ns; return 0; }
 static NxsHpi *nxs_hpi;
 static void execute_dsp(NxsHpi *s, unsigned quota);
 '''
@@ -102,8 +118,7 @@ static void execute_dsp(NxsHpi *s, unsigned quota)
         if (!(s->cpu.packets & 63)) sched_yield();
         s->mailbox[1] = ++s->cpu.packets;
         if (s->cpu.packets == 1000) dsp_thread_hint(NULL, false);
-        if (qatomic_read(&t->host_waiting) || qatomic_read(&t->quit) ||
-            (t->main_target && s->cpu.packets >= t->main_target)) {
+        if (qatomic_read(&t->quit) || dsp_thread_main_due(s)) {
             ++t->host_breaks;
             break;
         }
@@ -113,12 +128,13 @@ static void execute_dsp(NxsHpi *s, unsigned quota)
     assert(s->cpu.packets <= limit);
 }
 
-static volatile bool probe_bql_free;
+static volatile bool probe_bql_free, probe_ticks;
 static void *bql_probe(void *arg)
 {
     (void)arg;
     while (!qatomic_read(&probe_bql_free)) {
         if (pthread_mutex_trylock(&bql) == 0) {
+            probe_ticks = ticks_enabled;    /* MAIN's wait: clock held */
             qatomic_set(&probe_bql_free, true);
             pthread_mutex_unlock(&bql);
         }
@@ -165,8 +181,13 @@ int main(void)
     assert(bql_locked());
     assert(t->main_waits == 1 && !t->main_target);
     assert(qatomic_read(&probe_bql_free));
+    assert(!probe_ticks && ticks_held == 1 && ticks_enabled);
     assert(hpi.cpu.packets == 150000);
     assert(hpi.mailbox[0] == hpi.mailbox[1]);
+    /* The 50K packets run for MAIN past the pacing limit moved the DSP
+     * clock: the DSP is a quantum ahead again, not 50K packets further. */
+    assert(t->credited_packets == 50000);
+    assert(dsp_thread_packets_at(100000) == 150000);
     main_unlock();
     bql_unlock();
     pthread_join(probe, NULL);
@@ -180,7 +201,7 @@ int main(void)
     pthread_mutex_unlock(&t->lock);
     while (qatomic_read(&t->waits) == pacing) sched_yield();
     pthread_mutex_lock(&t->lock);
-    assert(t->slipped_ns == 10000000 - 150000);
+    assert(t->slipped_ns == 10000000 - 100000);
     assert(hpi.cpu.packets == dsp_thread_packets_at(10000000 + 100000));
     assert(hpi.cpu.packets == 250000);
     pthread_mutex_unlock(&t->lock);
@@ -212,6 +233,16 @@ int main(void)
         main_unlock();
         bql_unlock();
     }
+
+    /* 4b. A VM stopped during the wait keeps its clock stopped. */
+    bql_lock();
+    vm_running = false;
+    main_lock();
+    assert(!ticks_enabled);
+    main_unlock();
+    vm_running = true;
+    ticks_enabled = true;               /* what vm_start does */
+    bql_unlock();
 
     /* 5. A halted DSP never makes MAIN wait. */
     pthread_mutex_lock(&t->lock);
@@ -254,7 +285,7 @@ def test_dsp_thread_handoff(tmp_path):
     harness.write_text(code)
     binary = tmp_path / 'dsp_thread'
     subprocess.run([cc, '-std=gnu11', '-O1', '-g', '-Wall', '-Wno-unused-function',
-                    '-pthread', str(harness), '-o', str(binary)], check=True)
+                    '-I', str(ROOT / 'emulator/qemu'), '-pthread', str(harness), '-o', str(binary)], check=True)
     result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == 'ok'

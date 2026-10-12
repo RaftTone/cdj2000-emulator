@@ -72,6 +72,29 @@ bool cdj_c6747_edma_write(CdjC6747Edma *s, uint32_t address, uint64_t value,
  * events complete synchronously using the functional scheduling abstraction. */
 bool cdj_c6747_edma_event(CdjC6747Edma *s, unsigned channel,
                           const CdjC6747EdmaBus *bus);
+/* The PaRAM sets an unchecked event changed, as they stood before it. */
+typedef struct {
+    uint64_t saved[CDJ_C6747_EDMA_PARAMS / 64];
+    unsigned count;
+    uint8_t set[CDJ_C6747_EDMA_PARAMS];
+    uint32_t param[CDJ_C6747_EDMA_PARAMS][8];
+} CdjC6747EdmaJournal;
+static inline void cdj_c6747_edma_journal_reset(CdjC6747EdmaJournal *j)
+{
+    for (unsigned i = 0; i < CDJ_C6747_EDMA_PARAMS / 64; ++i) j->saved[i] = 0;
+    j->count = 0;
+}
+/* cdj_c6747_edma_event without its trial run on a copy of the whole state:
+ * for a caller that puts the state back itself when it fails.  On failure
+ * the registers outside param[] may have changed (the caller restores them
+ * from its own copy) and so may the PaRAM sets in `journal` (non-NULL),
+ * which cdj_c6747_edma_journal_undo puts back; bus writes may have been
+ * committed.  On success the result is cdj_c6747_edma_event's. */
+bool cdj_c6747_edma_event_unchecked(CdjC6747Edma *s, unsigned channel,
+                                    const CdjC6747EdmaBus *bus,
+                                    CdjC6747EdmaJournal *journal);
+void cdj_c6747_edma_journal_undo(CdjC6747Edma *s,
+                                 const CdjC6747EdmaJournal *journal);
 bool cdj_c6747_edma_irq_pending(const CdjC6747Edma *s, unsigned region);
 /* Consume one region interrupt pulse.  IPR remains set until ICR is written. */
 bool cdj_c6747_edma_take_irq_notification(CdjC6747Edma *s, unsigned region);

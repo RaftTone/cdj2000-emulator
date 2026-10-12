@@ -119,7 +119,13 @@ int main(void)
 }
 '''
     fixture = tmp_path / 'read.c'
-    fixture.write_text(harness + prefix + host + read + span + checks)
+    # Batched ticks (tests/cstub/dsp-ticks.c): nothing ticks here.
+    flush = ('static void dsp_ticks_flush(NxsHpi *s) { (void)s; }\n'
+             'static void dsp_horizon_close(NxsHpi *s) { (void)s; }\n'
+             '/* The core\'s code-page set (cdj_c674x_may_hold_code): none here. */\n'
+             'bool cdj_c674x_may_hold_code(const void *host, size_t size)\n'
+             '{ (void)host; (void)size; return false; }\n')
+    fixture.write_text(harness + prefix + flush + host + read + span + checks)
     binary = tmp_path / 'read-test'
     models = sorted(directory.glob('cdj_c6747_*.c'))
     subprocess.run([cc, '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',

@@ -47,7 +47,8 @@ def checkpoints(run):
 @pytest.mark.parametrize("wrapped", [False, True], ids=["launcher", "launcher-under-wrapper"])
 def test_sigkill_launcher_leaves_no_orphans(tmp_path, wrapped):
     run = tmp_path / "run"
-    args = [str(run), "--seconds", "120", "--qemu", str(QEMU), "--port", "29480"]
+    args = [str(run), "--seconds", "120", "--qemu", str(QEMU), "--port", "29480",
+            "--no-lightweight"]  # checkpoints are the liveness signal
     command = [sys.executable, "-c", WRAPPER, *args] if wrapped else [*NXS_VM, *args]
     top = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.DEVNULL,
                            stderr=subprocess.DEVNULL, start_new_session=True)

@@ -108,6 +108,16 @@ for source in "$REPO"/emulator/qemu/*.c "$REPO"/emulator/qemu/*.h; do
     cp -v "$source" "$QEMU_SRC/hw/sh4/"
 done
 
+# Ahead-of-time DSP regions (tools/cdj_dsp/aot_gen.py): generated from the
+# local DSP image, so never in the repository; CDJ_C674X_AOT_SOURCE names
+# the file, and without it any earlier one is removed.
+aot=$QEMU_SRC/hw/sh4/cdj_c674x_aot.inc
+if [ -n "${CDJ_C674X_AOT_SOURCE:-}" ]; then
+    cmp -s "$CDJ_C674X_AOT_SOURCE" "$aot" || cp -v "$CDJ_C674X_AOT_SOURCE" "$aot"
+elif [ -e "$aot" ]; then
+    rm -v "$aot"
+fi
+
 # Every .c we mirror, as a meson files() argument list.
 sources=$(cd "$REPO/emulator/qemu" && ls *.c | sed "s/.*/'&'/" | paste -sd, -)
 

@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <string.h>
 #include "cdj_c674x.h"
 #include "cdj_c6747_syscfg.h"
@@ -21,6 +22,7 @@
 #include "cdj_c6747_hpi.h"
 #include "cdj_c6747_emifb.h"
 #include "cdj_dsp_checkpoint.h"
+#include "cdj_dsp_ticks.h"
 static uint8_t ram[0x40000];
 static uint8_t shared_ram[CDJ_DSP_SHARED_RAM_SIZE];
 /* Physical L1D storage. Partition visibility is modeled; cache contents and
@@ -61,6 +63,107 @@ static FILE *tx_capture;
 static uint64_t tx_capture_sequence;
 static bool tx_capture_failed;
 static bool read_bus(void *unused, uint32_t address, uint32_t *value);
+static bool horizon_on;     /* CDJ_DSP_REPLAY_HORIZON=1, see quota_horizon */
+/* cdj_c674x_set_fetch_epoch: moved by every committed device write and
+ * every state load, as on the QEMU board. */
+static uint64_t fetch_epoch;
+
+/* A/B harness (tools/cdj_dsp/ab_compare.py).  CDJ_DSP_AB_DIR=dir writes
+ * mcasp1.bin / mcasp2.bin (every captured XBUF word, u32 LE, slot order) and
+ * host.bin (16-byte records u32 kind, sequence, address, value: kind 1 a
+ * MAIN HPI data read as the replay answered it, kind 2 a DSP HPIC write) and
+ * drops the per-store write records from the trace.  CDJ_DSP_LENIENT=1
+ * checks only what MAIN observes, logging mismatches instead of stopping.
+ * CDJ_DSP_OVERLAY=file (written by replay.py) patches DSP memory when the
+ * DSP is first about to execute the trigger PC, or at start. */
+static FILE *ab_mcasp[3], *ab_host;
+static uint64_t ab_words[3][16];
+static bool ab_quiet, ab_failed, lenient;
+static uint64_t lenient_mismatches, lenient_activations;
+typedef struct { uint32_t address, size; uint8_t *bytes; } OverlayWrite;
+static struct {
+    bool pending, triggered;
+    uint32_t pc, count;
+    OverlayWrite *writes;
+} overlay;
+
+static void ab_put(FILE *f, const uint32_t *words, size_t n)
+{
+    uint8_t bytes[16];
+    for (size_t i = 0; i < n; ++i)
+        for (unsigned b = 0; b < 4; ++b) bytes[4 * i + b] = words[i] >> (8 * b);
+    if (fwrite(bytes, 4, n, f) != n) ab_failed = true;
+}
+
+static void ab_host_record(uint32_t kind, uint64_t sequence, uint32_t address,
+                           uint32_t value)
+{
+    if (!ab_host) return;
+    uint32_t record[4] = {kind, (uint32_t)sequence, address, value};
+    ab_put(ab_host, record, 4);
+}
+
+static void lenient_log(uint64_t sequence, const char *type, const char *field,
+                        uint64_t expected, uint64_t actual)
+{
+    if (++lenient_mismatches > 100) return;
+    printf("{\"event\":\"lenient_mismatch\",\"sequence\":%" PRIu64
+           ",\"type\":\"%s\",\"field\":\"%s\",\"expected\":%" PRIu64
+           ",\"actual\":%" PRIu64 ",\"packets\":%" PRIu64 "}\n",
+           sequence, type, field, expected, actual, cpu.packets);
+}
+
+static bool overlay_load(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    uint32_t header[4];
+    if (!f || fread(header, 4, 4, f) != 4 || header[0] != 0x4c564f43u) goto bad;
+    overlay.triggered = header[1];
+    overlay.pc = header[2];
+    overlay.count = header[3];
+    overlay.writes = calloc(overlay.count ? overlay.count : 1, sizeof(OverlayWrite));
+    if (!overlay.writes) goto bad;
+    for (uint32_t i = 0; i < overlay.count; ++i) {
+        OverlayWrite *w = &overlay.writes[i];
+        if (fread(&w->address, 4, 1, f) != 1 || fread(&w->size, 4, 1, f) != 1 ||
+            !w->size || !(w->bytes = malloc(w->size)) ||
+            fread(w->bytes, 1, w->size, f) != w->size) goto bad;
+    }
+    if (fgetc(f) != EOF) goto bad;
+    fclose(f);
+    overlay.pending = true;
+    return true;
+bad:
+    if (f) fclose(f);
+    fputs("invalid overlay file\n", stderr);
+    return false;
+}
+
+static uint8_t *memory_span(uint32_t address, size_t size);
+static bool overlay_apply(void)
+{
+    for (uint32_t i = 0; i < overlay.count; ++i) {
+        uint8_t *target = memory_span(overlay.writes[i].address,
+                                      overlay.writes[i].size);
+        if (!target) {
+            fprintf(stderr, "overlay write %#x+%u is not plain DSP memory\n",
+                    overlay.writes[i].address, overlay.writes[i].size);
+            return false;
+        }
+    }
+    for (uint32_t i = 0; i < overlay.count; ++i)
+        memcpy(memory_span(overlay.writes[i].address, overlay.writes[i].size),
+               overlay.writes[i].bytes, overlay.writes[i].size);
+    /* No code-write counter is registered (cdj_c674x_set_code_writes), so
+     * the core rechecks every cached packet's bytes after each between()
+     * and run start; the epoch move also drops cached host pointers. */
+    ++fetch_epoch;
+    overlay.pending = false;
+    printf("{\"event\":\"overlay_applied\",\"pc\":%" PRIu32 ",\"packets\":%"
+           PRIu64 ",\"cycles\":%" PRIu64 ",\"writes\":%" PRIu32 "}\n",
+           cpu.pc, cpu.packets, cpu.cycles, overlay.count);
+    return true;
+}
 
 /* Compact dynamic coverage is emitted once at the end of a run. Keeping it
  * here avoids millions of per-step JSON records during connected-event replay
@@ -220,6 +323,7 @@ static void coverage_record(const CoverageBefore *before,
 
 static void coverage_emit(void)
 {
+    if (horizon_on) return;
     printf("{\"event\":\"coverage_summary\",\"first_pc\":%" PRIu32
            ",\"last_pc\":%" PRIu32 ",\"unique_pcs\":%u,"
            "\"unique_edges\":%u,\"unique_source_pcs\":%u,"
@@ -292,6 +396,7 @@ static void restore_devices(const CdjDspCheckpointState *state)
     wm8740 = state->wm8740;
     spi_transfer = state->spi_transfer;
     cache = state->cache;
+    ++fetch_epoch;
     edma = state->edma;
     syscfg_priority = state->syscfg_priority;
 }
@@ -322,9 +427,36 @@ static void capture_devices(CdjDspCheckpointState *state, const char *reason)
     ++state->checkpoint_sequence;
     cdj_dsp_checkpoint_prepare(state, reason);
 }
+/* Batched ticks, as the board's (cdj_dsp_ticks.h); CDJ_NXS_DSP_TICK_BATCH=0
+ * ticks every cycle. */
+static CdjDspTicks ticks;
+static bool tick_batch = true;
+/* CDJ_DSP_REPLAY_HORIZON=1: the board horizon (cdj_c674x.h), as the QEMU
+ * board uses it; see quota_horizon.  Per-step coverage cannot be kept
+ * then, so the coverage summary is left out. */
+static CdjC674xHorizon horizon;
+static void horizon_close(void) { horizon.until = 0; }
+
+static void ticks_flush(void)
+{
+    /* Ticks the compiled paths counted (horizon.count_ticks). */
+    ticks.debt += horizon.ticks;
+    horizon.ticks = 0;
+    horizon.count_ticks = false;
+    if (ticks.debt)
+        cdj_dsp_ticks_apply(spis, &wm8740, &spi_transfer, &pll, ticks.debt,
+                            cdj_c674x_loop_functional_timing());
+    ticks.debt = 0;
+    ticks.steady = false;
+}
+
 static void cycle_tick(void *unused)
 {
     (void)unused;
+    if (ticks.steady) {
+        ++ticks.debt;
+        return;
+    }
     uint64_t transfers = wm8740.transfers;
     if (!cdj_c674x_loop_functional_timing())
         cdj_spi_core_tick(spis, &wm8740, &spi_transfer, &pll);
@@ -342,6 +474,11 @@ static void cycle_tick(void *unused)
         if (timer_outputs & (1u << bit))
             cdj_c6747_intc_deliver_event(&intc, &intc_delivery,
                                          cdj_c6747_timer_event(bit));
+    horizon_close();
+    ticks.steady = tick_batch &&
+        cdj_dsp_ticks_quiet(timers, &spi_transfer, &wm8740,
+                            cdj_c674x_loop_functional_timing());
+    horizon.count_ticks = ticks.steady && horizon_on;
 }
 static uint32_t global(uint32_t a)
 { return a >= 0x00800000 && a < 0x00840000 ? a + 0x11000000 : a; }
@@ -357,9 +494,16 @@ static uint8_t *host_memory(uint32_t a)
         return sdram + offset;
     return NULL;
 }
+static uint8_t *memory_span(uint32_t address, size_t size);
+
 static bool read_bus(void *unused, uint32_t a, uint32_t *v)
 {
     (void)unused;
+    /* Only plain RAM may be read with ticks outstanding. */
+    if ((a & 3) || !memory_span(a, 4)) {
+        if (ticks.debt || horizon.ticks) ticks_flush();
+        horizon_close();
+    }
     if (cdj_c6747_syscfg_read(&syscfg, a, v)) return true;
     if (cdj_c6747_syscfg_priority_read(&syscfg_priority, a, v)) return true;
     if (cdj_c6747_psc_read(&psc, a, v)) return true;
@@ -425,6 +569,74 @@ static uint8_t *memory_span(uint32_t address, size_t size)
                                     &offset))
         return sdram + offset;
     return NULL;
+}
+
+/* cdj_c674x_set_ram_window: the window of memory_span holding address.
+ * Direct stores (ram_direct) only under CDJ_DSP_REPLAY_RAM_DIRECT=1: they
+ * leave out the write records the trace prints, so they are for timing
+ * builds without trace output, never for compared traces. */
+static bool ram_direct;
+static const char *aot_profile_path;
+
+static void aot_profile_write(void)
+{
+    FILE *f = fopen(aot_profile_path, "w");
+    if (!f) return;
+    const char *min = getenv("CDJ_DSP_AOT_MIN");
+    cdj_c674x_aot_profile_dump(f, min ? strtoull(min, NULL, 10) : 64);
+    fclose(f);
+}
+
+/* CDJ_DSP_REPLAY_STATS=1: the core's path counters on stderr at exit. */
+static void replay_stats(void)
+{
+    CdjC674xJitStats s;
+    cdj_c674x_jit_stats(&s);
+    fprintf(stderr, "stats: steady %llu native %llu generic %llu direct %llu "
+            "direct_runs %llu static %llu lean %llu aot %llu misses %llu untraceable %llu"
+            " exits %llu/%llu/%llu/%llu/%llu\n",
+            (unsigned long long)s.steady, (unsigned long long)s.native,
+            (unsigned long long)s.generic, (unsigned long long)s.direct,
+            (unsigned long long)s.direct_runs, (unsigned long long)s.static_hits,
+            (unsigned long long)s.static_lean, (unsigned long long)s.aot,
+            (unsigned long long)s.static_misses,
+            (unsigned long long)s.direct_untraceable,
+            (unsigned long long)s.aot_exit[0], (unsigned long long)s.aot_exit[1],
+            (unsigned long long)s.aot_exit[2], (unsigned long long)s.aot_exit[3],
+            (unsigned long long)s.aot_exit[4]);
+}
+
+static bool ram_window_hook(void *unused, uint32_t a, uint32_t *lo,
+                            uint32_t *hi, uint8_t **host)
+{
+    (void)unused;
+    uint32_t offset;
+    if (a >= 0x00800000u && a < 0x00840000u) {
+        *lo = 0x00800000u; *hi = 0x00840000u; *host = ram;
+        return true;
+    }
+    if (cdj_c6747_l1d_sram_span(&cache, a, 1, &offset)) {
+        *lo = a - offset;
+        *hi = *lo + cdj_c6747_l1d_sram_bytes(&cache);
+        *host = l1d;
+        return true;
+    }
+    if (a >= 0x11800000u && a < 0x11840000u) {
+        *lo = 0x11800000u; *hi = 0x11840000u; *host = ram;
+        return true;
+    }
+    if (a >= 0x80000000u && a < 0x80020000u) {
+        *lo = 0x80000000u; *hi = 0x80020000u; *host = shared_ram;
+        return true;
+    }
+    if (a >= 0xc0000000u && a < 0xe0000000u &&
+        cdj_c6747_emifb_sdram_enabled(&emifb)) {
+        *lo = 0xc0000000u + (a - 0xc0000000u) / sizeof(sdram) * sizeof(sdram);
+        *hi = *lo + sizeof(sdram);
+        *host = sdram;
+        return true;
+    }
+    return false;
 }
 
 /* cdj_c674x_fetch fast path: memory_span covers exactly read_bus's RAM
@@ -658,14 +870,19 @@ static bool advance_functional_mcasp_slots(void)
         edma = trial_edma;
         mcasp_control = trial_mcasp;
         deliver_edma_notifications();
-        if (tx_capture) {
+        if (tx_capture || ab_mcasp[1]) {
             for (unsigned instance = 1; instance <= 2; ++instance) {
                 for (unsigned serializer = 0; serializer < 16; ++serializer) {
                     uint64_t sequence = trial_mcasp.xrsr_source_sequence[instance][serializer];
                     if (!sequence || sequence ==
                         original_mcasp.xrsr_source_sequence[instance][serializer])
                         continue;
-                    if (fprintf(tx_capture,
+                    if (ab_mcasp[instance]) {
+                        ab_put(ab_mcasp[instance],
+                               &trial_mcasp.xrsr[instance][serializer], 1);
+                        ++ab_words[instance][serializer];
+                    }
+                    if (tx_capture && (fprintf(tx_capture,
                             "{\"sequence\":%" PRIu64 ",\"instance\":%u,"
                             "\"slot\":%u,\"serializer\":%u,\"word\":%u,"
                             "\"xbuf_sequence\":%" PRIu64 ",\"packets\":%" PRIu64 ","
@@ -674,7 +891,7 @@ static bool advance_functional_mcasp_slots(void)
                             ++tx_capture_sequence, instance,
                             trial_mcasp.xslot[instance], serializer,
                             trial_mcasp.xrsr[instance][serializer], sequence,
-                            cpu.packets, cpu.cycles) < 0 || fflush(tx_capture)) {
+                            cpu.packets, cpu.cycles) < 0 || fflush(tx_capture))) {
                         tx_capture_failed = true;
                         ok = false;
                         break;
@@ -709,6 +926,12 @@ static bool functional_audio_tick(void)
 static bool write_bus(void *unused, uint32_t a, uint64_t v, unsigned size, bool commit)
 {
     (void)unused;
+    if ((size != 1 && size != 2 && size != 4 && size != 8) ||
+        !memory_span(a, size)) {
+        if (ticks.debt || horizon.ticks) ticks_flush();
+        horizon_close();
+        if (commit) ++fetch_epoch;
+    }
     bool ok = false;
     if (!cdj_c674x_loop_functional_timing()) {
         if (cdj_c6747_spi_wm8740_timed_mapped(a)) {
@@ -788,7 +1011,7 @@ static bool write_bus(void *unused, uint32_t a, uint64_t v, unsigned size, bool 
             ram[physical - 0x11800000 + i] = v >> (8*i);
     }
 record:
-    if (commit || !ok)
+    if ((commit && !ab_quiet) || !ok)
         printf("{\"event\":\"%s\",\"address\":%" PRIu32 ",\"value\":%" PRIu64 ",\"size\":%u}\n",
                ok ? "write" : "rejected_write", a, v, size);
     return ok;
@@ -846,40 +1069,178 @@ static const char *limit_reached(const ReplayLimits *limits)
     return NULL;
 }
 
+/* One activation's step loop, split at the step so that compiled execution
+ * (cdj_c674x_run) can do the between-step work itself: quota_post is
+ * everything after a step, quota_pre everything before the next. */
+typedef struct {
+    ReplayLimits *limits;
+    uint32_t breakpoint;
+    unsigned quota, step;
+    /* The standalone (no event transcript) loop: its own stop reasons and
+     * the optional per-step trace. */
+    bool standalone, trace;
+    const char *reason;
+    CoverageBefore before;
+    bool has_coverage_packet;
+    CdjC674xPacket coverage_packet;
+} Quota;
+
+/* The replay's horizon: everything quota_post and quota_pre act on either
+ * has a packet-count bound (functional McASP slot edges, the packet limit),
+ * a PC bound (the breakpoint) or changes only through a callback that
+ * closes it (device accesses, unbatched ticks). */
+static void quota_horizon(const Quota *q)
+{
+    uint64_t until = UINT64_MAX;
+    horizon.break_pc = q->breakpoint ? q->breakpoint :
+        overlay.pending && overlay.triggered ? overlay.pc : 0;
+    if (!horizon_on || q->trace || observe_pcm || !ticks.steady ||
+        spi_transfer.fault || intc_delivery.cpu_request || hpi.hint ||
+        (edma.irq_notifications & 2u) || q->limits->cycle_limit ||
+        (psc.remaining[0][0] | psc.remaining[0][1] |
+         psc.remaining[1][0] | psc.remaining[1][1])) {
+        horizon_close();
+        return;
+    }
+    if (functional_audio) {
+        const uint64_t interval = CDJ_DSP_FUNCTIONAL_AUDIO_PACKET_INTERVAL;
+        until = (cpu.packets / interval + 1) * interval;
+    }
+    uint64_t bound = cpu.packets + (q->quota - q->step);
+    if (bound < until) until = bound;
+    bound = cpu.packets + q->limits->steps_remaining;
+    if (bound < until) until = bound;
+    bound = q->limits->initial_packets + q->limits->packet_limit;
+    if (q->limits->packet_limit && bound < until) until = bound;
+    horizon.until = until;
+}
+
+/* Steps the core ran with the between-step work skipped. */
+static void quota_skipped(Quota *q)
+{
+    q->step += horizon.skipped;
+    q->limits->steps_remaining -= horizon.skipped;
+    horizon.skipped = 0;
+}
+
+static bool quota_pre(Quota *q)
+{
+    const char *limited = limit_reached(q->limits);
+    if (limited) { q->reason = limited; return false; }
+    if (overlay.pending && overlay.triggered && cpu.pc == overlay.pc &&
+        !cpu.loop_active && !cpu.idle_cycles && !overlay_apply()) {
+        cpu.fault = "overlay write outside plain DSP memory";
+        cpu.fault_pc = cpu.pc;
+        q->reason = q->standalone ? "fault" : cpu.fault;
+        return false;
+    }
+    if (q->breakpoint && cpu.pc == q->breakpoint) {
+        q->reason = "breakpoint";
+        return false;
+    }
+    deliver_edma_notifications();
+    if (!cdj_c674x_interrupt(
+            &cpu, cdj_c6747_intc_cpu_pending(&intc_delivery))) {
+        q->reason = q->standalone ? "fault" :
+                    cpu.fault ? cpu.fault : "CPU interrupt stopped";
+        return false;
+    }
+    if (q->trace)
+        printf("{\"event\":\"step\",\"pc\":%" PRIu32 ",\"cycles\":%" PRIu64
+               ",\"loop_active\":%s,\"branch_due\":%" PRIu64 "}\n",
+               cpu.pc, cpu.cycles, cpu.loop_active ? "true" : "false",
+               cpu.branch_due);
+    pcm_observe();
+    q->before = coverage_before(&cpu);
+    /* Direct packets may run inside cdj_c674x_run, which reports no
+     * source packet: fetch it here for every source fetch. */
+    q->has_coverage_packet = coverage_capture(&cpu, &q->coverage_packet);
+    quota_horizon(q);
+    return true;
+}
+
+static bool quota_post(Quota *q)
+{
+    coverage_record(&q->before,
+                    q->has_coverage_packet ? &q->coverage_packet : NULL);
+    --q->limits->steps_remaining;
+    if (spi_transfer.fault) {
+        cpu.fault = "unsupported SPI transfer clock or state";
+        cpu.fault_pc = cpu.pc;
+        q->reason = q->standalone ? "fault" : cpu.fault;
+        return false;
+    }
+    cdj_c6747_psc_tick(&psc);
+    if (!functional_audio_tick()) {
+        q->reason = q->standalone ? "fault" : cpu.fault;
+        return false;
+    }
+    if (hpi.hint) {
+        q->reason = q->standalone ? "host_event_required" :
+                    "HINT host-event yield";
+        return false;
+    }
+    ++q->step;
+    return true;
+}
+
+static bool quota_between(void *opaque)
+{
+    Quota *q = opaque;
+    quota_skipped(q);
+    return quota_post(q) && q->step < q->quota && quota_pre(q);
+}
+
+static const char *run_steps_ticked(Quota q)
+{
+    const char *budget = "phase budget exhausted";
+    unsigned quota = q.quota;
+    bool pre_done = false;
+    while (q.step < quota) {
+        if (!pre_done && !quota_pre(&q)) return q.reason;
+        pre_done = false;
+        {
+            unsigned status;
+            unsigned n = cdj_c674x_run(&cpu, read_bus, write_bus, NULL,
+                                       quota - q.step, quota_between, &q,
+                                       &status);
+            quota_skipped(&q);
+            if (status == CDJ_C674X_RUN_FAULT)
+                return q.standalone ? "fault" :
+                       cpu.fault ? cpu.fault : "CPU stopped";
+            if (status == CDJ_C674X_RUN_STOPPED)
+                return q.reason ? q.reason : budget;
+            if (status == CDJ_C674X_RUN_BETWEEN) {
+                pre_done = true;
+                continue;
+            }
+            if (n) {
+                if (!quota_post(&q)) return q.reason;
+                continue;
+            }
+        }
+        if (!cdj_c674x_step(&cpu, read_bus, write_bus, NULL))
+            return q.standalone ? "fault" :
+                   cpu.fault ? cpu.fault : "CPU stopped";
+        if (!quota_post(&q)) return q.reason;
+    }
+    return budget;
+}
+
+/* Everything outside a step loop (event replay, checkpoints, the final
+ * report) sees every tick applied. */
+static const char *run_steps(Quota q)
+{
+    const char *reason = run_steps_ticked(q);
+    ticks_flush();
+    return reason;
+}
+
 static const char *run_quota(ReplayLimits *limits, uint32_t breakpoint,
                              unsigned quota)
 {
-    const char *reason = "phase budget exhausted";
-    for (unsigned step = 0; step < quota; ++step) {
-        const char *limited = limit_reached(limits);
-        if (limited) return limited;
-        if (breakpoint && cpu.pc == breakpoint) return "breakpoint";
-        deliver_edma_notifications();
-        if (!cdj_c674x_interrupt(
-                &cpu, cdj_c6747_intc_cpu_pending(&intc_delivery)))
-            return cpu.fault ? cpu.fault : "CPU interrupt stopped";
-        pcm_observe();
-        CoverageBefore before = coverage_before(&cpu);
-        CdjC674xPacket coverage_packet;
-        bool has_coverage_packet = !before.direct_fetch &&
-            coverage_capture(&cpu, &coverage_packet);
-        if (!cdj_c674x_step_capture_direct(&cpu, read_bus, write_bus, NULL,
-                before.direct_fetch ? &coverage_packet : NULL))
-            return cpu.fault ? cpu.fault : "CPU stopped";
-        coverage_record(&before, (before.direct_fetch || has_coverage_packet) ?
-                        &coverage_packet : NULL);
-        --limits->steps_remaining;
-        if (spi_transfer.fault) {
-            cpu.fault = "unsupported SPI transfer clock or state";
-            cpu.fault_pc = cpu.pc;
-            return cpu.fault;
-        }
-        cdj_c6747_psc_tick(&psc);
-        if (!functional_audio_tick())
-            return cpu.fault;
-        if (hpi.hint) return "HINT host-event yield";
-    }
-    return reason;
+    return run_steps((Quota){.limits = limits, .breakpoint = breakpoint,
+                             .quota = quota});
 }
 
 static const char *run_budget(ReplayLimits *limits, uint32_t breakpoint)
@@ -924,6 +1285,13 @@ static EventReplayResult replay_external_events(
         (!strcmp(checkpoint_state.stop_reason, "DSP start boundary") ||
          !strcmp(checkpoint_state.stop_reason, "boot-phase boundary"));
     unsigned verified_stops = 0;
+    uint64_t lenient_replay_packets = cpu.packets;
+    uint64_t lenient_recorded_packets = cpu.packets;
+    if (lenient && deferred) {
+        fputs("lenient replay supports the legacy scheduler only\n", stderr);
+        fclose(file);
+        return EVENT_REPLAY_ERROR;
+    }
     *reason = "event_eof";
     /* QEMU captures these boundaries after the triggering event but BEFORE
      * run_dsp requests an activation (or coalesces a pending activation). */
@@ -1039,11 +1407,36 @@ static EventReplayResult replay_external_events(
                 !source) goto mismatch;
             uint32_t value = source[0] | (uint32_t)source[1] << 8 |
                 (uint32_t)source[2] << 16 | (uint32_t)source[3] << 24;
-            if (event.value != value) goto mismatch;
+            ab_host_record(1, event.sequence, address, value);
+            if (event.value != value) {
+                if (!lenient) goto mismatch;
+                lenient_log(event.sequence, event.type, "value", event.value, value);
+            }
             if (event.offset == 0x80000) checkpoint_state.hpi_address += 4;
+        } else if (!strcmp(event.type, "dsp_hpic_write") && lenient) {
+            if (hpic_overflow || event.offset) goto mismatch;
+            if (!hpic_count) {
+                lenient_log(event.sequence, event.type, "missing", event.value, 0);
+            } else {
+                PendingHpicEvent *actual = &hpic_events[0];
+                ab_host_record(2, event.sequence, actual->address, actual->value);
+                if (event.address != actual->address)
+                    lenient_log(event.sequence, event.type, "address",
+                                event.address, actual->address);
+                if (event.value != actual->value || event.size != actual->size)
+                    lenient_log(event.sequence, event.type, "value",
+                                event.value, actual->value);
+                if (event.hint != actual->hint || event.dspint != actual->dspint)
+                    lenient_log(event.sequence, event.type, "hint_dspint",
+                                event.hint | event.dspint << 1,
+                                actual->hint | actual->dspint << 1);
+                memmove(hpic_events, hpic_events + 1,
+                        --hpic_count * sizeof(hpic_events[0]));
+            }
         } else if (!strcmp(event.type, "dsp_hpic_write")) {
             if (!hpic_count || hpic_overflow) goto mismatch;
             PendingHpicEvent *actual = &hpic_events[0];
+            ab_host_record(2, event.sequence, actual->address, actual->value);
             if (event.offset || event.address != actual->address ||
                 event.value != actual->value || event.size != actual->size ||
                 event.boot_phase != actual->boot_phase || event.hint != actual->hint ||
@@ -1051,6 +1444,39 @@ static EventReplayResult replay_external_events(
                 event.cycles != actual->cycles) goto mismatch;
             memmove(hpic_events, hpic_events + 1,
                     --hpic_count * sizeof(hpic_events[0]));
+        } else if (!strcmp(event.type, "dsp_stop") && lenient) {
+            /* The image may take other paths inside an activation; only the
+             * activation's length (a step budget or a HINT yield) and what
+             * MAIN sees are compared. */
+            if (event.offset || event.size || !stop_pending || hpic_overflow)
+                goto mismatch;
+            while (hpic_count) {
+                ab_host_record(2, event.sequence, hpic_events[0].address,
+                               hpic_events[0].value);
+                lenient_log(event.sequence, "dsp_hpic_write", "extra", 0,
+                            hpic_events[0].value);
+                memmove(hpic_events, hpic_events + 1,
+                        --hpic_count * sizeof(hpic_events[0]));
+            }
+            if (event.packets - lenient_recorded_packets !=
+                cpu.packets - lenient_replay_packets)
+                lenient_log(event.sequence, event.type, "activation_packets",
+                            event.packets - lenient_recorded_packets,
+                            cpu.packets - lenient_replay_packets);
+            lenient_recorded_packets = event.packets;
+            lenient_replay_packets = cpu.packets;
+            ++lenient_activations;
+            stop_pending = false;
+            ++verified_stops;
+            checkpoint_state.event_sequence = event.sequence;
+            if (cpu.fault) {
+                /* Recorded fault stops carry only their PC. */
+                if (event.address != cpu.fault_pc)
+                    lenient_log(event.sequence, event.type, "fault_pc",
+                                event.address, cpu.fault_pc);
+                fault_matched = true;
+                break;
+            }
         } else if (!strcmp(event.type, "dsp_stop")) {
             uint32_t pc = cpu.fault ? cpu.fault_pc : cpu.pc;
             if (event.offset || event.size || !stop_pending || hpic_count || hpic_overflow ||
@@ -1072,8 +1498,21 @@ static EventReplayResult replay_external_events(
             fclose(file);
             return EVENT_REPLAY_ERROR;
         } else goto mismatch;
-        if (event.boot_phase != checkpoint_state.boot_phase ||
-            event.hint != hpi.hint || event.dspint != hpi.dspint) goto mismatch;
+        if (event.boot_phase != checkpoint_state.boot_phase) goto mismatch;
+        /* A DSP HPIC write's hint/dspint are the state right after that
+         * write, checked above against its queued snapshot; the live state
+         * is already the end of the activation (a later write in the same
+         * activation may have raised HINT). */
+        if (strcmp(event.type, "dsp_hpic_write") &&
+            (event.hint != hpi.hint || event.dspint != hpi.dspint)) {
+            if (!lenient) goto mismatch;
+            /* Follow the recording so activations stay where MAIN made
+             * them; the divergence itself is what gets reported. */
+            lenient_log(event.sequence, event.type, "hint_dspint",
+                        event.hint | event.dspint << 1, hpi.hint | hpi.dspint << 1);
+            hpi.hint = event.hint;
+            hpi.dspint = event.dspint;
+        }
         if (connected_stop_limit && verified_stops >= connected_stop_limit &&
             !strcmp(event.type, "dsp_stop")) break;
         if (begin_quota) {
@@ -1154,6 +1593,17 @@ int main(int argc, char **argv)
     const char *audio = getenv("CDJ_NXS_DSP_FUNCTIONAL_AUDIO");
     cdj_c674x_loop_set_functional_timing(timing && !strcmp(timing, "1"));
     cdj_c674x_set_fetch_block(read_bus, fetch_block);
+    cdj_c674x_set_fetch_epoch(&fetch_epoch);
+    ram_direct = getenv("CDJ_DSP_REPLAY_RAM_DIRECT") &&
+                 !strcmp(getenv("CDJ_DSP_REPLAY_RAM_DIRECT"), "1");
+    cdj_c674x_set_ram_window(write_bus, ram_window_hook, &ram_direct);
+    /* CDJ_DSP_AOT_PROFILE=path: the input of tools/cdj_dsp/aot_gen.py. */
+    if (getenv("CDJ_DSP_REPLAY_STATS")) atexit(replay_stats);
+    aot_profile_path = getenv("CDJ_DSP_AOT_PROFILE");
+    if (aot_profile_path && *aot_profile_path) {
+        cdj_c674x_aot_profile(true);
+        atexit(aot_profile_write);
+    }
     functional_audio = audio && !strcmp(audio, "1");
     const char *tx_path = getenv("CDJ_NXS_DSP_TX_CAPTURE");
     if (tx_path && *tx_path) {
@@ -1163,6 +1613,21 @@ int main(int argc, char **argv)
             return 2;
         }
     }
+    const char *ab_dir = getenv("CDJ_DSP_AB_DIR");
+    if (ab_dir && *ab_dir) {
+        char path[4096];
+        const char *names[3] = {"host.bin", "mcasp1.bin", "mcasp2.bin"};
+        for (unsigned i = 0; i < 3; ++i) {
+            snprintf(path, sizeof(path), "%s/%s", ab_dir, names[i]);
+            FILE *f = fopen(path, "wb");
+            if (!f) { perror(path); return 2; }
+            if (i) ab_mcasp[i] = f; else ab_host = f;
+        }
+        ab_quiet = true;
+    }
+    lenient = getenv("CDJ_DSP_LENIENT") && !strcmp(getenv("CDJ_DSP_LENIENT"), "1");
+    const char *overlay_path = getenv("CDJ_DSP_OVERLAY");
+    if (overlay_path && *overlay_path && !overlay_load(overlay_path)) return 2;
     if (argc != 8 && argc != 9) return 2;
     char *end;
     errno = 0;
@@ -1245,6 +1710,7 @@ int main(int argc, char **argv)
         cdj_wm8740_reset(&wm8740);
         cdj_c6747_pll_reset(&pll);
         cdj_c6747_cache_reset(&cache);
+        ++fetch_epoch;
         cdj_c6747_edma_reset(&edma);
         cdj_c6747_hpi_reset(&hpi);
         cdj_c6747_emifb_reset(&emifb);
@@ -1262,6 +1728,12 @@ int main(int argc, char **argv)
         checkpoint_state.reset_released = checkpoint_state.dsp_started = true;
     }
     cpu.cycle_tick = cycle_tick;
+    if (overlay.pending && !overlay.triggered && !overlay_apply()) return 2;
+    horizon_on = getenv("CDJ_DSP_REPLAY_HORIZON") &&
+                 !strcmp(getenv("CDJ_DSP_REPLAY_HORIZON"), "1");
+    cdj_c674x_set_horizon(horizon_on ? &horizon : NULL);
+    tick_batch = !getenv("CDJ_NXS_DSP_TICK_BATCH") ||
+                 strcmp(getenv("CDJ_NXS_DSP_TICK_BATCH"), "0");
     coverage_initial_packets = cpu.packets;
     coverage_initial_cycles = cpu.cycles;
     ReplayLimits limits = {
@@ -1289,41 +1761,31 @@ int main(int argc, char **argv)
             fputs("pending deferred DSP checkpoint requires event transcript\n", stderr);
             return 2;
         }
-        for (;;) {
-            const char *limited = limit_reached(&limits);
-            if (limited) { reason = limited; break; }
-            if (breakpoint && cpu.pc == breakpoint) { reason = "breakpoint"; break; }
-            deliver_edma_notifications();
-            if (!cdj_c674x_interrupt(
-                    &cpu, cdj_c6747_intc_cpu_pending(&intc_delivery))) {
-                reason = "fault";
-                break;
-            }
-            if (trace_steps) printf("{\"event\":\"step\",\"pc\":%" PRIu32 ",\"cycles\":%" PRIu64
-                   ",\"loop_active\":%s,\"branch_due\":%" PRIu64 "}\n",
-                   cpu.pc, cpu.cycles, cpu.loop_active ? "true" : "false", cpu.branch_due);
-            pcm_observe();
-            CoverageBefore before = coverage_before(&cpu);
-            CdjC674xPacket coverage_packet;
-            bool has_coverage_packet = !before.direct_fetch &&
-                coverage_capture(&cpu, &coverage_packet);
-            if (!cdj_c674x_step_capture_direct(&cpu, read_bus, write_bus, NULL,
-                before.direct_fetch ? &coverage_packet : NULL)) { reason = "fault"; break; }
-            coverage_record(&before, (before.direct_fetch || has_coverage_packet) ?
-                        &coverage_packet : NULL);
-            --limits.steps_remaining;
-            if (spi_transfer.fault) {
-                cpu.fault = "unsupported SPI transfer clock or state";
-                cpu.fault_pc = cpu.pc;
-                reason = "fault";
-                break;
-            }
-            cdj_c6747_psc_tick(&psc);
-            if (!functional_audio_tick()) { reason = "fault"; break; }
-            if (hpi.hint) { reason = "host_event_required"; break; }
-        }
+        /* No step quota: only a stop reason ends it. */
+        reason = run_steps((Quota){.limits = &limits, .breakpoint = breakpoint,
+                                   .quota = UINT_MAX, .standalone = true,
+                                   .trace = trace_steps});
     }
     coverage_emit();
+    if (lenient)
+        printf("{\"event\":\"lenient_summary\",\"mismatches\":%" PRIu64
+               ",\"activations\":%" PRIu64 "}\n",
+               lenient_mismatches, lenient_activations);
+    if (ab_host) {
+        printf("{\"event\":\"ab_capture\",\"words\":[");
+        for (unsigned i = 1; i <= 2; ++i) {
+            printf("%s[", i > 1 ? "," : "");
+            for (unsigned j = 0; j < 16; ++j)
+                printf("%s%" PRIu64, j ? "," : "", ab_words[i][j]);
+            printf("]");
+        }
+        printf("]}\n");
+        for (unsigned i = 0; i < 3; ++i) {
+            FILE *f = i ? ab_mcasp[i] : ab_host;
+            if (fclose(f)) ab_failed = true;
+        }
+        if (ab_failed) { fputs("A/B capture write failed\n", stderr); return 2; }
+    }
     /* Fault strings originate in the interpreter and contain no JSON escapes. */
     printf("{\"event\":\"stop\",\"reason\":\"%s\",\"fault\":\"%s\",\"pc\":%" PRIu32
            ",\"fault_pc\":%" PRIu32 ",\"fault_word\":%" PRIu32
@@ -1376,5 +1838,9 @@ int main(int argc, char **argv)
         }
     }
     int tx_status = tx_capture ? fclose(tx_capture) : 0;
+    if (overlay.pending) {
+        fputs("overlay trigger PC was never reached\n", stderr);
+        return 4;
+    }
     return ferror(stdout) || tx_capture_failed || tx_status ? 2 : 0;
 }

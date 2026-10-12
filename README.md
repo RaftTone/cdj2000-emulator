@@ -75,10 +75,13 @@ a player. It is not a way to use a CDJ-2000 on a desktop.
   ENTER contact; short clicks and long holds have different meanings.
 * Switching sources after boot is unreliable (six of eight); the card given at
   launch is reliable. The USB stick as a music source has not been tried.
-* The GUI simulator is about thirty times slower than the chip on real work,
-  and the live link has intermittent stalls and, rarely, a double fault. Run
-  it again; the fault line is in the simulator's log.
-* No link between players.
+* The default GUI simulator (GNU sim, `--gui-sim gdb`) is about thirty times
+  slower than the chip on real work, and the live link has intermittent stalls
+  and, rarely, a double fault. Run it again; the fault line is in the
+  simulator's log. `--gui-sim fast` runs the GUI board on a faster vendored
+  Blackfin core; see BUILD.md.
+* Pro DJ Link between players is limited to `tools/cdj_main/link_hub.py`
+  (emulated decks, and on macOS a real interface with `--bridge`).
 
 ## Firmware is not included
 
@@ -92,13 +95,22 @@ images, no disassembly, no screenshots.
 
 ### NXS research branch: interactive deck
 
-For firmware development, start a deck with a generated test track and local
-debugging in one command:
+For firmware development, start a deck in one command:
 
 ```sh
-python -m tools.cdj_main.nxs_vm --test-track --debug --lightweight --ui \
-  --seconds 1800 --functional-dsp-audio --source-key-when-ready
+python -m tools.cdj_main.launch deck                  # generated test track
+CDJ_USB=path/to/usb.img python -m tools.cdj_main.launch deck   # your USB image
+python -m tools.cdj_main.launch deck --sd card.img --seconds 600
 ```
+
+`deck` is `nxs_vm --ui --debug --seconds 3600 --functional-dsp-audio
+--source-key-when-ready` with `--usb $CDJ_USB` or `--test-track`; any option
+you give wins. Ports are picked automatically (the first free block of 5980,
+5990, ...), the run directory is timestamped, and DSP capture is fault-only;
+pass `--no-lightweight` when you need every checkpoint and the event
+transcript for replay. `python -m tools.cdj_main.nxs_vm --help` groups the
+remaining options. `--dsp-thread` (the DSP on its own host thread) and
+`--gui-sim fast` are faster opt-ins that will become defaults once qualified.
 
 This creates a timestamped run under `runs/`, prints follow-up commands, and
 records the firmware and emulator hashes. The deck shows run progress below
@@ -106,7 +118,7 @@ the LCD; **Diagnostics** provides session state, browser replies, frame age,
 recent actions, fault lines, and debugger endpoints. Fresh-only link delivery
 is the NXS default because cached repeats saturated the GUI receive queue in
 connected runs. Use `--cached-link` only to compare the old transport behavior.
-The source key waits for the SD browser table instead of a guessed timestamp.
+The source key waits for the SD or USB browser table instead of a guessed timestamp.
 
 For McASP clock experiments, add `--virtual-mcasp-clock` alongside
 `--functional-dsp-audio`. This batches genuine transmit slots from the
@@ -164,7 +176,7 @@ reproduced with stock firmware on 2026-09-15, including the ten-second duration
 on the display. USB track loading and audible playback remain unverified.
 The legacy functionality described above is not an NXS completion claim.
 See [DEVELOPING.md](DEVELOPING.md), [RUNNING.md](RUNNING.md) and
-[NXS_GUI_STALL.md](NXS_GUI_STALL.md) for current evidence and limitations.
+NXS_GUI_STALL.md for current evidence and limitations.
 
 The NXS launcher also accepts experimental `--sd IMAGE` and `--usb IMAGE`
 mounts. Generate a plain WAV/FAT32 fixture with
