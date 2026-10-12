@@ -31,6 +31,10 @@ def test_dsp_ram_and_peripheral_dispatch(tmp_path):
 #include <stdint.h>
 typedef int MemoryRegion;
 typedef int QEMUTimer;
+typedef int AudioBackend;
+typedef int SWVoiceOut;
+typedef int Notifier;
+typedef int QemuMutex;
 static uint32_t ldl_le_p(const uint8_t *p)
 { return p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
 static void stw_le_p(uint8_t *p, uint16_t v) { p[0] = v; p[1] = v >> 8; }

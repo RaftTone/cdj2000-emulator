@@ -10,8 +10,7 @@ From the repository root:
 
 ```sh
 python -m tools.cdj_main.nxs_vm --test-track --debug --lightweight --ui \
-  --seconds 1800 --fresh-link --functional-dsp-audio \
-  --source-key-at 300 --source-key-retries 0
+  --seconds 1800 --functional-dsp-audio --source-key-when-ready
 ```
 
 The launcher chooses a fresh timestamped directory under `runs/` and prints its
@@ -23,9 +22,9 @@ boards. Use `--port 6380` for a second independent session.
 inside the run. It cannot be combined with `--sd`; use `--sd IMAGE` to reuse an
 existing fixture. Guest media writes use disposable overlays. `--lightweight`
 omits the large normal DSP event capture while retaining fault-triggered
-checkpoints; omit it when the full event transcript is needed. `--fresh-link`
-is an explicit experimental transport mode, recorded in the manifest; it is the
-mode used for the native-loading validation below.
+checkpoints; omit it when the full event transcript is needed. Fresh-only link
+delivery is the NXS default and is recorded in the manifest. `--cached-link`
+restores the old repeated-delivery diagnostic.
 
 `--functional-dsp-audio` supplies the existing coarse McASP clock so the DSP
 can process sample slots; it does not enable audible output or promise real-time

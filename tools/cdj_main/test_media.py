@@ -62,8 +62,9 @@ def create(directory: Path) -> dict:
     return manifest
 
 
-def media_drives(sd: Path | None, usb: Path | None) -> tuple[list[str], dict[str, Path]]:
-    """Attach raw images through throwaway QEMU overlays, never in-place writes."""
+def media_drives(sd: Path | None, usb: Path | None,
+                 disc: Path | None = None) -> tuple[list[str], dict[str, Path]]:
+    """Attach writable media through overlays and an ISO through the read-only CD backend."""
     command: list[str] = []
     inputs: dict[str, Path] = {}
     for kind, path in [('sd', sd), ('usb', usb)]:
@@ -84,6 +85,18 @@ def media_drives(sd: Path | None, usb: Path | None) -> tuple[list[str], dict[str
         command += ['-drive', f'{bus},format=raw,snapshot=on,file={filename}']
         if kind == 'usb':
             command += ['-device', 'usb-storage,drive=cdj-usb-media,removable=on']
+    if disc is not None:
+        disc = disc.resolve(strict=True)
+        if not disc.is_file():
+            raise ValueError(f'disc image must be a regular file: {disc}')
+        if not disc.stat().st_size or disc.stat().st_size % 2048:
+            raise ValueError('disc image must contain complete 2048-byte ISO sectors')
+        inputs['disc_image'] = disc
+        filename = str(disc).replace(',', ',,')
+        command += [
+            '-drive',
+            f'if=ide,media=cdrom,bus=0,unit=0,format=raw,file={filename}',
+        ]
     return command, inputs
 
 

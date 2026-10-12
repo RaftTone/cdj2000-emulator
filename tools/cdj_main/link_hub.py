@@ -19,6 +19,12 @@ answers a deck's ARP for a replayed sender's address on its behalf. It starts wh
 (after --replay-delay seconds), so one emulated deck can see a real player's
 keep-alives, beats and status without a second emulator.
 
+--bridge IFACE (macOS BPF; needs access_bpf) joins the segment to a real
+interface, so an emulated deck sees and is seen by real players. Only
+broadcast frames and unicast to/from a deck cross by default; multicast (Dante
+audio/PTP, mDNS) stays on its side unless --bridge-multicast. Not with --sync:
+the wire keeps the host's time and cannot honour a guest promise.
+
 Timing is the host's. A deck under --cosim runs on its instruction count, so
 its guest seconds and these seconds drift apart by the machine's real-time
 factor; summary.json records both ends' counts so a run can be judged.
@@ -114,6 +120,75 @@ def describe(frame: bytes) -> dict:
     return kind
 
 
+# <net/bpf.h> on Darwin: _IOW('B', n, u_int) etc.; ifreq is 32 bytes.
+BIOCSBLEN, BIOCGBLEN = 0xC0044266, 0x40044266
+BIOCSETIF, BIOCIMMEDIATE = 0x8020426C, 0x80044270
+BIOCSHDRCMPLT, BIOCSSEESENT = 0x80044275, 0x80044277
+BIOCPROMISC = 0x20004269        # _IO('B', 105): emulated decks' MACs are not the NIC's
+
+
+def bpf_frames(buffer: bytes) -> list[bytes]:
+    """Frames in one Darwin BPF read: bpf_hdr (8-byte timeval32, caplen,
+    datalen, hdrlen) then the frame, each record 4-byte aligned."""
+    frames, offset = [], 0
+    while offset + 18 <= len(buffer):
+        caplen, datalen, hdrlen = struct.unpack_from("=IIH", buffer, offset + 8)
+        if caplen == datalen:       # a truncated capture is not a frame to forward
+            frames.append(bytes(buffer[offset + hdrlen:offset + hdrlen + caplen]))
+        offset += (hdrlen + caplen + 3) & ~3
+    return frames
+
+
+class Bpf:
+    """Raw Ethernet on a host interface: what it reads excludes our own sends,
+    and what it writes keeps the deck's source MAC."""
+
+    def __init__(self, interface: str, size: int = 1 << 20):
+        import fcntl
+        self.fd = None
+        for n in range(256):
+            try:
+                self.fd = os.open(f"/dev/bpf{n}", os.O_RDWR)
+                break
+            except FileNotFoundError:
+                break
+            except OSError:         # busy; try the next
+                continue
+        if self.fd is None:
+            raise SystemExit("link_hub: no usable /dev/bpf device (access_bpf group?)")
+        one = struct.pack("I", 1)
+        fcntl.ioctl(self.fd, BIOCSBLEN, struct.pack("I", size))
+        fcntl.ioctl(self.fd, BIOCSETIF, interface.encode().ljust(32, b"\0"))
+        fcntl.ioctl(self.fd, BIOCIMMEDIATE, one)
+        fcntl.ioctl(self.fd, BIOCSHDRCMPLT, one)
+        fcntl.ioctl(self.fd, BIOCSSEESENT, struct.pack("I", 0))
+        # Unicast to an emulated deck (ARP replies, dbserver TCP) is addressed to its
+        # MAC, which the NIC filters out unless the interface is promiscuous.
+        fcntl.ioctl(self.fd, BIOCPROMISC)
+        self.size = struct.unpack("I", fcntl.ioctl(self.fd, BIOCGBLEN, b"\0" * 4))[0]
+        self.interface = interface
+
+    def fileno(self) -> int:
+        return self.fd
+
+    def read(self) -> list[bytes]:
+        return bpf_frames(os.read(self.fd, self.size))   # Darwin: read exactly the buffer size
+
+    def write(self, frame: bytes) -> None:
+        os.write(self.fd, frame)
+
+
+def crosses(frame: bytes, decks: set[bytes], to_wire: bool, multicast: bool) -> bool:
+    """Bridge policy. Deck->wire: broadcast and unicast. Wire->deck: broadcast
+    and unicast addressed to a deck. Multicast only when asked for."""
+    dst = frame[:6]
+    if dst == b"\xff" * 6:
+        return True
+    if dst[0] & 1:
+        return multicast
+    return to_wire or dst in decks
+
+
 class Hub:
     def __init__(self, out: Path, listen: str):
         self.out = out
@@ -144,6 +219,27 @@ class Hub:
         self.server.setblocking(False)
         self.sel.register(self.server, selectors.EVENT_READ, "accept")
         self.listen = listen
+        self.bridge = None
+        self.bridge_multicast = False
+        self.bridged = {"to_wire": 0, "from_wire": 0}
+
+    def attach(self, bridge: "Bpf", multicast: bool) -> None:
+        self.bridge, self.bridge_multicast = bridge, multicast
+        self.sel.register(bridge, selectors.EVENT_READ, "bridge")
+        self.event("bridge", interface=bridge.interface, multicast=multicast)
+
+    def deck_macs(self) -> set[bytes]:
+        return {bytes.fromhex(mac.replace(":", "")) for mac, sender in self.senders.items()
+                if sender["origin"].startswith("deck")}
+
+    def from_wire(self) -> None:
+        decks = self.deck_macs()
+        for frame in self.bridge.read():
+            if 14 <= len(frame) <= MAX_FRAME and frame[6:12] not in decks \
+                    and crosses(frame, decks, False, self.bridge_multicast):
+                self.bridged["from_wire"] += 1
+                self.record(frame, "wire")
+                self.send_all(frame)
 
     def event(self, what: str, **fields) -> None:
         record = dict(t=round(time.time() - self.started, 3), event=what, **fields)
@@ -244,6 +340,9 @@ class Hub:
             client["rx"] += 1
             self.record(frame, f"deck{client['id']}")
             self.send_all(frame, exclude=conn)
+            if self.bridge is not None and crosses(frame, set(), True, self.bridge_multicast):
+                self.bridge.write(frame)
+                self.bridged["to_wire"] += 1
             reply = self.proxy_arp(frame)
             if reply is not None:
                 self.record(reply, "replay")
@@ -266,7 +365,9 @@ class Hub:
     def summary(self) -> dict:
         return {"listen": self.listen, "host_seconds": round(time.time() - self.started, 3),
                 "decks": {c["id"]: {"in": c["rx"], "out": c["tx"]} for c in self.clients.values()},
-                "senders": self.senders}
+                "senders": self.senders,
+                **({"bridge": dict(interface=self.bridge.interface, **self.bridged)}
+                   if self.bridge is not None else {})}
 
     def close(self) -> None:
         (self.out / "summary.json").write_text(json.dumps(self.summary(), indent=2) + "\n")
@@ -593,7 +694,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--replay-renumber", action="append", default=[], metavar="OLD:NEW",
                         help="call the capture's player OLD player NEW (repeatable), "
                              "so it does not collide with an emulated deck")
+    parser.add_argument("--bridge", metavar="IFACE",
+                        help="join the segment to this real interface (macOS BPF)")
+    parser.add_argument("--bridge-multicast", action="store_true",
+                        help="let multicast cross the bridge too (Dante, PTP, mDNS)")
     args = parser.parse_args(argv)
+    if args.bridge and args.sync:
+        parser.error("--bridge cannot hold the wire to a guest timeline; drop --sync")
 
     args.out.mkdir(parents=True, exist_ok=True)
     listen = args.listen if ":" in args.listen else f"127.0.0.1:{args.listen}"
@@ -603,6 +710,8 @@ def main(argv: list[str] | None = None) -> int:
                      ports) if args.replay else None)
     hub = (SyncHub(args.out, listen, args.decks, replay, args.replay_delay) if args.sync
            else Hub(args.out, listen))
+    if args.bridge:
+        hub.attach(Bpf(args.bridge), args.bridge_multicast)
     (args.out / "endpoint.json").write_text(json.dumps({"listen": listen, "pid": os.getpid()}) + "\n")
     hub.event("listening", listen=listen,
               replay=(str(args.replay) if replay else None),
@@ -640,6 +749,8 @@ def main(argv: list[str] | None = None) -> int:
             for key, _ in hub.sel.select(timeout):
                 if key.data == "accept":
                     hub.accept()
+                elif key.data == "bridge":
+                    hub.from_wire()
                 else:
                     hub.read(key.fileobj)
             if replay is not None:

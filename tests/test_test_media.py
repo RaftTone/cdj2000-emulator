@@ -25,6 +25,18 @@ def test_invalid_insert_schedule_fails_before_launch(monkeypatch, extra):
     assert error.value.code == 2
 
 
+@pytest.mark.parametrize('limit', ['0', '-1', '10000001'])
+def test_invalid_dsp_tx_capture_limit_fails_before_launch(monkeypatch, limit):
+    from tools.cdj_main import nxs_vm
+    monkeypatch.setattr(nxs_vm.sys, 'argv', [
+        'nxs_vm', 'unused-run', '--capture-dsp-tx-records', limit])
+    monkeypatch.setattr(nxs_vm.subprocess, 'Popen',
+                        lambda *args, **kwargs: pytest.fail('must not launch'))
+    with pytest.raises(SystemExit) as error:
+        nxs_vm.main()
+    assert error.value.code == 2
+
+
 def test_generated_wav_is_stereo_pcm_and_low_level(tmp_path):
     track = tmp_path / 'test.wav'
     test_media.write_track(track)
@@ -78,6 +90,26 @@ def test_mounts_use_temporary_overlays_and_escape_commas(tmp_path):
     assert inputs == {'sd_image': image, 'usb_image': image}
     assert image.read_bytes() == original
     assert test_media.media_drives(None, None) == ([], {})
+
+
+def test_disc_uses_genuine_ide_cd_backend_and_records_input(tmp_path):
+    image = tmp_path / 'AmbiX,, demo.iso'
+    image.write_bytes(b'ISO fixture'.ljust(4096, b'\0'))
+    command, inputs = test_media.media_drives(None, None, image)
+    assert command == [
+        '-drive',
+        ('if=ide,media=cdrom,bus=0,unit=0,format=raw,file=' +
+         str(image).replace(',', ',,')),
+    ]
+    assert inputs == {'disc_image': image}
+
+
+@pytest.mark.parametrize('size', [0, 512, 2049])
+def test_invalid_disc_image_sizes_are_rejected(tmp_path, size):
+    image = tmp_path / 'bad.iso'
+    image.write_bytes(bytes(size))
+    with pytest.raises(ValueError, match='2048-byte ISO sectors'):
+        test_media.media_drives(None, None, image)
 
 
 @pytest.mark.parametrize('size', [0, 513, 1536])

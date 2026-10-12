@@ -386,16 +386,19 @@ applying half on every push and fails on any fuzz or reject.
 `BFIN_LINK_FRESH_ONLY=1` prevents the live SPORT frame cache from delivering a
 previously consumed record again. It also bypasses the cached announcing-record
 hold and the last-status fallback. New MAIN records retain their original bytes;
-this does not rewrite announcement fields or CRCs. Legacy behavior remains the
-default. The 200-byte housekeeping model and the independently timed emulators
-are unchanged, so this is **not** a hardware clock model or a boot fix.
+this does not rewrite announcement fields or CRCs. The simulator's legacy
+behavior remains its default; the NXS launcher now enables fresh-only delivery
+by default after connected runs showed queue saturation from cached repeats.
+The 200-byte housekeeping model and the independently timed emulators are
+unchanged, so this is **not** a hardware clock model.
 
 `tests/test_bfin_link_cache.py` compiles the actual patched cache function from
 the local simulator build and verifies fresh/legacy consumption, replenishment,
 length matching and repeated-payload gating. It requires that build and a C
 compiler. The first 90-second NXS test with this flag showed E-8709 and never
-consumed the announced 240-byte payload; it did not reach the later database
-request phase. Do not enable this flag in normal launches on that evidence.
+consumed the announced 240-byte payload; it predated the SIC mask-order fix
+in patch 07. Later connected fresh-only runs reached native SD browse, load,
+PLAY and genuine PCM. See `NXS_LINK_LOADING.md` and the 2026-09-24 audio review.
 
 ## 06: opt-in DMA register timeline
 

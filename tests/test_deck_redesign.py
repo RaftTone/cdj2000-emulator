@@ -287,10 +287,12 @@ def test_attach_mode_does_not_start_a_simulator_or_remove_frame(tmp_path):
     viewer.status.set.assert_called_once()
 
 
-@pytest.mark.parametrize('media', [None, 'sd', 'usb'])
+@pytest.mark.parametrize('media', [None, 'sd', 'usb', 'disc'])
 @pytest.mark.parametrize('trace_media', [False, True])
+@pytest.mark.parametrize('capture_dsp_tx', [False, True])
 def test_nxs_window_attaches_and_closing_it_stops_owned_boards(tmp_path, monkeypatch,
-                                                            media, trace_media):
+                                                            media, trace_media,
+                                                            capture_dsp_tx):
     from tools.cdj_main import nxs_vm
     for name in ('bin/cdj-run', 'build/qemu/build/qemu-system-sh4',
                  'firmware/nxs/main-firmware.bin', 'firmware/nxs/gui-boot-memory.elf',
@@ -299,15 +301,18 @@ def test_nxs_window_attaches_and_closing_it_stops_owned_boards(tmp_path, monkeyp
         path.parent.mkdir(parents=True, exist_ok=True)
         path.touch()
     monkeypatch.setattr(nxs_vm, 'ROOT', tmp_path)
-    argv = ['nxs_vm', 'run', '--ui']
+    argv = ['nxs_vm', 'run', '--ui', '--gui-head-start', '0']
     if media:
         media_path = tmp_path / 'track.img'
-        media_path.write_bytes(bytes(512))
+        media_path.write_bytes(bytes(2048 if media == 'disc' else 512))
         argv.extend(['--' + media, str(media_path)])
         if media == 'sd':
             argv.extend(['--sd-insert-seconds', '110'])
     if trace_media:
         argv.append('--trace-media')
+    if capture_dsp_tx:
+        argv += ['--functional-dsp-audio', '--capture-dsp-tx',
+                 '--capture-dsp-tx-records', '1234']
     monkeypatch.setattr(nxs_vm.sys, 'argv', argv)
     monkeypatch.setattr(nxs_vm.time, 'sleep', lambda _: None)
     monkeypatch.setattr(nxs_vm, 'finalize_dsp_artifacts', Mock())
@@ -325,14 +330,29 @@ def test_nxs_window_attaches_and_closing_it_stops_owned_boards(tmp_path, monkeyp
     assert len(launched) == 3
     assert '--attach' in launched[2][0]
     assert '--control-port' in launched[2][0]
-    for name in ('CDJ_SDHI_TRACE', 'CDJ_USBH_TRACE'):
+    for name in ('CDJ_SDHI_TRACE', 'CDJ_USBH_TRACE', 'CDJ_ATA_TRACE'):
         assert environments[0].get(name) == ('1' if trace_media else None)
+    assert environments[0].get('CDJ_NXS_DSP_TX_CAPTURE_LIMIT') == (
+        '1234' if capture_dsp_tx else None)
+    assert environments[0].get('CDJ_NXS_DSP_TX_CAPTURE') == (
+        str(tmp_path / 'run/dsp-tx.jsonl') if capture_dsp_tx else None)
     assert environments[0].get('CDJ_SD_INSERT') == ('110' if media == 'sd' else None)
     if media:
         drive = launched[0][0][launched[0][0].index('-drive') + 1]
-        assert 'snapshot=on' in drive
+        assert ('media=cdrom' in drive) is (media == 'disc')
+        assert ('snapshot=on' in drive) is (media != 'disc')
         assert str(media_path) in drive
-        assert media_path.read_bytes() == bytes(512)
+        assert media_path.read_bytes() == bytes(2048 if media == 'disc' else 512)
+    trace_events = [launched[0][0][index + 1]
+                    for index, value in enumerate(launched[0][0]) if value == '-trace']
+    if trace_media and media == 'disc':
+        assert trace_events == [
+            'enable=ide_bus_exec_cmd', 'enable=ide_atapi_cmd',
+            'enable=ide_atapi_cmd_packet', 'enable=ide_atapi_cmd_error',
+            'enable=ide_atapi_cmd_read', 'enable=cd_read_sector',
+        ]
+    else:
+        assert trace_events == []
     for _, process in launched[:2]:
         process.terminate.assert_called_once()
 

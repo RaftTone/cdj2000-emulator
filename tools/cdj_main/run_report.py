@@ -218,7 +218,8 @@ def build_report(run: Path) -> dict:
         "artifacts": {name: (run / name).exists() for name in
                        ("main-link.bin", "main-stderr.log", "main.log",
                         "screen.ppm", "frames/manifest.json",
-                        "dsp-checkpoints/manifest.json", "dsp-events.jsonl")},
+                        "dsp-checkpoints/manifest.json", "dsp-events.jsonl",
+                        "dsp-render.wav", "dsp-audio.wav")},
         "interpretation": {
             "track_list_observed": bool(link["wav_entries"]),
             "native_load_response_observed": bool(link["load_responses"]),

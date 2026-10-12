@@ -243,13 +243,42 @@ def test_invalid_frame_interval_rejected_before_launch(monkeypatch, interval):
     assert error.value.code == 2
 
 
+def test_virtual_mcasp_clock_requires_functional_audio(monkeypatch):
+    monkeypatch.setattr(nxs_vm.sys, 'argv', ['nxs_vm', 'unused', '--virtual-mcasp-clock'])
+    with pytest.raises(SystemExit) as error:
+        nxs_vm.main()
+    assert error.value.code == 2
+
+
+def test_host_dsp_audio_requires_virtual_clock(monkeypatch):
+    monkeypatch.setattr(nxs_vm.sys, 'argv',
+                        ['nxs_vm', 'unused', '--host-dsp-audio-wav'])
+    with pytest.raises(SystemExit) as error:
+        nxs_vm.main()
+    assert error.value.code == 2
+
+
+def test_dsp_pcm_render_requires_functional_audio(monkeypatch):
+    monkeypatch.setattr(nxs_vm.sys, 'argv',
+                        ['nxs_vm', 'unused', '--render-dsp-audio-wav'])
+    with pytest.raises(SystemExit) as error:
+        nxs_vm.main()
+    assert error.value.code == 2
+
+
 @pytest.mark.parametrize('interval,deferred,profile', [
     (0, False, False), (0.5, False, False), (0, True, False), (0, True, True),
 ])
-@pytest.mark.parametrize('fresh_link,trace_link', [(False, False), (True, True)])
+@pytest.mark.parametrize('fresh_link,trace_link',
+                         [(None, False), (False, False), (True, True)])
+@pytest.mark.parametrize('virtual_clock', [False, True])
 @pytest.mark.parametrize('custom_main', [False, True])
+@pytest.mark.parametrize('disc_attached', [False, True])
+@pytest.mark.parametrize('fast_dsp', [False, True])
 def test_run_manifest_records_launched_inputs_and_optional_observations(
-        tmp_path, monkeypatch, interval, deferred, profile, fresh_link, trace_link, custom_main):
+        tmp_path, monkeypatch, interval, deferred, profile, fresh_link, trace_link,
+        virtual_clock,
+        custom_main, disc_attached, fast_dsp):
     paths = ('bin/cdj-run', 'build/qemu/build/qemu-system-sh4',
              'firmware/nxs/main-firmware.bin', 'firmware/nxs/gui-boot-memory.elf',
              'firmware/nxs/gui-flash-image.bin')
@@ -259,7 +288,12 @@ def test_run_manifest_records_launched_inputs_and_optional_observations(
         path.write_bytes(name.encode())
     original_simulator = nxs_vm.sha256(tmp_path / paths[0])
     monkeypatch.setattr(nxs_vm, 'ROOT', tmp_path)
-    argv = ['nxs_vm', 'run', '--seconds', '2', '--frame-interval', str(interval)]
+    argv = ['nxs_vm', 'run', '--seconds', '2', '--frame-interval', str(interval),
+            '--gui-head-start', '0']
+    disc = tmp_path / 'AmbiX demo.iso'
+    if disc_attached:
+        disc.write_bytes(b'ISO fixture'.ljust(4096, b'\0'))
+        argv += ['--disc', str(disc)]
     selected_main = tmp_path / 'firmware/nxs/main-firmware.bin'
     if custom_main:
         selected_main = tmp_path / 'modified-main.bin'
@@ -267,14 +301,26 @@ def test_run_manifest_records_launched_inputs_and_optional_observations(
         argv += ['--main-firmware', str(selected_main), '--trace-bus', '--ethernet-peer-port', '6123']
     if deferred:
         argv.append('--deferred-dsp-scheduling')
+    if fast_dsp:
+        argv.append('--fast-dsp')
     if profile:
         argv.append('--qemu-sync-profile')
-    if fresh_link:
-        argv.append('--fresh-link')
+    if fresh_link is not None:
+        argv.append('--fresh-link' if fresh_link else '--cached-link')
+    expected_fresh = fresh_link is not False
+    if virtual_clock:
+        argv.extend(('--functional-dsp-audio', '--virtual-mcasp-clock'))
+    host_audio = virtual_clock and profile
+    if host_audio:
+        argv.append('--host-dsp-audio-wav')
+    pcm_render = not virtual_clock and profile
+    if pcm_render:
+        argv.extend(('--functional-dsp-audio', '--render-dsp-audio-wav'))
     if trace_link:
         argv.append('--trace-link-tx')
     monkeypatch.setattr(nxs_vm.sys, 'argv', argv)
     monkeypatch.setenv('CDJ_NXS_DSP_SCHEDULER', 'inherited-must-not-win')
+    monkeypatch.setenv('CDJ_NXS_DSP_PCM_WAV', '/inherited-must-not-win')
     monkeypatch.setenv('BFIN_LINK_FRESH_ONLY', 'inherited-must-not-win')
     monkeypatch.setenv('BFIN_SPORT_TX_OUTPUT', '/must/not/be/written')
     clock = [0.0]
@@ -299,6 +345,11 @@ def test_run_manifest_records_launched_inputs_and_optional_observations(
     def launch(command, **kwargs):
         gui = '--model' in command
         if not gui:
+            disc_drives = [command[index + 1] for index, value in enumerate(command)
+                           if value == '-drive' and 'media=cdrom' in command[index + 1]]
+            assert len(disc_drives) == (1 if disc_attached else 0)
+            if disc_attached:
+                assert 'if=ide,media=cdrom,bus=0,unit=0,format=raw' in disc_drives[0]
             assert command[command.index('-nic') + 1] == (
                 'socket,model=cdj-nxs-ethernet,id=nxsnet,connect=127.0.0.1:6123'
                 if custom_main else 'none')
@@ -308,8 +359,20 @@ def test_run_manifest_records_launched_inputs_and_optional_observations(
             assert kwargs['env']['CDJ_LINK_LINK_ROWS'] == 'off'
             assert kwargs['env']['CDJ_NXS_DSP_SCHEDULER'] == (
                 'deferred-v1' if deferred else 'legacy')
+            assert kwargs['env']['CDJ_NXS_DSP_LEGACY_BUDGET'] == (
+                '65536' if fast_dsp else '1000000')
+            assert kwargs['env'].get('CDJ_NXS_DSP_VIRTUAL_MCASP') == (
+                '1' if virtual_clock else None)
+            assert kwargs['env'].get('CDJ_NXS_DSP_HOST_AUDIO') == (
+                '1' if host_audio else None)
+            assert kwargs['env'].get('CDJ_NXS_DSP_PCM_WAV') == (
+                str(tmp_path / 'run/dsp-render.wav') if pcm_render else None)
+            assert ('-audiodev' in command) is host_audio
+            if host_audio:
+                assert command[command.index('-audiodev') + 1] == (
+                    f'wav,id=cdj-dsp,path={tmp_path / "run" / "dsp-audio.wav"}')
         if gui:
-            assert kwargs['env'].get('BFIN_LINK_FRESH_ONLY') == ('1' if fresh_link else None)
+            assert kwargs['env'].get('BFIN_LINK_FRESH_ONLY') == ('1' if expected_fresh else None)
             assert kwargs['env'].get('BFIN_SPORT_TX_OUTPUT') == (
                 str(tmp_path / 'run/gui-link-tx.bin') if trace_link else None)
             (tmp_path / 'run/screen.ppm').write_bytes(FRAME)
@@ -325,11 +388,18 @@ def test_run_manifest_records_launched_inputs_and_optional_observations(
     assert len(neutral) == 22
     assert neutral[15] == 0x02  # REV is active low; zero is reverse, not idle.
     assert not any(neutral[:15] + neutral[16:])
-    assert manifest['link_delivery'] == ('fresh-only diagnostic' if fresh_link
+    assert manifest['link_delivery'] == ('fresh-only diagnostic' if expected_fresh
                                          else 'legacy cached repeats')
     expected_scheduler = 'deferred-v1' if deferred else 'legacy'
     assert manifest['main_environment']['CDJ_NXS_DSP_SCHEDULER'] == expected_scheduler
     assert manifest['dsp_scheduler_mode'] == expected_scheduler
+    assert manifest['dsp_legacy_budget_packets'] == (65536 if fast_dsp else 1000000)
+    assert manifest['dsp_audio_clock'] == (
+        'virtual-clock-batch' if virtual_clock else
+        'coarse-packet-slots' if pcm_render else 'stopped-clock')
+    assert manifest['dsp_virtual_slice_packets'] == (4096 if virtual_clock else None)
+    assert manifest['dsp_host_audio'] == ('dsp-audio.wav' if host_audio else None)
+    assert manifest['dsp_pcm_render'] == ('dsp-render.wav' if pcm_render else None)
     assert manifest['qemu_sync_profile']['enabled'] is profile
     assert ('-enable-sync-profile' in manifest['main']) is profile
     if profile:
@@ -338,16 +408,25 @@ def test_run_manifest_records_launched_inputs_and_optional_observations(
         assert 'host overhead' in manifest['qemu_sync_profile']['observer_overhead']
     else:
         collector.assert_not_called()
-    assert manifest['architectural_validation_eligible'] is not deferred
-    if deferred:
+    assert manifest['architectural_validation_eligible'] is not (
+        deferred or fast_dsp or virtual_clock or pcm_render)
+    if virtual_clock:
+        assert '4096-packet slices' in manifest['scheduling_provenance']
+    elif deferred:
         assert 'not a DSP timing fix' in manifest['scheduling_provenance']
+    elif fast_dsp:
+        assert 'exploratory host-fairness mode' in manifest['scheduling_provenance']
     else:
         assert manifest['scheduling_provenance'] == \
             'legacy synchronous bounded DSP activation'
-    assert len(manifest['input_artifacts']) == 5
+    assert len(manifest['input_artifacts']) == 5 + disc_attached
     assert manifest['input_artifacts']['simulator']['sha256'] == original_simulator
     assert manifest['inputs_differ_at_exit'] == ['simulator']
     assert manifest['input_artifacts']['qemu']['path'] == str(tmp_path / paths[1])
+    assert ('disc_image' in manifest['input_artifacts']) is disc_attached
+    assert ('disc_image' in manifest['media']['images']) is disc_attached
+    if disc_attached:
+        assert manifest['input_artifacts']['disc_image']['sha256'] == nxs_vm.sha256(disc)
     if interval:
         observations = manifest['frame_snapshots']['observations']
         assert len(observations) == 3
@@ -357,3 +436,17 @@ def test_run_manifest_records_launched_inputs_and_optional_observations(
     else:
         assert 'frame_snapshots' not in manifest
         assert not (tmp_path / 'run/frames').exists()
+@pytest.mark.parametrize('fast,requested,expected', [
+    (False, None, 1000000),
+    (True, None, 65536),
+    (False, 4096, 4096),
+    (False, 1000000, 1000000),
+])
+def test_legacy_dsp_budget_launcher_policy(fast, requested, expected):
+    assert nxs_vm.legacy_dsp_budget(fast, requested) == expected
+
+
+@pytest.mark.parametrize('requested', [0, 4095, 1000001])
+def test_legacy_dsp_budget_launcher_rejects_unsafe_values(requested):
+    with pytest.raises(ValueError, match='4096..1000000'):
+        nxs_vm.legacy_dsp_budget(False, requested)

@@ -136,6 +136,31 @@ void cdj_c6747_pll_tick(CdjC6747Pll *s)
     if (s->go_remaining && --s->go_remaining == 0)
         for (unsigned i = 0; i < 7; ++i) s->active_dividers[i] = s->target_dividers[i];
 }
+void cdj_c6747_pll_ticks(CdjC6747Pll *s, uint64_t count)
+{
+    /* Countdowns and the reset-age ramp change the tick's own behaviour;
+     * step through them one edge at a time. */
+    while (count && (s->go_remaining || s->lock_wait_remaining ||
+                     ((s->config[0] & 0x12b) == 0x100 && s->reset_age < 17))) {
+        cdj_c6747_pll_tick(s);
+        --count;
+    }
+    if (!count) return;
+    /* Otherwise every edge adds the same fraction of an input period. */
+    if (s->config[0] & 1) {
+        uint64_t numerator = (uint64_t)ratio(s->config[3]) *
+                             ratio(s->config[8]) * ratio(s->active_dividers[0]);
+        uint64_t denominator = s->config[2] + 1;
+        uint64_t whole = numerator / denominator * count;
+        uint64_t phase = s->oscin_phase +
+                         numerator % denominator * count;
+        s->oscin_cycles += whole + phase / denominator;
+        s->oscin_phase = phase % denominator;
+    } else {
+        s->oscin_cycles += (uint64_t)ratio(s->active_dividers[0]) * count;
+        s->oscin_phase = 0;
+    }
+}
 bool cdj_c6747_pll_read(const CdjC6747Pll *s, uint32_t address, uint32_t *value)
 {
     if (address == 0x01c11138u) { *value = s->command; return true; }

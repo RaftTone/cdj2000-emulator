@@ -17,7 +17,12 @@ from pathlib import Path
 from tools.cdj_main.qmp import Qmp, QmpError
 
 MODE_STATE = 0x04CF2180
-TABLE_ENTRY = 0x04CF2994
+TABLE_BASE = 0x04CF2854
+SLOT_STRIDE = 0xA0
+SD_SLOT = 2
+USB_SLOT = 3
+TABLE_ENTRY = TABLE_BASE + SD_SLOT * SLOT_STRIDE
+USB_TABLE_ENTRY = TABLE_BASE + USB_SLOT * SLOT_STRIDE
 MODE_FALLBACK = 0x04CF222C
 LATCH = 0x049832EC
 DEVICE = 0x049832F0
@@ -39,7 +44,30 @@ def parse_word(reply: str) -> int:
     return int(values[0], 16)
 
 
-def readiness_snapshot(read_word) -> dict:
+def readiness_snapshot(read_word, source: str = "sd") -> dict:
+    """Read the selected source's readiness without changing guest state.
+
+    SD retains the historical multi-arm/mount-latch predicate.  USB uses the
+    proven source table entry: value 1 is intermediate and value 2 means the
+    browser source is ready.
+    """
+    if source not in ("sd", "usb"):
+        raise ValueError("source must be 'sd' or 'usb'")
+    if source == "usb":
+        entry = read_word(USB_TABLE_ENTRY)
+        result = {
+            "source": "usb",
+            "table_base": TABLE_BASE,
+            "slot": USB_SLOT,
+            "table_entry_address": USB_TABLE_ENTRY,
+            "table_entry": entry,
+            "intermediate": entry == 1,
+            "ready": entry == 2,
+            "ok": entry == 2,
+            "browse_proven": False,
+            "meaning": "USB source table: 1=initializing, 2=browser ready",
+        }
+        return result
     mode = read_word(MODE_STATE)
     table = read_word(TABLE_ENTRY)
     fallback = read_word(MODE_FALLBACK)
@@ -53,7 +81,13 @@ def readiness_snapshot(read_word) -> dict:
             "media mode == 0": media_mode == 0}
     card_present = not bool((info1 >> 5) & 1)
     gate_ready = bool(any(arms.values()) and card_present and latch == 1)
+    # The mount gate is an intermediate state: a real NXS browse capture saw
+    # mode 2/table 1 answer NO CARD, then mode 3/table 2 list files.  Keep
+    # mount readiness distinct from source-key readiness.
+    browser_source_ready = bool(mode == 3 and table == 2 and
+                                card_present and latch == 1)
     result = {
+        "source": "sd",
         "mode_state": mode, "table_entry": table,
         "media_mode_fallback": fallback, "media_mode": media_mode,
         "readiness_arms": arms, "ready": any(arms.values()),
@@ -61,6 +95,7 @@ def readiness_snapshot(read_word) -> dict:
         "card_present": card_present,
         "mount_latched": latch == 1,
         "gate_ready": gate_ready, "ok": gate_ready,
+        "browser_source_ready": browser_source_ready,
         "device": device,
         "flags_byte": (flags_word >> (8 * (FLAGS_BYTE & 3))) & 0xff,
         "browse_proven": False,
@@ -74,7 +109,15 @@ def readiness_snapshot(read_word) -> dict:
     return result
 
 
-def observe_run(run: Path, timeout: float = 0, poll: float = 0.25) -> dict:
+def source_key_ready(snapshot: dict) -> bool:
+    """Whether a source press can open the selected browser table."""
+    if snapshot['source'] == 'sd':
+        return bool(snapshot.get('browser_source_ready'))
+    return bool(snapshot['ok'])
+
+
+def observe_run(run: Path, timeout: float = 0, poll: float = 0.25,
+                source: str = "sd", for_source_key: bool = False) -> dict:
     manifest = json.loads((run / "run.json").read_text())
     if not isinstance(manifest, dict) or manifest.get("profile") != "experimental NXS":
         raise ValueError("run manifest is not an experimental NXS profile")
@@ -98,8 +141,9 @@ def observe_run(run: Path, timeout: float = 0, poll: float = 0.25) -> dict:
             return parse_word(qmp.command("human-monitor-command", {
                 "command-line": f"xp /1wx 0x{address:x}"}))
         while True:
-            result = readiness_snapshot(read_word)
-            if result["gate_ready"] or timeout == 0 or time.monotonic() >= deadline:
+            result = readiness_snapshot(read_word, source)
+            ready = source_key_ready(result) if for_source_key else result['ok']
+            if ready or timeout == 0 or time.monotonic() >= deadline:
                 return result
             time.sleep(min(poll, max(0, deadline - time.monotonic())))
             if time.monotonic() >= deadline:
@@ -109,11 +153,12 @@ def observe_run(run: Path, timeout: float = 0, poll: float = 0.25) -> dict:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("run", type=Path)
+    parser.add_argument("source", nargs="?", choices=("sd", "usb"), default="sd")
     parser.add_argument("--timeout", type=float, default=0)
     parser.add_argument("--poll", type=float, default=0.25)
     args = parser.parse_args(argv)
     try:
-        result = observe_run(args.run.resolve(), args.timeout, args.poll)
+        result = observe_run(args.run.resolve(), args.timeout, args.poll, args.source)
         print(json.dumps(result, indent=2, sort_keys=True))
     except (OSError, ValueError, KeyError, json.JSONDecodeError, QmpError,
             TimeoutError, ConnectionError) as error:

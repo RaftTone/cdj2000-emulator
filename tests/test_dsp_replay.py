@@ -365,14 +365,51 @@ def test_transmit_capture_metadata_and_repeat_gate(tmp_path):
     capture.write_text(
         '{"sequence":1,"instance":1,"slot":0,"serializer":0,"word":305419896,'
         '"xbuf_sequence":7,"packets":1024,"cycles":2048,'
+        '"source":"genuine_xbuf","clock":"functional-coarse-packet-slot"}\n'
+        '{"sequence":2,"instance":2,"slot":1,"serializer":3,"word":0,'
+        '"xbuf_sequence":8,"packets":2048,"cycles":4096,'
         '"source":"genuine_xbuf","clock":"functional-coarse-packet-slot"}\n')
     metadata = tx_capture_metadata(capture)
-    assert metadata['records'] == 1
-    assert metadata['counts'] == {'mcasp1.serializer0': 1}
+    assert metadata['records'] == 2
+    assert metadata['counts'] == {'mcasp1.serializer0': 1, 'mcasp2.serializer3': 1}
+    assert metadata['nonzero_records'] == 1
+    assert metadata['nonzero_counts'] == {'mcasp1.serializer0': 1}
+    assert metadata['first_nonzero'] == {
+        'sequence': 1, 'instance': 1, 'slot': 0,
+        'serializer': 0, 'word': 305419896,
+    }
     assert metadata['synthesized_samples'] is False
+    assert metadata['virtual_time_records'] == 0
+    assert metadata['virtual_time_span_ns'] is None
+    timed = tmp_path / 'timed.jsonl'
+    # Each record may carry a QEMU virtual-clock observation; replay records
+    # intentionally lack one.
+    timed.write_text('\n'.join(json.dumps(dict(json.loads(line), virtual_ns=100 * index))
+                               for index, line in enumerate(capture.read_text().splitlines(), 1)) + '\n')
+    assert tx_capture_metadata(timed)['virtual_time_span_ns'] == 100
+    clocked = tmp_path / 'clocked.jsonl'
+    clocked.write_text(timed.read_text().replace(
+        'functional-coarse-packet-slot', 'virtual-clock-batch'))
+    assert 'virtual-time slot batches' in tx_capture_metadata(clocked)['timing']
+    clocked.write_text(timed.read_text().splitlines()[0] + '\n' +
+                       clocked.read_text().splitlines()[1] + '\n')
+    with pytest.raises(ValueError, match='mixes clock modes'):
+        tx_capture_metadata(clocked)
+    timed.write_text(timed.read_text().replace('"virtual_ns": 200', '"virtual_ns": 99'))
+    with pytest.raises(ValueError, match='virtual timestamp'):
+        tx_capture_metadata(timed)
+    legacy_lines = capture.read_text().splitlines()
+    timed.write_text('\n'.join((legacy_lines[0],
+                                json.dumps(dict(json.loads(legacy_lines[1]),
+                                                virtual_ns=200)))) + '\n')
+    with pytest.raises(ValueError, match='mixes timed and untimed'):
+        tx_capture_metadata(timed)
     empty = tmp_path / 'empty.jsonl'
     empty.write_bytes(b'')
-    assert tx_capture_metadata(empty)['records'] == 0
+    empty_metadata = tx_capture_metadata(empty)
+    assert empty_metadata['records'] == 0
+    assert empty_metadata['nonzero_records'] == 0
+    assert empty_metadata['first_nonzero'] is None
     truncated = tmp_path / 'truncated.jsonl'
     truncated.write_bytes(capture.read_bytes()[:-1])
     with pytest.raises((ValueError, json.JSONDecodeError)):

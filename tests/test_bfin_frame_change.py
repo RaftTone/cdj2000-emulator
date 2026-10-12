@@ -40,6 +40,7 @@ static int counted_compare(const void *a, const void *b, size_t n)
 #include "gui.c"
 unsigned long bfin_stat_frames, bfin_stat_frames_published;
 double bfin_sim_seconds(void) { return 0; }
+double bfin_guest_seconds(void) { return 0; }
 static void frame(void *gui, unsigned char pixel)
 {
     unsigned char line[4] = {pixel, 0, 0, 0};

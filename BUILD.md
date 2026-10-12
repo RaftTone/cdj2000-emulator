@@ -1,8 +1,5 @@
 # Building
 
-Host recipes for both Windows and macOS. Diagnostic notes from NXS/DSP work
-follow; they do not replace the build steps.
-
 **Windows (MSYS2 MINGW64, x86-64):** install the packages under
 [What you need](#what-you-need), then:
 
@@ -14,13 +11,16 @@ export CDJ_QEMU=/c/qemu-src/build/qemu-system-sh4
 ```
 
 The NXS launcher resolves `bin/cdj-run.exe` and `CDJ_QEMU`. `--debug` and
-`--qemu-sync-profile` use TCP/telnet chardevs; MinGW QEMU has no `unix:` sockets.
+`--qemu-sync-profile` use TCP and telnet chardevs on Windows.
 
 **macOS (Homebrew, including Apple Silicon):** see
-[macOS migration](#macos-migration). `scripts/build-bfin-sim.sh` uses `gmake`
-and Homebrew `gmp`/`mpfr`. In-tree QEMU stays
-`build/qemu/build/qemu-system-sh4`. `--debug` keeps Unix QMP/monitor sockets
-and the relative-path `sockaddr_un` workaround.
+[macOS migration](#macos-migration). The NXS launcher keeps Unix QMP and monitor
+sockets on macOS.
+
+For the optional SH7764 EtherC/RTL8201FL localhost backend, custom Dante MAIN
+input, integration tests and evidence limitations, see [ETHERNET_LOCAL.md](ETHERNET_LOCAL.md).
+The normal QEMU build script includes the new controller/PHY automatically.
+Without `--ethernet-peer-port`, the launcher keeps the Ethernet link disconnected.
 
 Check the captured NXS MAIN/DSP ready/clear/ack sequence without executing or
 modifying firmware:
@@ -84,8 +84,8 @@ success are synthesized. The QEMU adapter aggregates nine SCL periods per byte
 and one per STOP using 53.950MHz Pck; START/STOP and pin-level timing remain
 approximations, and the board's 53.930MHz alternative documentation is unresolved.
 Two corrected 120-second cold runs now reach normal player/UTILITY without
-E-7010 or E-7206 and respond to controls. This establishes clean startup, not
-storage/audio functionality or full fidelity.
+E-7010 or E-7206 and respond to controls; see CLEAN_BOOT_EVIDENCE.md. This
+establishes clean startup, not storage/audio functionality or full fidelity.
 
 Strict timed SPI/schema-10 focused regression:
 
@@ -130,32 +130,23 @@ collects evidence; a zero launcher exit is NOT a successful-boot result. Inspect
 the frame timeline and DSP fault/handshake state, record basic interactions,
 and require at least 60 seconds after the normal player appears without
 E-7010 before repeating a cold boot. Two strict 120-second captures and a
-late encoder response have been captured. E-7206 AUTH CHIP ERROR remains; this
-evidence does not establish clean full boot, full DSP parity or working audio.
+late encoder response are recorded in DSP_BOOT_MILESTONE_AUDIT.md. E-7206
+AUTH CHIP ERROR remains; this evidence does not establish clean full boot,
+full DSP parity or working audio. See HANDOFF.md for current limitations.
 `frames/manifest.json` records observation times, hashes and incomplete/missing
 frames. Unchanged images do not prove liveness. `run.json` records the actual
 binary/firmware hashes before launch and after exit. No frame capture or input
 hashing changes firmware traffic, error conditions, or DSP timing semantics.
 
-Exact-address mnemonic/operand inventory (macOS): the GNU source tree prepared
-by the dependency build is reused; these ignored libraries are not in Git.
-From a fresh `build/tic6x-binutils` directory, configure and build:
+Exact-address mnemonic/operand inventory (macOS): the frontend links Homebrew's
+all-targets `binutils` (`brew install binutils`), which ships `libopcodes` with
+the TI C6x disassembler. Rebuild it after `brew upgrade binutils`, since the
+dylib names carry the version:
 
 ```sh
-mkdir -p build/tic6x-binutils
-cd build/tic6x-binutils
-../gdb-17.2/configure --target=tic6x-elf --disable-nls --disable-gdb \
-  --disable-gas --disable-ld --disable-gprof --disable-gold \
-  --disable-libdecnumber --disable-readline --disable-sim --disable-werror
-make -j4 all-bfd all-opcodes all-libiberty
-cd ../..
-cc -std=c11 -Wall -Wextra -Werror -Ibuild/tic6x-binutils/bfd \
-  -Ibuild/gdb-17.2/include -Ibuild/gdb-17.2/bfd \
-  tools/cdj_dsp/tic6x_disasm.c \
-  build/tic6x-binutils/opcodes/.libs/libopcodes.a \
-  build/tic6x-binutils/bfd/.libs/libbfd.a \
-  build/tic6x-binutils/libiberty/libiberty.a \
-  -lz -L/opt/homebrew/opt/zstd/lib -lzstd -o /tmp/cdj-tic6x-disasm
+B=$(brew --prefix binutils)
+cc -std=c11 -Wall -Wextra -Werror -I"$B/include" tools/cdj_dsp/tic6x_disasm.c \
+  "$B"/lib/libopcodes-*.dylib "$B"/lib/libbfd-*.dylib -o /tmp/cdj-tic6x-disasm
 C6X_DISASSEMBLER=/tmp/cdj-tic6x-disasm .venv/bin/python -m pytest -q \
   tests/test_dsp_semantic_inventory.py tests/test_dsp_coverage.py tests/test_dsp_inventory.py
 .venv/bin/python -m tools.cdj_dsp.semantic_inventory \
@@ -164,13 +155,29 @@ C6X_DISASSEMBLER=/tmp/cdj-tic6x-disasm .venv/bin/python -m pytest -q \
   runs/NEW_SEMANTIC_INVENTORY.json --disassembler /tmp/cdj-tic6x-disasm
 ```
 
-The link flags above match this host's Homebrew zstd-enabled BFD build; use the
-equivalent library path for another host. On MSYS2 MINGW64 that is typically
-`-lz -lzstd` without `-L/opt/homebrew/...`, writing the binary under `build/`
-instead of `/tmp` if you prefer. Report output must be new. The
+Elsewhere, link any all-targets or `tic6x-elf` libopcodes/libbfd. Report output
+must be new. The
 frontend batches exact addresses via stdin instead of linear sweeping across
 data. Reports preserve provenance hashes and remain non-validating: canonical
 disassembly does not prove execution, semantic correctness or test completeness.
+
+Instruction reachability — whether the captured firmware contains what the core
+cannot execute. Reuses the same frontend, and runs without it (every static
+verdict then reads `not-scanned`):
+
+```sh
+.venv/bin/python -m tools.cdj_dsp.reachability analysis/dsp/reachability.json \
+  --disassembler /tmp/cdj-tic6x-disasm
+C6X_DISASSEMBLER=/tmp/cdj-tic6x-disasm .venv/bin/python -m pytest -q \
+  tests/test_dsp_reachability.py
+```
+
+It answers two questions and keeps them apart: `confirmed_executed` counts
+replay-confirmed addresses and recorded unsupported-encoding faults, while
+`static_candidates` counts fetch-packet-aligned disassembly hits in captured
+memory, which is presence and not execution. Read `static_scan.noise_floor`
+before any candidate count: the same pipeline over control blobs of the same
+size is how many hits that mnemonic gets from bytes that are not code.
 
 AMR/circular-addressing validation:
 
@@ -178,7 +185,7 @@ AMR/circular-addressing validation:
 .venv/bin/python -m pytest -q tests/test_c674x.py tests/test_c674x_circular.py
 cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
   -fno-omit-frame-pointer -Iemulator/qemu tests/cstub/c674x-circular.c \
-  emulator/qemu/cdj_c674x.c emulator/qemu/cdj_c674x_loop.c \
+  emulator/qemu/cdj_c674x.c emulator/qemu/cdj_c674x_sp.c emulator/qemu/cdj_c674x_control.c emulator/qemu/cdj_c674x_uncond.c emulator/qemu/cdj_c674x_mpy.c emulator/qemu/cdj_c674x_dotp.c emulator/qemu/cdj_c674x_packed8.c emulator/qemu/cdj_c674x_packed16.c emulator/qemu/cdj_c674x_packbits.c emulator/qemu/cdj_c674x_mpy32.c emulator/qemu/cdj_c674x_dp.c emulator/qemu/cdj_c674x_approx.c emulator/qemu/cdj_c674x_loop.c \
   -o /tmp/cdj-circular-family-san
 /tmp/cdj-circular-family-san
 sh scripts/build-qemu-sh4.sh build/qemu
@@ -195,7 +202,7 @@ sh scripts/build-qemu-sh4.sh build/qemu
 Use current sources for pending circular transfers: the existing queue's size
 high byte now retains circular width at issue. AMR-use interlocks remain
 fail-closed after executed MVC AMR; exact stall prediction and loop missed-stall
-exceptions are not implemented.
+exceptions are not implemented. See HANDOFF.md for measured results and limits.
 
 Reanalyze a captured predicate inventory without rerunning firmware:
 
@@ -218,7 +225,7 @@ Saturating arithmetic batch validation:
 .venv/bin/python -m pytest -q tests/test_c674x.py tests/test_c674x_saturation.py
 cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
   -fno-omit-frame-pointer -Iemulator/qemu tests/cstub/c674x-saturation.c \
-  emulator/qemu/cdj_c674x.c emulator/qemu/cdj_c674x_loop.c \
+  emulator/qemu/cdj_c674x.c emulator/qemu/cdj_c674x_sp.c emulator/qemu/cdj_c674x_control.c emulator/qemu/cdj_c674x_uncond.c emulator/qemu/cdj_c674x_mpy.c emulator/qemu/cdj_c674x_dotp.c emulator/qemu/cdj_c674x_packed8.c emulator/qemu/cdj_c674x_packed16.c emulator/qemu/cdj_c674x_packbits.c emulator/qemu/cdj_c674x_mpy32.c emulator/qemu/cdj_c674x_dp.c emulator/qemu/cdj_c674x_approx.c emulator/qemu/cdj_c674x_loop.c \
   -o /tmp/cdj-saturation-family-san
 /tmp/cdj-saturation-family-san
 sh scripts/build-qemu-sh4.sh build/qemu
@@ -253,8 +260,8 @@ Inspect `coverage.json`'s `source_predicate_audit` and per-instruction
 of predicate-body execution in buffered loops or under SPMASK. Exploratory
 ancestry remains ineligible for architectural validation.
 
-The current validation checkpoint is in the final section. Earlier milestones
-below are historical and retain the limitations measured then.
+Current validation checkpoint is the final section and HANDOFF.md. Earlier
+milestones below are historical and retain the limitations measured then.
 
 Two emulators, built separately, from sources that live outside this repository.
 Neither build needs firmware.
@@ -394,7 +401,7 @@ Copy the board file and pass `--board` if you need it elsewhere.
 
 ## macOS migration
 
-The `codex/macos-nxs` branch is bringing this project to macOS. Install Xcode
+The `develop` branch carries the macOS migration. Install Xcode
 Command Line Tools and Homebrew `make`, `gmp`, and `mpfr` before running
 `scripts/build-bfin-sim.sh`. On macOS the script uses `gmake`, BSD-compatible
 tar arguments, system zlib and Homebrew's arithmetic libraries. `CDJ_MAKE`
@@ -525,6 +532,29 @@ port supports the observed initial upload, not arbitrary DSP firmware yet.
 using synthetic memory and a stopped CPU; no Pioneer firmware is required.
 
 ### Partial C674x execution core
+
+Where the core lives. `cdj_c674x.c` owns fetch, the execute packet's
+transactional commit, the pipeline and delayed-result queues, and the decode
+table. Semantics that need no CPU state sit in pure files beside it:
+`cdj_c674x_sp.c` (binary32 add/sub/multiply, integer conversion, compares),
+`cdj_c674x_mpy.c` (saturating 16x16), `cdj_c674x_uncond.c` (the C64x+
+nonconditional forms), `cdj_c674x_control.c` (the control-register read view
+and MVC reachability) and `cdj_c674x_loop.c` (the SPLOOP schedule).
+Conditional 32-bit instructions are dispatched through `cdj_c674x_arms[]` in
+`cdj_c674x.c`: a new family is one table row plus one `arm_*` function, with
+its arithmetic in a pure file of its own. Table order is load-bearing - some
+families deliberately shadow a later, wider pattern - so rows are appended or
+inserted deliberately, never sorted.
+
+A new core `.c` has to be added to every list that names the others, or the
+link fails: `SOURCES` in `tools/cdj_dsp/replay.py`, `CORE_SOURCES` in
+`tools/cdj_dsp/isa_probe.py`, `CORE` in `tools/cdj_dsp/audit_sweeps.py`, the
+build comment in `tools/cdj_dsp/benchmark_core.c`, the `cc` command lines in
+this file, and the `cc` invocations in `tests/test_c674x.py`,
+`test_c674x_circular.py`, `test_c674x_saturation.py`,
+`test_c674x_spkernel_fields.py`, `test_dsp_fetch_state.py` and
+`test_dsp_isa_audit.py`. `replay.py` derives each header from its `.c` by
+suffix, so only a header with no matching `.c` needs a separate entry there.
 
 `cdj_c674x.c` decodes instructions independently from TI SPRUFE8B. It currently
 supports the observed 32-bit startup forms of MVK/MVKH, AND, floating-point
@@ -706,6 +736,7 @@ at compact `SPMASK S1`, `0x2d66` at `0x11801f26`. Repeated replay traces are
 byte-identical. The connected GUI exits 0 after 15 seconds and publishes a
 frame; full boot remains incomplete. The full suite passes 164 tests with
 43 skips; the CPU harness passes address/undefined-behavior sanitizers.
+See `HANDOFF.md` for hashes, timing limits, and the next implementation batch.
 
 ### Static format inventory for batch implementation
 
@@ -1048,7 +1079,7 @@ SPKERNEL restriction remain incomplete.
 
 ```sh
 .venv/bin/pytest -q
-cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -I emulator/qemu tests/cstub/c674x.c emulator/qemu/cdj_c674x.c emulator/qemu/cdj_c674x_loop.c -o /tmp/cdj-prot-loop-san
+cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -I emulator/qemu tests/cstub/c674x.c emulator/qemu/cdj_c674x.c emulator/qemu/cdj_c674x_sp.c emulator/qemu/cdj_c674x_control.c emulator/qemu/cdj_c674x_uncond.c emulator/qemu/cdj_c674x_mpy.c emulator/qemu/cdj_c674x_dotp.c emulator/qemu/cdj_c674x_packed8.c emulator/qemu/cdj_c674x_packed16.c emulator/qemu/cdj_c674x_packbits.c emulator/qemu/cdj_c674x_mpy32.c emulator/qemu/cdj_c674x_dp.c emulator/qemu/cdj_c674x_approx.c emulator/qemu/cdj_c674x_loop.c -o /tmp/cdj-prot-loop-san
 /tmp/cdj-prot-loop-san
 .venv/bin/python -m tools.cdj_dsp.replay runs/nxs-bnop-immediate-connected/dsp-l2.bin runs/dsp-protected-loop-1 --verify-repeat
 sh scripts/build-qemu-sh4.sh "$PWD/build/qemu"
@@ -1062,6 +1093,72 @@ execution agrees at 1,162 packets / 1,420 cycles, PC `0x11802ecc`, compact
 Trace SHA-256 `65dba25926a35dc30506d2cb4bbf955a47dafb5e23c53bdfbecab93c2df5a1c0`.
 Connected GUI exit 0/frame is not boot completion. No working audio or physical
 PLL lock/clock propagation has been established.
+
+### Derived clock tree: OSCIN to the Timer64P and McASP serial clocks
+
+`cdj_c6747_pll.c` now answers what frequency each output clock actually runs
+at, instead of only latching divider registers. `CDJ_C6747_OSCIN_HZ` is the one
+board constant (16,934,400 Hz; X501 via parent `docs/dsp/dsp-hardware.md`,
+RRV4356 pp 12, 13, 96) and replaces the three literals that were inlined in the
+operating-point check. Every other term cites a page:
+
+* `cdj_c6747_pll_auxclk_hz()` = OSCIN. AUXCLK is the **PLL bypass clock**, with
+  no PREDIV, PLLM, POSTDIV or PLLDIVn in its path: SPRUH91D Table 7-1 printed
+  page 118, Table 6-2 printed page 104, section 6.2 printed page 105,
+  Figure 7-1 printed page 117.
+* `cdj_c6747_pll_sysclk_hz()` = OSCIN / PREDIV x (PLLM+1) / POSTDIV / PLLDIVn in
+  PLL mode, OSCIN / PLLDIVn in bypass (SPRUH91D Figure 7-1 printed page 117,
+  6.2 printed page 105, 7.2 printed page 116, Tables 7-8/7-9/7-17 printed pages
+  125/126/131). It refuses when a divider's enable bit is clear, because
+  SPRUH91D Table 7-24 printed page 137 ties SYSTAT's SYSnON status to DnEN: a
+  disabled divider means the clock is **off**, not divide-by-one.
+* `cdj_c6747_timer_input_hz()` = AUXCLK for timer 1:2, AUXCLK / (PSC34+1) for
+  timer 3:4 in dual 32-bit unchained mode only (SPRUH91D Table 6-2 printed page
+  104, Table 7-1 printed page 118, 28.1.5.2.1 printed page 1229,
+  28.1.5.4.2.2.1/2 printed page 1236, TGCR printed page 1254). On this board
+  that is **16,934,400 Hz**, unchanged by PLL multiplication. **No PSC gate is
+  in this path at all**: Tables 8-1 and 8-2 printed pages 140 and 141 assign no
+  LPSC to Timer64P0 or Timer64P1, and 8.2 printed page 140 says such modules
+  "do not have their module reset/clocks controlled by the PSC module".
+* `cdj_c6747_mcasp_tx_clock_hz()` = AUXCLK / (HCLKXDIV+1) for AHCLKX,
+  / (CLKXDIV+1) again for ACLKX, and / (XSSZ bits x XMOD slots) for an
+  internally generated TDM AFSX (SPRUH91D Figure 24-15 printed page 996, Tables
+  24-35/24-36/24-37/24-38 printed pages 1075/1076/1077/1078, bits-per-frame
+  identity printed page 1011).
+
+Rates are returned as an exact unreduced fraction (numerator Hz over
+denominator) so no ratio is ever silently rounded, and every query returns
+false — outputs untouched — where the manuals fix no frequency. These are
+rates, not run conditions: nothing here counts, raises an event or touches the
+INTC, and GBLCTL/TIMnRS/ENAMODEn/TIEN12 still decide whether a counter moves.
+`CKEN.AUXEN` gating (SPRUH91D 7.4.20 printed page 135) stays unmodelled; CKEN
+is outside the PLL model's register window so writes to `0x01c11148` already
+fail closed, and the reported state is its reset value AUXEN = 1.
+
+`tests/cstub/c6747-pll-clock.c` carries the arithmetic in comments. The headline
+check is audio-shaped and hand-computed: with HCLKXDIV = 2, CLKXDIV = 1,
+XMOD = 2 and XSSZ = Fh, AFSX = 16,934,400 / (3 x 2 x 64) = **44,100 Hz exactly**,
+which is why the board fits a 16.9344 MHz part (384 x 44.1 kHz).
+
+```sh
+.venv/bin/pytest -q
+cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -I emulator/qemu \
+  tests/cstub/c6747-pll-clock.c emulator/qemu/cdj_c6747_pll.c \
+  emulator/qemu/cdj_c6747_timer.c emulator/qemu/cdj_c6747_mcasp.c \
+  emulator/qemu/cdj_c674x.c emulator/qemu/cdj_c674x_uncond.c \
+  emulator/qemu/cdj_c674x_mpy.c emulator/qemu/cdj_c674x_dotp.c emulator/qemu/cdj_c674x_packed8.c emulator/qemu/cdj_c674x_packed16.c emulator/qemu/cdj_c674x_packbits.c emulator/qemu/cdj_c674x_mpy32.c emulator/qemu/cdj_c674x_dp.c emulator/qemu/cdj_c674x_approx.c emulator/qemu/cdj_c674x_sp.c \
+  emulator/qemu/cdj_c674x_control.c emulator/qemu/cdj_c674x_loop.c \
+  -o /tmp/cdj-pll-clock-san
+/tmp/cdj-pll-clock-san
+.venv/bin/python -m tools.cdj_dsp.refdocs --check
+```
+
+SPRS377F is now a first-class reference: `tools/cdj_dsp/refdocs.py` fetches it
+from `https://www.ti.com/lit/ds/symlink/tms320c6747.pdf`, sha256
+`297a63b4c4dae68e98d361162b238bde992466991f25fa3ef0e4b82e8bb9a869`, 230 PDF
+pages with printed page == PDF page throughout. The indexer learned the
+datasheet footer layout, which carries no literature number; SPRU* indexing is
+unchanged.
 
 ### Cycle-edge PLL clock integration
 
@@ -1128,7 +1225,7 @@ periods remaining from a 418-period bound. Only four modeled periods have
 elapsed since the reset-release store committed. The attempted enable would
 commit two cycles after E1 validation if accepted. This short wait is an
 unresolved firmware/model/catalog discrepancy, not permission to bypass timing
-or invent lock status. Connected
+or invent lock status. See HANDOFF.md for investigation priorities. Connected
 GUI exits 0/frame exists; full boot and audio remain incomplete.
 
 ### PLL enable latch and fractional oscillator time
@@ -1171,7 +1268,7 @@ lockout. Privilege checking is not modeled.
 
 ```sh
 .venv/bin/pytest -q
-cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -I emulator/qemu tests/cstub/c6747-syscfg.c emulator/qemu/cdj_c6747_syscfg.c emulator/qemu/cdj_c6747_pll.c emulator/qemu/cdj_c674x.c emulator/qemu/cdj_c674x_loop.c -o /tmp/cdj-cfgchip-san
+cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -I emulator/qemu tests/cstub/c6747-syscfg.c emulator/qemu/cdj_c6747_syscfg.c emulator/qemu/cdj_c6747_pll.c emulator/qemu/cdj_c674x.c emulator/qemu/cdj_c674x_sp.c emulator/qemu/cdj_c674x_control.c emulator/qemu/cdj_c674x_uncond.c emulator/qemu/cdj_c674x_mpy.c emulator/qemu/cdj_c674x_dotp.c emulator/qemu/cdj_c674x_packed8.c emulator/qemu/cdj_c674x_packed16.c emulator/qemu/cdj_c674x_packbits.c emulator/qemu/cdj_c674x_mpy32.c emulator/qemu/cdj_c674x_dp.c emulator/qemu/cdj_c674x_approx.c emulator/qemu/cdj_c674x_loop.c -o /tmp/cdj-cfgchip-san
 /tmp/cdj-cfgchip-san
 .venv/bin/python -m tools.cdj_dsp.replay runs/nxs-pll-enable-connected/dsp-l2.bin runs/dsp-cfgchip-1 --verify-repeat
 sh scripts/build-qemu-sh4.sh "$PWD/build/qemu"
@@ -1323,7 +1420,7 @@ Reproduce focused and complete validation:
 
 ```sh
 .venv/bin/python -m pytest -q tests/test_c674x.py tests/test_dsp_replay.py tests/test_dsp_inventory.py
-cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -I emulator/qemu tests/cstub/c674x.c emulator/qemu/cdj_c674x.c emulator/qemu/cdj_c674x_loop.c -o /tmp/cdj-fp-batch-san
+cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -I emulator/qemu tests/cstub/c674x.c emulator/qemu/cdj_c674x.c emulator/qemu/cdj_c674x_sp.c emulator/qemu/cdj_c674x_control.c emulator/qemu/cdj_c674x_uncond.c emulator/qemu/cdj_c674x_mpy.c emulator/qemu/cdj_c674x_dotp.c emulator/qemu/cdj_c674x_packed8.c emulator/qemu/cdj_c674x_packed16.c emulator/qemu/cdj_c674x_packbits.c emulator/qemu/cdj_c674x_mpy32.c emulator/qemu/cdj_c674x_dp.c emulator/qemu/cdj_c674x_approx.c emulator/qemu/cdj_c674x_loop.c -o /tmp/cdj-fp-batch-san
 /tmp/cdj-fp-batch-san
 .venv/bin/python -m pytest -q
 sh scripts/build-qemu-sh4.sh "$PWD/build/qemu"
@@ -1385,7 +1482,7 @@ Reproduce the focused and complete checks:
 
 ```sh
 cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
-  -I emulator/qemu tests/cstub/c674x.c emulator/qemu/cdj_c674x.c \
+  -I emulator/qemu tests/cstub/c674x.c emulator/qemu/cdj_c674x.c emulator/qemu/cdj_c674x_sp.c emulator/qemu/cdj_c674x_control.c emulator/qemu/cdj_c674x_uncond.c emulator/qemu/cdj_c674x_mpy.c emulator/qemu/cdj_c674x_dotp.c emulator/qemu/cdj_c674x_packed8.c emulator/qemu/cdj_c674x_packed16.c emulator/qemu/cdj_c674x_packbits.c emulator/qemu/cdj_c674x_mpy32.c emulator/qemu/cdj_c674x_dp.c emulator/qemu/cdj_c674x_approx.c \
   emulator/qemu/cdj_c674x_loop.c -o /tmp/cdj-c674x-batch-san
 /tmp/cdj-c674x-batch-san
 cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
@@ -1467,7 +1564,7 @@ Reproduce focused, complete and sanitizer validation:
   tests/test_dsp_inventory.py tests/test_dsp_coverage.py tests/test_dsp_replay.py
 .venv/bin/python -m pytest -q
 cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
-  -I emulator/qemu tests/cstub/c674x.c emulator/qemu/cdj_c674x.c \
+  -I emulator/qemu tests/cstub/c674x.c emulator/qemu/cdj_c674x.c emulator/qemu/cdj_c674x_sp.c emulator/qemu/cdj_c674x_control.c emulator/qemu/cdj_c674x_uncond.c emulator/qemu/cdj_c674x_mpy.c emulator/qemu/cdj_c674x_dotp.c emulator/qemu/cdj_c674x_packed8.c emulator/qemu/cdj_c674x_packed16.c emulator/qemu/cdj_c674x_packbits.c emulator/qemu/cdj_c674x_mpy32.c emulator/qemu/cdj_c674x_dp.c emulator/qemu/cdj_c674x_approx.c \
   emulator/qemu/cdj_c674x_loop.c -o /tmp/cdj-c674x-coverage-san
 /tmp/cdj-c674x-coverage-san
 cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
@@ -1478,7 +1575,7 @@ cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
   -o /tmp/cdj-checkpoint-coverage-san
 /tmp/cdj-checkpoint-coverage-san /tmp/cdj-checkpoint-coverage-san.cdjdsp
 cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
-  -I emulator/qemu tools/cdj_dsp/replay.c emulator/qemu/cdj_c674x.c \
+  -I emulator/qemu tools/cdj_dsp/replay.c emulator/qemu/cdj_c674x.c emulator/qemu/cdj_c674x_sp.c emulator/qemu/cdj_c674x_control.c emulator/qemu/cdj_c674x_uncond.c emulator/qemu/cdj_c674x_mpy.c emulator/qemu/cdj_c674x_dotp.c emulator/qemu/cdj_c674x_packed8.c emulator/qemu/cdj_c674x_packed16.c emulator/qemu/cdj_c674x_packbits.c emulator/qemu/cdj_c674x_mpy32.c emulator/qemu/cdj_c674x_dp.c emulator/qemu/cdj_c674x_approx.c \
   emulator/qemu/cdj_c674x_loop.c emulator/qemu/cdj_c6747_syscfg.c \
   emulator/qemu/cdj_c6747_psc.c emulator/qemu/cdj_c6747_mcasp.c \
   emulator/qemu/cdj_c6747_gpio.c emulator/qemu/cdj_c6747_i2c.c \
@@ -1536,7 +1633,8 @@ Reproduce the focused tests and sanitizer harnesses:
   tests/test_dsp_checkpoint_replay.py
 cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
   -I emulator/qemu tests/cstub/c6747-intc.c \
-  emulator/qemu/cdj_c6747_intc.c -o /tmp/cdj-c6747-intc-san
+  emulator/qemu/cdj_c6747_intc.c emulator/qemu/cdj_c6747_timer.c emulator/qemu/cdj_c674x.c emulator/qemu/cdj_c674x_sp.c emulator/qemu/cdj_c674x_control.c emulator/qemu/cdj_c674x_uncond.c emulator/qemu/cdj_c674x_mpy.c emulator/qemu/cdj_c674x_dotp.c emulator/qemu/cdj_c674x_packed8.c emulator/qemu/cdj_c674x_packed16.c emulator/qemu/cdj_c674x_packbits.c emulator/qemu/cdj_c674x_mpy32.c emulator/qemu/cdj_c674x_dp.c emulator/qemu/cdj_c674x_approx.c emulator/qemu/cdj_c674x_loop.c \
+  -o /tmp/cdj-c6747-intc-san
 /tmp/cdj-c6747-intc-san
 cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
   -I emulator/qemu tests/cstub/dsp-checkpoint.c \
@@ -1743,7 +1841,7 @@ cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
   emulator/qemu/cdj_c6747_cache.c -o /tmp/cdj-c6747-cache-san
 /tmp/cdj-c6747-cache-san
 cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
-  -I emulator/qemu tests/cstub/c674x.c emulator/qemu/cdj_c674x.c \
+  -I emulator/qemu tests/cstub/c674x.c emulator/qemu/cdj_c674x.c emulator/qemu/cdj_c674x_sp.c emulator/qemu/cdj_c674x_control.c emulator/qemu/cdj_c674x_uncond.c emulator/qemu/cdj_c674x_mpy.c emulator/qemu/cdj_c674x_dotp.c emulator/qemu/cdj_c674x_packed8.c emulator/qemu/cdj_c674x_packed16.c emulator/qemu/cdj_c674x_packbits.c emulator/qemu/cdj_c674x_mpy32.c emulator/qemu/cdj_c674x_dp.c emulator/qemu/cdj_c674x_approx.c \
   emulator/qemu/cdj_c674x_loop.c -o /tmp/cdj-c674x-mpy-san
 /tmp/cdj-c674x-mpy-san
 cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
@@ -2010,7 +2108,7 @@ sh scripts/build-qemu-sh4.sh build/qemu
 cc -std=c11 -Wall -Wextra -Werror \
   -fsanitize=address,undefined -fno-omit-frame-pointer \
   -Iemulator/qemu tests/cstub/c674x.c \
-  emulator/qemu/cdj_c674x.c emulator/qemu/cdj_c674x_loop.c \
+  emulator/qemu/cdj_c674x.c emulator/qemu/cdj_c674x_sp.c emulator/qemu/cdj_c674x_control.c emulator/qemu/cdj_c674x_uncond.c emulator/qemu/cdj_c674x_mpy.c emulator/qemu/cdj_c674x_dotp.c emulator/qemu/cdj_c674x_packed8.c emulator/qemu/cdj_c674x_packed16.c emulator/qemu/cdj_c674x_packbits.c emulator/qemu/cdj_c674x_mpy32.c emulator/qemu/cdj_c674x_dp.c emulator/qemu/cdj_c674x_approx.c emulator/qemu/cdj_c674x_loop.c \
   -o /tmp/cdj-c674x-san
 /tmp/cdj-c674x-san
 .venv/bin/python -m pytest -q
@@ -2075,3 +2173,65 @@ the 59,988-record transmit SHA-256 is
 `f84639275492f868d73c8bff2009bcbaaaa7a76b911ff133dd36b230489a17b4`.
 All captured serializer words remain zero.  These are functional breadth and
 reproducibility results, not cycle accuracy, full boot, or working audio.
+
+### Blackfin guest regression tools
+
+The tests use `bfin-elf-as`/`bfin-elf-ld` from `PATH` when present, then
+`python3 -m pytest -q tests/test_blackfin_parallel.py` needs nothing else.
+Without them, run `DEVELOPER_DIR=/Library/Developer/CommandLineTools sh scripts/build-bfin-tools.sh`
+on macOS (omit DEVELOPER_DIR elsewhere) first.
+The helper downloads checksum-pinned GNU binutils 2.44 and builds a local
+`bfin-elf` assembler/linker under `build/bfin-binutils`; no system installation
+is needed. An existing archive can be supplied as the script's first argument.
+Tests also accept `BFIN_AS` and `BFIN_LD` overrides.
+
+### Blackfin wake-timing regression harness
+
+Run the prepared-source scheduler checks and firmware-free PLL/IDLE guest probes:
+
+```sh
+DEVELOPER_DIR=/Library/Developer/CommandLineTools .venv/bin/python -m pytest -q -rxX \
+  tests/test_bfin_wake_timing.py tests/test_bfin_wake_guest.py
+```
+
+The deterministic harness exercises code extracted from the local patched GNU
+simulator source, with controlled host clocks and event/link inputs. It is a
+regression gate for that implementation, not physical BF531 timing validation.
+Prepare current sources with the normal Blackfin build script before testing a
+changed patch. The assembled probes additionally exercise `bin/cdj-run`; set
+`BFIN_WAKE_SIM=/absolute/path/to/candidate` to check another simulator binary.
+They discover the existing local Blackfin assembler/linker automatically.
+
+The lock-during-IDLE guest probe records a known strict expected failure:
+wall-clock execution can resume the next guest instruction before delivering
+the pending PLL lock event. Only the specific PLL status assertion is marked;
+assembly/link errors, timeouts and unrelated emulator failures still fail.
+A future fix produces a strict XPASS until the expected-failure annotation is
+removed. The pending-before-IDLE control must pass with maskable interrupts
+disabled. Runtime scheduling is unchanged by these tests.
+
+The deterministic POSIX suite has nine scenarios and six targeted negative
+controls. The combined Blackfin suite reports 37 passed and one expected
+failure locally; the Windows waiter and full SIC/CEC/SPORT integration remain
+outside this harness. Run the broader gate with
+`.venv/bin/python -m pytest -q -rxX tests/test_bfin_*.py tests/test_blackfin_parallel.py`.
+
+### DSP packet transaction regression
+
+Run the byte-exact transaction gate without proprietary firmware:
+
+```sh
+DEVELOPER_DIR=/Library/Developer/CommandLineTools .venv/bin/python -m pytest -q \
+  tests/test_c674x_transaction.py
+```
+
+It compares CPU bytes, failure results and callback observations against a
+full-prefix transaction across poisoned queue/tail states, queue insertion and
+retirement, multicycle packets, IDLE/branch flags and rollback. The sanitizer
+parameter skips when the compiler/runtime lacks ASan/UBSan support. Compiler
+automatic initialization is enabled when supported. Both parameters pass on
+macOS. Run `tests/test_c674x.py`, `tests/test_c674x_spkernel_fields.py` and
+`tests/test_dsp_checkpoint_replay.py` alongside it for the focused architecture
+and replay gate; set `C6X_TI_BIN` as above to include the independent TI oracle.
+Connected throughput and panel measurements are in iteration 14 of
+`ITERATION_ANALYSIS.md`; fixed-work synthetic gains are reported separately.

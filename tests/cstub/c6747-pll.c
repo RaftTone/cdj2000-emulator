@@ -135,5 +135,30 @@ int main(void)
             assert(!s.lock_wait_remaining && !s.reset_age);
         }
     }
+    /* cdj_c6747_pll_ticks(n) is exactly n single ticks: PLL and bypass mode,
+     * every multiplier and divider, and with GO, lock-wait and reset-age
+     * countdowns still running when it starts. */
+    uint32_t seed = 12345;
+    for (unsigned trial = 0; trial < 4000; ++trial) {
+        CdjC6747Pll a;
+        cdj_c6747_pll_reset(&a);
+        seed = seed * 1103515245u + 12345u;
+        a.config[0] = (seed >> 8) & 0x1ff;
+        a.config[2] = (seed >> 3) % 32;
+        a.config[3] = ((seed >> 12) & 1 ? 0x8000u : 0) | ((seed >> 13) & 31);
+        a.config[8] = ((seed >> 18) & 1 ? 0x8000u : 0) | ((seed >> 19) & 31);
+        a.active_dividers[0] = ((seed >> 24) & 1 ? 0x8000u : 0) | ((seed >> 25) & 31);
+        a.target_dividers[0] = ((seed >> 7) & 1 ? 0x8000u : 0) | ((seed >> 2) & 31);
+        a.oscin_phase = (seed >> 5) % (a.config[2] + 1);
+        a.oscin_cycles = seed;
+        a.go_remaining = trial % 3 ? 0 : (seed >> 9) % 10;
+        a.lock_wait_remaining = trial % 5 ? 0 : (seed >> 11) % 40;
+        a.reset_age = trial % 7 ? 17 : (seed >> 14) % 17;
+        CdjC6747Pll b = a;
+        uint64_t n = trial < 100 ? trial : (seed >> 4) % 100000;
+        for (uint64_t i = 0; i < n; ++i) cdj_c6747_pll_tick(&a);
+        cdj_c6747_pll_ticks(&b, n);
+        assert(!memcmp(&a, &b, sizeof(a)));
+    }
     return 0;
 }

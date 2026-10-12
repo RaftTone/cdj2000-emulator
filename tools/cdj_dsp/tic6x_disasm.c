@@ -12,10 +12,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "config.h"
+#define PACKAGE "cdj-tic6x-disasm"
 #include "bfd.h"
 #include "dis-asm.h"
-#include "opcode/tic6x.h"
 
 extern int print_insn_tic6x(bfd_vma, disassemble_info *);
 

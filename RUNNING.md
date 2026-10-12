@@ -6,18 +6,6 @@ repository root.
 
 ## The whole player, in a window
 
-Use the unified profile selector when you do not want to remember the two
-launcher module names:
-
-```sh
-python -m tools.cdj_main.launch 2000
-python -m tools.cdj_main.launch nxs runs/nxs-deck --ui --seconds 3600
-```
-
-`2000` dispatches to the original CDJ-2000 `view_vm` launcher; `nxs` dispatches
-to the NXS `nxs_vm` launcher. Arguments after the model are passed through.
-The direct commands below remain useful when you want profile-specific help.
-
 ```sh
 python -m tools.cdj_main.view_vm
 ```
@@ -54,7 +42,7 @@ python -m tools.cdj_main.nxs_vm runs/nxs-deck --ui --seconds 3600
 The launcher owns both emulators; the deck attaches to their framebuffer and
 input port. Closing the deck stops that run. This does not remove the NXS
 profile's remaining DSP limitations or add jog rotation/audio.
-To view an existing NXS run without starting or stopping its emulators:
+To view an existing run without starting or stopping its emulators:
 
 ```sh
 python -m tools.cdj_gui.view_ui --attach --device-name CDJ-2000NXS \
@@ -331,7 +319,7 @@ The fix prevents a duplicate interrupt from cancelling a newly armed payload
 receive. A normal cached-transport boot with detailed tracing disabled now
 passes a native Tk MENU hold/outside release, opens UTILITY, and retains free
 MAIN message pools after 80 seconds. The focused native/input/transport suite
-passes 128 tests.
+passes 128 tests. See `NXS_GUI_STALL.md` for the before/after trace and controls.
 Do not enable fresh-only delivery as a workaround: it remains diagnostic-only.
 E-7206 auth-chip emulation is still unresolved; USB/SD loading and audio playback
 are not yet validated.
@@ -444,6 +432,13 @@ inside the first second of a boot, and the guest's own byte loop never
 runs. The last per-instruction cost the profiler found was the
 instruction text itself: every decoder formatted its immediate operands
 with `sprintf` for a trace line nothing printed; that is gated now.
+
+**NXS scope correction:** The media-state addresses and GUI routing functions
+in the following historical section describe CDJ-2000. They are not verified
+NXS addresses. NXS successfully lists TESTTONE.WAV with status halfword 26
+still at `0x1000`; that value does not establish a mount or browse blocker.
+Native NXS panel ENTER and LOAD are verified; see
+[NXS_LINK_LOADING.md](NXS_LINK_LOADING.md) for the actual captures and timing.
 
 **Switching to a medium.** With a card image (`--sd card.img`, a rekordbox
 export on it) the launchers put the card in at 10 s and press its key at

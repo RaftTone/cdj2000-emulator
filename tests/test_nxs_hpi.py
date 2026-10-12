@@ -26,10 +26,14 @@ def test_host_addressing_and_fixed_port_dma():
                                     0x04000000, 0x40000000))
         endpoint = root / 'qtest.sock'
         qmp_endpoint = root / 'qmp.sock'
+        history = root / 'dsp-fault-history.jsonl'
+        environment = os.environ.copy()
+        environment['CDJ_NXS_DSP_FAULT_HISTORY'] = str(history)
         process = subprocess.Popen([str(qemu), '-M', 'cdj2000nxs-main', '-S', '-display', 'none',
             '-nodefaults', '-bios', str(rom), '-qtest', f'unix:{endpoint},server=on,wait=off',
             '-qmp', f'unix:{qmp_endpoint},server=on,wait=off'],
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            env=environment)
         try:
             deadline = time.monotonic() + 10
             while not endpoint.exists():
@@ -147,6 +151,30 @@ def test_host_addressing_and_fixed_port_dma():
             assert read(0x04002000) == 0x6a0
             assert not (read(pcm + 12) & 4)
             assert not (read(status) & 8)
+            # Run enough NOP packets to wrap the fault-history ring, then
+            # fault. Verify the actual recorder keeps the newest 4096 phases
+            # and emits both interrupt task-state registers.
+            write(address, 0x11800000)
+            write(fixed, 0x11802000)
+            image = bytes(2100 * 4) + struct.pack('<I', 0xffffffff)
+            # Keep each qtest line short; a single 8 KiB write timed out on
+            # this QEMU build.
+            for offset in range(0, len(image), 256):
+                chunk = image[offset:offset + 256]
+                command(f'write {0x04003000 + offset:#x} {len(chunk)} 0x{chunk.hex()}')
+            write(address, 0x11802000)
+            write(0x1f608080, 0x04003000)
+            write(0x1f608084, auto)
+            write(0x1f608088, 2101)
+            write(0x1f60808c, 0x1431)
+            assert read(0x1f608088) == 0
+            write(control, 0x01030103)
+            rows = [json.loads(line) for line in history.read_text().splitlines()]
+            assert len(rows) == 4096
+            assert {row['phase'] for row in rows} == {0, 1}
+            assert all('tsr' in row and 'itsr' in row for row in rows)
+            assert rows[0]['pc'] > 0x11802000
+            assert rows[-1]['pc'] == 0x11802000 + 2100 * 4
             stream.close(); sock.close()
         finally:
             process.terminate()

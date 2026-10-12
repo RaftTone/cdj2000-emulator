@@ -40,6 +40,9 @@ bool cdj_c6747_pll_sysclk_hz(const CdjC6747Pll *s, unsigned n,
 /* One DSP-cycle edge before bus commits. GO lasts eight subsequent cycles;
  * still synthetic latency, not physical OSCIN/PLL alignment timing. */
 void cdj_c6747_pll_tick(CdjC6747Pll *s);
+/* Exactly `count` consecutive cdj_c6747_pll_tick calls, in closed form once
+ * no GO, lock-wait or reset-age countdown is running. */
+void cdj_c6747_pll_ticks(CdjC6747Pll *s, uint64_t count);
 void cdj_c6747_pll_reset(CdjC6747Pll *s);
 bool cdj_c6747_pll_read(const CdjC6747Pll *s, uint32_t address, uint32_t *value);
 bool cdj_c6747_pll_write(CdjC6747Pll *s, uint32_t address,

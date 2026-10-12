@@ -12,6 +12,7 @@ import math
 import os
 import shlex
 import socket
+import threading
 from pathlib import Path
 import struct
 import subprocess
@@ -21,11 +22,12 @@ import time
 from tools.cdj_dsp.tx_capture import tx_capture_metadata
 from tools.cdj_main.run_state import write_json
 from tools.cdj_main.nxs_panel import neutral_frame
+from tools.cdj_main import media_readiness, panel_control
 from tools.cdj_main.qmp import connect_chardev
 from tools.paths import BFIN_SIM, QEMU, qemu_environment
 
 ROOT = Path(__file__).resolve().parents[2]
-# MinGW QEMU has no unix chardev; POSIX keeps the PR's AF_UNIX sockets.
+# MinGW QEMU has no Unix chardev; POSIX keeps the existing local sockets.
 UNIX_CONTROL = os.name != 'nt'
 
 CHECKPOINT_HEADER = struct.Struct('<8sIIII9I5IQQ')
@@ -203,6 +205,76 @@ def source_schedule(at: float, contact: tuple[int, int], retries: int = 0,
     byte, mask = contact
     return ';'.join('%g:%d:%02x' % (at + index * interval, byte, mask)
                     for index in range(retries + 1))
+
+
+def legacy_dsp_budget(fast: bool, requested: int | None) -> int:
+    """Resolve the explicit host-fairness policy; it is not DSP timing."""
+    value = 65536 if fast else (requested if requested is not None else 1000000)
+    if not 4096 <= value <= 1000000:
+        raise ValueError('legacy DSP budget must be 4096..1000000')
+    return value
+
+
+def send_source_key_when_ready(run: Path, source: str, contact: tuple[int, int],
+                               hold_ms: int, settle_seconds: float,
+                               stop: threading.Event,
+                               result_path: Path) -> None:
+    """Press a media source after its QMP readiness predicate becomes true.
+
+    The old ``CDJ_PANEL_KEYS`` schedule is tied to virtual seconds.  On a
+    slow host that can fire before MAIN's media manager has created the source
+    table, and retries then cost several minutes of wall time.  This worker
+    waits on the same read-only predicate exposed by ``dev wait-media`` and
+    sends one real panel pulse as soon as the source is usable.
+    """
+    result = {'source': source, 'strategy': 'qmp-readiness'}
+    try:
+        observed = None
+        last_error = None
+        while not stop.is_set():
+            try:
+                observed = media_readiness.observe_run(
+                    run, timeout=1, poll=0.25, source=source,
+                    for_source_key=True)
+                result['readiness'] = observed
+                if media_readiness.source_key_ready(observed):
+                    break
+            except Exception as error:
+                # QMP can take a moment to publish its socket after MAIN
+                # starts. Retry transient endpoint errors without delaying
+                # the launcher teardown or hiding the final diagnostic.
+                last_error = str(error)
+            stop.wait(0.25)
+        if stop.is_set():
+            result.update(outcome='cancelled')
+        elif observed is None or not media_readiness.source_key_ready(observed):
+            result.update(outcome='error', error=last_error or
+                          'source table did not become browser-ready')
+        else:
+            result['settle_seconds'] = settle_seconds
+            if stop.wait(settle_seconds):
+                result.update(outcome='cancelled')
+                result_path.write_text(json.dumps(result, indent=2,
+                                                  sort_keys=True) + '\n')
+                return
+            endpoint = json.loads((run / 'run.json').read_text())['endpoints']
+            host = endpoint.get('panel_host', '127.0.0.1')
+            port = endpoint['panel_port']
+            wire = panel_control.encode_press(contact[0], contact[1], hold_ms)
+            connection = panel_control.PanelControl(host, port, timeout=2.0)
+            try:
+                connection.open()
+                reply = connection.send(wire)
+            finally:
+                connection.close()
+            result.update(outcome='pressed', reply=reply,
+                          ok=reply.strip().lower().startswith('ok'))
+    except Exception as error:  # keep a diagnostic worker from killing MAIN
+        result.update(outcome='error', error=str(error))
+    try:
+        result_path.write_text(json.dumps(result, indent=2, sort_keys=True) + '\n')
+    except OSError:
+        pass
 
 
 def launch_ports(base: int, debug: bool) -> tuple[int, ...]:
@@ -447,7 +519,11 @@ def finalize_dsp_artifacts(run: Path, firmware: Path, functional_dsp_timing: boo
                            dsp_scheduler_mode: str,
                            main_firmware: Path | None = None,
                            *, dsp_checkpoint_policy: str = 'all',
-                           source_sha256_at_launch: dict[str, str] | None = None) -> None:
+                           source_sha256_at_launch: dict[str, str] | None = None,
+                           virtual_mcasp_clock: bool = False,
+                           cycle_mcasp_clock: bool = False,
+                           host_dsp_audio_wav: bool = False,
+                           render_dsp_audio_wav: bool = False) -> None:
     if dsp_checkpoint_policy not in {'all', 'fault'}:
         raise ValueError('DSP checkpoint policy must be all or fault')
     checkpoint_dir = run / 'dsp-checkpoints'
@@ -486,7 +562,11 @@ def finalize_dsp_artifacts(run: Path, firmware: Path, functional_dsp_timing: boo
     manifest = dict(schema=11, format=('ABI-bound native state including C6747 INTC/Timer64P/SPI/cache/McASP TX, EDMA, SYSCFG priority, WM8740 control, timed SPI1 transfer and declared DSP activation-scheduler state, '
                                      'L2 and shared RAM plus sparse zero-default SDRAM pages'),
         dsp_timing_mode=('functional-runahead' if functional_dsp_timing else 'strict'),
-        dsp_audio_mode=('coarse-packet-slots' if functional_dsp_audio else 'stopped-clock'),
+        dsp_audio_mode=('virtual-clock-batch' if virtual_mcasp_clock else
+                        'dsp-sysclk1-cycle' if cycle_mcasp_clock else
+                        'coarse-packet-slots' if functional_dsp_audio else 'stopped-clock'),
+        dsp_host_audio=('dsp-audio.wav' if host_dsp_audio_wav else None),
+        dsp_pcm_render=('dsp-render.wav' if render_dsp_audio_wav else None),
         dsp_scheduler_mode=dsp_scheduler_mode,
         dsp_checkpoint_policy=dsp_checkpoint_policy,
         checkpoint_capture_complete=checkpoint_capture_complete,
@@ -542,9 +622,24 @@ def finalize_dsp_artifacts(run: Path, firmware: Path, functional_dsp_timing: boo
             'an interrupted SPLOOP resumes by rebuilding the loop buffer from program memory (SPRUFE8B 7.7.3.1); a loop body changed between the interrupt and the return is undetected once an ISR software loop has replaced the retained cross-check',
             *(['interrupt entry retires already-issued results with minimum empty cycles; exact interrupt pipeline latency is not modeled']
               if functional_dsp_timing else []),
-            *(['functional McASP scheduling advances one slot every 1024 executed DSP packets; '
+            *(['experimental virtual-time McASP batches use the configured McASP1 slot rate '
+               'with 4096-packet DSP interpreter slices; McASP2 DIT is coupled, '
+               'and no independent DSP instruction clock is modeled']
+              if virtual_mcasp_clock else
+              ['experimental DSP-cycle McASP slots use SYSCLK1 and the configured '
+               'McASP1 rate, requiring an integral cycles-per-slot ratio; McASP2 DIT '
+               'is coupled and QEMU host time is independent']
+              if cycle_mcasp_clock else
+              ['functional McASP scheduling advances one slot every 1024 executed DSP packets; '
                'not serializer-clock, sample-rate, or audio-output evidence']
               if functional_dsp_audio else []),
+            *(['host WAV sink uses a bounded stereo ring and 50 ms prefill; '
+               'its output is not proof of connected PLAY, audible device output, '
+               'or sample-exact host timing'] if host_dsp_audio_wav else []),
+            *(['DSP-paced WAV records every McASP1 stereo slot pair at the firmware '
+               'configuration\'s nominal 44.1 kHz rate; the coarse packet scheduler '
+               'does not establish elapsed audio time or live speaker output']
+              if render_dsp_audio_wav else []),
             *(['deferred-v1 divides each bounded DSP activation into 4096-step QEMU timer slices; '
                'this host scheduling approximation is not a DSP timing fix, frequency model, or hardware proof']
               if dsp_scheduler_mode == 'deferred-v1' else [])])
@@ -591,6 +686,16 @@ def main():
     parser.add_argument('--panel-rev2', action='store_true',
                         help='the GUI board reads PF3 = 1, the late "/2" panel revision '
                              '(BFIN_GPIO_STRAP=0x8:0x8)')
+    parser.add_argument('--dsp-model', action='store_true',
+                        help='behavioural DSP: answer MAIN without executing the C674x '
+                             '(fast; no audio or playback position, so not playback evidence)')
+    parser.add_argument('--dsp-thread', action='store_true',
+                        help='run the real C674x on its own host thread, paced to at most one '
+                             'quantum ahead of QEMU virtual time, instead of inside MAIN\'s HPI '
+                             'write (no checkpoints; the event transcript is diagnostic, not replay evidence)')
+    parser.add_argument('--dsp-thread-access-packets', type=int, default=256,
+                        help='--dsp-thread: DSP packets MAIN waits for per HPI access '
+                             '(0..1000000, default 256)')
     parser.add_argument('--lightweight', action='store_true',
                         help='capture DSP checkpoints only on faults; omit the event transcript')
     parser.add_argument('--sd', type=Path,
@@ -599,12 +704,18 @@ def main():
                         help='create a disposable FAT32 TESTTONE.WAV fixture inside the run and attach it as SD')
     parser.add_argument('--usb', type=Path,
                         help='raw FAT32 USB image; writes go to a temporary overlay')
+    parser.add_argument('--disc', type=Path,
+                        help='raw ISO disc image; attached read-only to the modeled IDE CD drive')
     parser.add_argument('--gui-firmware', type=Path,
                         help='directory containing development gui-boot-memory.elf and gui-flash-image.bin')
     parser.add_argument('--trace-media', action='store_true',
                         help='log SD/USB host activity for media diagnosis (changes host timing)')
-    parser.add_argument('--fresh-link', action='store_true',
-                        help='diagnostic: deliver each real MAIN frame once, without cached repeats')
+    link_mode = parser.add_mutually_exclusive_group()
+    link_mode.add_argument('--fresh-link', dest='fresh_link', action='store_true',
+                           default=True,
+                           help='deliver each real MAIN frame once (NXS default)')
+    link_mode.add_argument('--cached-link', dest='fresh_link', action='store_false',
+                           help='diagnostic: restore legacy cached frame repeats')
     parser.add_argument('--trace-link-tx', action='store_true',
                         help='record actual GUI SPORT transmit frames for loss/queue diagnosis')
     parser.add_argument('--sd-insert-seconds', type=int,
@@ -616,8 +727,14 @@ def main():
                              "Defaults to 'sd' when --sd or --test-track is given")
     parser.add_argument('--source-key-at', type=float,
                         help='virtual seconds at which to press it; defaults to '
-                             'two seconds after insertion. This schedule does '
-                             'not wait for NXS media-manager readiness')
+                        'two seconds after insertion. This schedule does '
+                        'not wait for NXS media-manager readiness')
+    parser.add_argument('--source-key-when-ready', action='store_true',
+                        help='with --debug, wait for SD mode 3/table 2 or USB '
+                             'table 2 over QMP, then send one panel press')
+    parser.add_argument('--source-key-ready-delay', type=float, default=0,
+                        help='host seconds to settle after readiness before the '
+                             'source press (0..30; default: 0)')
     parser.add_argument('--source-key-retries', type=int, default=0,
                         help='repeat the source press this many times while '
                              'media manager settles (0 keeps one press)')
@@ -653,11 +770,42 @@ def main():
     parser.add_argument('--functional-dsp-timing', action='store_true',
                         help='run past the unresolved SPLOOPD epilog with a labeled two-cycle approximation')
     parser.add_argument('--functional-dsp-audio', action='store_true',
-                        help='schedule coarse McASP TX slots to exercise genuine firmware DMA/ISR flow')
+                        help='enable McASP TX slots to exercise genuine firmware DMA/ISR flow')
+    audio_clock = parser.add_mutually_exclusive_group()
+    audio_clock.add_argument('--virtual-mcasp-clock', action='store_true',
+                             help='experimental: batch McASP TX slots from QEMU virtual time at the configured McASP1 rate')
+    audio_clock.add_argument('--dsp-cycle-mcasp-clock', action='store_true',
+                             help='experimental: advance McASP TX slots from modeled DSP SYSCLK1 cycles')
+    parser.add_argument('--host-dsp-audio-wav', action='store_true',
+                        help='experimental: write McASP1 stereo through the QEMU WAV audio backend')
+    parser.add_argument('--render-dsp-audio-wav', action='store_true',
+                        help='record McASP1 stereo slot pairs to a DSP-paced WAV at the configured nominal rate')
     parser.add_argument('--capture-dsp-tx', action='store_true',
-                        help='capture genuine XBUF words consumed by coarse McASP slot progression')
+                        help='capture genuine XBUF words consumed by McASP slot progression')
+    parser.add_argument('--capture-dsp-tx-nonzero-only', action='store_true',
+                        help='diagnostic: retain only nonzero genuine XBUF words, so the capture limit survives silent boot')
+    parser.add_argument('--capture-dsp-tx-records', type=int, default=65536,
+                        help='maximum DSP XBUF JSON records to retain (default: 65536)')
+    parser.add_argument('--capture-dsp-fault-history', action='store_true',
+                        help='on a DSP fault, save the final 4096 pre-step CPU states')
     parser.add_argument('--deferred-dsp-scheduling', action='store_true',
                         help='opt into diagnostic 4096-step deferred DSP scheduling (not timing evidence)')
+    budget = parser.add_mutually_exclusive_group()
+    parser.add_argument('--gui-head-start', type=float, metavar='SECONDS',
+                        help='start the GUI simulator this many seconds before MAIN '
+                             '(default 2.0 with the idle skip, else 0: MAIN first, as '
+                             'before). A fast '
+                             'MAIN otherwise reaches the GUI link before the slower simulated '
+                             'GUI is ready and waits for a retry (0.5 s measured too short)')
+    parser.add_argument('--dsp-idle-skip', action=argparse.BooleanOptionalAction, default=True,
+                        help='advance a DSP that provably spins in an idle loop (repeated '
+                             'registers and memory, no device access, quiescent peripherals) '
+                             'by whole loop periods without executing them; events and '
+                             'checkpoints are those of full execution (default: on)')
+    budget.add_argument('--fast-dsp', action='store_true',
+                        help='exploratory legacy scheduling with 65536 packets per HPI wake')
+    budget.add_argument('--dsp-legacy-budget', type=int,
+                        help='legacy packets per HPI wake (4096..1000000; default: 1000000)')
     args = parser.parse_args()
     if args.sd_insert_seconds is not None and (not (args.sd or args.test_track) or
                                              not 0 <= args.sd_insert_seconds <= 86400):
@@ -666,8 +814,34 @@ def main():
         parser.error('--test-track cannot be combined with --sd')
     if args.timestamp_run and args.run is not None:
         parser.error('--timestamp-run cannot be combined with a positional run directory')
+    if args.dsp_model and (args.functional_dsp_audio or args.functional_dsp_timing or
+                           args.deferred_dsp_scheduling):
+        parser.error('--dsp-model executes no DSP code; drop the functional/deferred DSP options')
+    if not 0 <= args.dsp_thread_access_packets <= 1000000:
+        parser.error('--dsp-thread-access-packets must be 0..1000000')
+    if args.dsp_thread and (args.dsp_model or args.deferred_dsp_scheduling or
+                            args.virtual_mcasp_clock):
+        parser.error('--dsp-thread runs the real DSP with the legacy scheduler; '
+                     'drop --dsp-model/--deferred-dsp-scheduling/--virtual-mcasp-clock')
     if args.capture_dsp_tx and not args.functional_dsp_audio:
         parser.error('--capture-dsp-tx requires --functional-dsp-audio')
+    if args.virtual_mcasp_clock and not args.functional_dsp_audio:
+        parser.error('--virtual-mcasp-clock requires --functional-dsp-audio')
+    if args.dsp_cycle_mcasp_clock and not args.functional_dsp_audio:
+        parser.error('--dsp-cycle-mcasp-clock requires --functional-dsp-audio')
+    if args.host_dsp_audio_wav and not args.virtual_mcasp_clock:
+        parser.error('--host-dsp-audio-wav requires --virtual-mcasp-clock')
+    if args.render_dsp_audio_wav and not args.functional_dsp_audio:
+        parser.error('--render-dsp-audio-wav requires --functional-dsp-audio')
+    if args.capture_dsp_tx_nonzero_only and not args.capture_dsp_tx:
+        parser.error('--capture-dsp-tx-nonzero-only requires --capture-dsp-tx')
+    try:
+        dsp_legacy_budget = legacy_dsp_budget(args.fast_dsp,
+                                              args.dsp_legacy_budget)
+    except ValueError:
+        parser.error('--dsp-legacy-budget must be 4096..1000000')
+    if not 1 <= args.capture_dsp_tx_records <= 10000000:
+        parser.error('--capture-dsp-tx-records must be 1..10000000')
     if args.gui_link is not None:
         host, _, port = args.gui_link.partition(':')
         if not host or not port.isdigit() or not 1024 <= int(port) <= 65535:
@@ -689,6 +863,23 @@ def main():
         parser.error('positive duration and port 1024..65531 required')
     if args.debug_paused and not args.debug:
         parser.error('--debug-paused requires --debug')
+    if args.gui_head_start is None:
+        args.gui_head_start = 2.0 if args.dsp_idle_skip and not (args.cosim or args.debug_paused) else 0
+    if not math.isfinite(args.gui_head_start) or not 0 <= args.gui_head_start <= 60:
+        parser.error('--gui-head-start must be 0..60 seconds')
+    if args.gui_head_start and (args.cosim or args.debug_paused):
+        parser.error('--gui-head-start cannot be combined with --cosim or --debug-paused')
+    if args.source_key_when_ready and not args.debug:
+        parser.error('--source-key-when-ready requires --debug')
+    if args.source_key_when_ready and args.source_key_at is not None:
+        parser.error('--source-key-when-ready cannot be combined with --source-key-at')
+    if args.source_key_when_ready and args.source_key_retries:
+        parser.error('--source-key-when-ready cannot be combined with --source-key-retries')
+    if (not math.isfinite(args.source_key_ready_delay) or
+            not 0 <= args.source_key_ready_delay <= 30):
+        parser.error('--source-key-ready-delay must be finite and within 0..30 seconds')
+    if args.source_key_ready_delay and not args.source_key_when_ready:
+        parser.error('--source-key-ready-delay requires --source-key-when-ready')
     if not math.isfinite(args.frame_interval) or args.frame_interval < 0:
         parser.error('--frame-interval must be finite and nonnegative')
     source_key = args.source_key or ('sd' if (args.sd or args.test_track) else 'none')
@@ -704,7 +895,13 @@ def main():
             if contact is None or not (0 <= contact[0] <= 21) or not (1 <= contact[1] <= 255):
                 parser.error('--source-key must be sd, usb, link, disc, '
                              'rekordbox, none or BYTE:MASK')
+    if args.source_key_when_ready and source_key == 'none':
+        parser.error('--source-key-when-ready requires --source-key sd or usb (or attached media default)')
+    if args.source_key_when_ready and source_key not in ('sd', 'usb'):
+        parser.error('--source-key-when-ready supports only sd or usb')
     run = automatic_run_path() if args.timestamp_run or args.run is None else (ROOT / args.run).resolve()
+    if args.host_dsp_audio_wav and ',' in str(run):
+        parser.error('host audio WAV run path cannot contain a comma')
     if run.exists():
         parser.error(f'run directory already exists: {run}')
     if args.cosim and args.qemu_sync_profile and not UNIX_CONTROL:
@@ -754,14 +951,14 @@ def main():
         # Validate an explicitly supplied USB before creating the run.  The
         # generated fixture is created below, inside the new run directory.
         if args.test_track:
-            media_drives(None, args.usb)
+            media_drives(None, args.usb, args.disc)
             run.mkdir(parents=True, exist_ok=False)
             test_track_directory = run / 'test-media'
             test_track_manifest = create_test_media(test_track_directory)
             sd_image = test_track_directory / test_track_manifest['image']
         else:
             sd_image = args.sd
-        media_command, media_inputs = media_drives(sd_image, args.usb)
+        media_command, media_inputs = media_drives(sd_image, args.usb, args.disc)
     except (OSError, ValueError) as error:
         parser.error(str(error))
     if not run.exists():
@@ -790,6 +987,13 @@ def main():
         '-serial', f'tcp:127.0.0.1:{args.port},server,nowait',
         '-serial', f'tcp:127.0.0.1:{args.port + 2},server,nowait', '-serial', 'null']
     main_command += media_command
+    if args.host_dsp_audio_wav:
+        main_command += ['-audiodev', f'wav,id=cdj-dsp,path={run / "dsp-audio.wav"}']
+    if args.trace_media and args.disc:
+        for event in (
+                'ide_bus_exec_cmd', 'ide_atapi_cmd', 'ide_atapi_cmd_packet',
+                'ide_atapi_cmd_error', 'ide_atapi_cmd_read', 'cd_read_sector'):
+            main_command += ['-trace', f'enable={event}']
     if args.debug:
         if UNIX_CONTROL:
             main_command += ['-qmp', f'unix:{qmp_path},server=on,wait=off',
@@ -855,15 +1059,17 @@ def main():
     # the browser still answers NO CARD. See NXS_BROWSE_BLOCKER.md. Explicit
     # options are necessary because inherited CDJ_ variables are sanitized.
     if source_key != 'none':
-        insert_at = args.sd_insert_seconds if args.sd_insert_seconds is not None else 20
-        at = args.source_key_at if args.source_key_at is not None else insert_at + 2.0
-        main_env['CDJ_PANEL_KEYS'] = source_schedule(
-            at, contact, args.source_key_retries,
-            args.source_key_retry_interval)
+        if not args.source_key_when_ready:
+            insert_at = args.sd_insert_seconds if args.sd_insert_seconds is not None else 20
+            at = args.source_key_at if args.source_key_at is not None else insert_at + 2.0
+            main_env['CDJ_PANEL_KEYS'] = source_schedule(
+                at, contact, args.source_key_retries,
+                args.source_key_retry_interval)
         main_env['CDJ_PANEL_HOLD_MS'] = str(args.panel_hold_ms)
     if args.trace_media:
         main_env['CDJ_SDHI_TRACE'] = '1'
         main_env['CDJ_USBH_TRACE'] = '1'
+        main_env['CDJ_ATA_TRACE'] = '1'
     main_env['CDJ_NXS_HPI_DUMP'] = str(run / 'dsp-l2.bin')
     main_env['CDJ_NXS_DSP_CHECKPOINT_DIR'] = str(run / 'dsp-checkpoints')
     main_env['CDJ_NXS_DSP_CHECKPOINT_POLICY'] = 'fault' if args.lightweight else 'all'
@@ -877,12 +1083,40 @@ def main():
     # Always override any inherited policy. Deferred scheduling changes the
     # connected host/DSP interleaving and must be an explicit run option.
     main_env['CDJ_NXS_DSP_SCHEDULER'] = dsp_scheduler_mode
+    main_env['CDJ_NXS_DSP_LEGACY_BUDGET'] = str(dsp_legacy_budget)
+    if args.dsp_idle_skip:
+        main_env['CDJ_NXS_DSP_IDLE_SKIP'] = '1'
     if args.functional_dsp_timing:
         main_env['CDJ_NXS_DSP_FUNCTIONAL_TIMING'] = '1'
     if args.functional_dsp_audio:
         main_env['CDJ_NXS_DSP_FUNCTIONAL_AUDIO'] = '1'
+    main_env.pop('CDJ_NXS_DSP_THREAD', None)
+    main_env.pop('CDJ_NXS_DSP_THREAD_ACCESS_PACKETS', None)
+    if args.dsp_thread:
+        main_env['CDJ_NXS_DSP_THREAD'] = '1'
+        main_env['CDJ_NXS_DSP_THREAD_ACCESS_PACKETS'] = str(args.dsp_thread_access_packets)
+    main_env.pop('CDJ_NXS_DSP_MODEL', None)
+    if args.dsp_model:
+        main_env['CDJ_NXS_DSP_MODEL'] = '1'
+    main_env.pop('CDJ_NXS_DSP_VIRTUAL_MCASP', None)
+    if args.virtual_mcasp_clock:
+        main_env['CDJ_NXS_DSP_VIRTUAL_MCASP'] = '1'
+    main_env.pop('CDJ_NXS_DSP_CYCLE_MCASP', None)
+    if args.dsp_cycle_mcasp_clock:
+        main_env['CDJ_NXS_DSP_CYCLE_MCASP'] = '1'
+    if args.host_dsp_audio_wav:
+        main_env['CDJ_NXS_DSP_HOST_AUDIO'] = '1'
+    main_env.pop('CDJ_NXS_DSP_PCM_WAV', None)
+    if args.render_dsp_audio_wav:
+        main_env['CDJ_NXS_DSP_PCM_WAV'] = str(run / 'dsp-render.wav')
+    main_env.pop('CDJ_NXS_DSP_TX_CAPTURE_NONZERO_ONLY', None)
     if args.capture_dsp_tx:
         main_env['CDJ_NXS_DSP_TX_CAPTURE'] = str(run / 'dsp-tx.jsonl')
+        main_env['CDJ_NXS_DSP_TX_CAPTURE_LIMIT'] = str(args.capture_dsp_tx_records)
+        if args.capture_dsp_tx_nonzero_only:
+            main_env['CDJ_NXS_DSP_TX_CAPTURE_NONZERO_ONLY'] = '1'
+    if args.capture_dsp_fault_history:
+        main_env['CDJ_NXS_DSP_FAULT_HISTORY'] = str(run / 'dsp-fault-history.jsonl')
     # Genuine NXS validation must transport the firmware's bytes unchanged, so
     # both board-side aids stay off by default. They are not optional for one
     # job, though: RUNNING.md measures the card's library reaching the screen in
@@ -895,7 +1129,8 @@ def main():
     run_manifest = dict(main=main_command, gui=gui_command,
         dsp_source_sha256_at_launch=dsp_source_hashes(),
         endpoints=dict(panel_host='127.0.0.1', panel_port=args.port + 4,
-                       qmp=qmp_endpoint if args.debug else None,
+                       qmp=(str(run / 'qmp.sock') if UNIX_CONTROL else qmp_endpoint)
+                           if args.debug else None,
                        gdb_host='127.0.0.1' if args.debug else None,
                        gdb_port=args.port + 3 if args.debug else None),
         debug=dict(enabled=args.debug, main_starts_paused=args.debug_paused,
@@ -933,9 +1168,24 @@ def main():
                    panel_key_retries=args.source_key_retries,
                    panel_key_retry_interval_seconds=args.source_key_retry_interval,
                    panel_key_hold_ms=main_env.get('CDJ_PANEL_HOLD_MS'),
+                   panel_key_strategy=('qmp-readiness' if args.source_key_when_ready
+                                        else 'virtual-time schedule'),
+                   panel_key_readiness_settle_seconds=(args.source_key_ready_delay
+                                                       if args.source_key_when_ready else None),
+                   panel_key_readiness_file=('source-key-ready.json'
+                                             if args.source_key_when_ready else None),
                    writes='temporary QEMU snapshot overlays; discarded at exit',
                    firmware_load_verified=False, audio_verified=False),
         dsp_scheduler_mode=dsp_scheduler_mode,
+        dsp_model=args.dsp_model,
+        dsp_thread=args.dsp_thread,
+        dsp_audio_clock=('virtual-clock-batch' if args.virtual_mcasp_clock else
+                         'dsp-sysclk1-cycle' if args.dsp_cycle_mcasp_clock else
+                         'coarse-packet-slots' if args.functional_dsp_audio else 'stopped-clock'),
+        dsp_host_audio=('dsp-audio.wav' if args.host_dsp_audio_wav else None),
+        dsp_pcm_render=('dsp-render.wav' if args.render_dsp_audio_wav else None),
+        dsp_legacy_budget_packets=dsp_legacy_budget,
+        dsp_virtual_slice_packets=4096 if args.virtual_mcasp_clock else None,
         dsp_sdram=dict(physical_bytes=0x02000000,
             aperture='0xc0000000-0xdfffffff',
             addressing='physical 32 MiB mirror',
@@ -947,13 +1197,27 @@ def main():
             observer_overhead='Lock profiling and monitor collection add host overhead; '
                               'timings are diagnostic observations, not uninstrumented performance'),
         architectural_validation_eligible=not (
-            args.lightweight or args.functional_dsp_timing or
-            args.functional_dsp_audio or args.deferred_dsp_scheduling),
+            args.lightweight or args.functional_dsp_timing or args.dsp_model or
+            args.functional_dsp_audio or args.deferred_dsp_scheduling or
+            args.dsp_thread or dsp_legacy_budget != 1000000),
         scheduling_provenance=(
+            f'DSP on its own host thread, at most one quantum ahead of QEMU virtual time; '
+            f'MAIN waits for {args.dsp_thread_access_packets} DSP packets per HPI access; '
+            'MAIN events land at host-scheduled packets, so not replay evidence'
+            if args.dsp_thread else
+            'experimental virtual McASP clock services DSP in 4096-packet slices '
+            'between 1 ms QEMU timer batches; no calibrated DSP instruction clock'
+            if args.virtual_mcasp_clock else
+            'experimental McASP slot clock follows modeled DSP SYSCLK1 cycles; '
+            'QEMU host time remains independent and cannot feed live audio at 44.1 kHz'
+            if args.dsp_cycle_mcasp_clock else
             'deferred-v1 is an explicit 4096-step QEMU timer-slice host scheduling approximation; '
             'it is not a DSP timing fix, frequency model, or hardware proof'
             if args.deferred_dsp_scheduling else
-            'legacy synchronous bounded DSP activation'))
+            (f'legacy synchronous DSP activation reduced to {dsp_legacy_budget} packets per HPI wake; '
+             'exploratory host-fairness mode, not hardware timing or validation evidence'
+             if dsp_legacy_budget != 1000000 else
+             'legacy synchronous bounded DSP activation')))
     run_manifest['ethernet'] = dict(
         controller='SH7764 EtherC/E-DMAC', phy='RTL8201FL-VB-CG',
         peer=(f'127.0.0.1:{args.ethernet_peer_port}' if args.ethernet_peer_port else None),
@@ -976,18 +1240,29 @@ def main():
     stop_requested = False
     viewer = None
     snapshots = None
+    source_worker = None
+    source_worker_stop = threading.Event()
     main_process = None
     with (run / 'main-stderr.log').open('w') as mainlog, (run / 'gui.log').open('w') as guilog:
         try:
+            gui = None
+            if args.gui_head_start:
+                # The simulator opens its MAIN link lazily and retries, so it
+                # can boot first; MAIN then starts after the head start.
+                gui = subprocess.Popen(gui_command, cwd=ROOT, env=gui_env, stdin=subprocess.DEVNULL, stdout=guilog, stderr=guilog)
+                processes.append(gui)
+                session['processes']['gui'] = gui.pid
+                time.sleep(args.gui_head_start)
             main_process = subprocess.Popen(main_command, cwd=ROOT, env=qemu_environment(main_env), stdin=subprocess.DEVNULL, stdout=mainlog, stderr=mainlog)
             processes.append(main_process)
             session['processes']['main'] = main_process.pid
             write_json(run / 'session.json', session)
             time.sleep(1)
             if main_process.poll() is not None: raise RuntimeError('MAIN exited; see main-stderr.log')
-            gui = subprocess.Popen(gui_command, cwd=ROOT, env=gui_env, stdin=subprocess.DEVNULL, stdout=guilog, stderr=guilog)
-            processes.append(gui)
-            session['processes']['gui'] = gui.pid
+            if gui is None:
+                gui = subprocess.Popen(gui_command, cwd=ROOT, env=gui_env, stdin=subprocess.DEVNULL, stdout=guilog, stderr=guilog)
+                processes.append(gui)
+                session['processes']['gui'] = gui.pid
             if args.frame_interval:
                 snapshots = FrameSnapshots(run, args.frame_interval, time.monotonic())
             if args.ui:
@@ -1002,7 +1277,15 @@ def main():
             write_json(run / 'session.json', session)
             print(f'MAIN {main_process.pid}, GUI {gui.pid}; logs: {run}', flush=True)
             print_agent_commands(run, args.port, args.debug,
-                                  qmp_endpoint if args.debug else None)
+                                 qmp_endpoint if args.debug else None)
+            if args.source_key_when_ready:
+                source_worker = threading.Thread(
+                    target=send_source_key_when_ready,
+                    args=(run, source_key, contact, args.panel_hold_ms,
+                          args.source_key_ready_delay,
+                          source_worker_stop, run / 'source-key-ready.json'),
+                    name='nxs-source-key-readiness', daemon=True)
+                source_worker.start()
             deadline = time.monotonic() + args.seconds + 5
             while gui.poll() is None and time.monotonic() < deadline:
                 if (run / 'stop-request.json').is_file():
@@ -1030,6 +1313,9 @@ def main():
                           main_exit_before_teardown=main_process.poll() if main_process else None)
             print(f'nxs_vm: {result["error"]}; diagnostics: {run}', file=sys.stderr)
         finally:
+            source_worker_stop.set()
+            if source_worker is not None:
+                source_worker.join(timeout=2)
             session['state'] = 'stopping'
             write_json(run / 'session.json', session)
             if args.qemu_sync_profile:
@@ -1058,12 +1344,17 @@ def main():
                                                         if args.gui_firmware else ''))
             write_json(run / 'run.json', run_manifest)
             try:
-                if not args.lightweight or any((run / 'dsp-checkpoints').glob('*.cdjdsp')):
+                if not args.dsp_thread and (not args.lightweight or
+                                            any((run / 'dsp-checkpoints').glob('*.cdjdsp'))):
                     finalize_dsp_artifacts(run, gui_firmware, args.functional_dsp_timing,
                                            args.functional_dsp_audio, args.capture_dsp_tx,
                                            dsp_scheduler_mode, main_firmware,
                                            dsp_checkpoint_policy=('fault' if args.lightweight else 'all'),
-                                           source_sha256_at_launch=run_manifest['dsp_source_sha256_at_launch'])
+                                           source_sha256_at_launch=run_manifest['dsp_source_sha256_at_launch'],
+                                           virtual_mcasp_clock=args.virtual_mcasp_clock,
+                                           cycle_mcasp_clock=args.dsp_cycle_mcasp_clock,
+                                           host_dsp_audio_wav=args.host_dsp_audio_wav,
+                                           render_dsp_audio_wav=args.render_dsp_audio_wav)
             except (OSError, ValueError, RuntimeError) as error:
                 result['finalization_error'] = str(error)
             write_json(run / 'result.json', result)
