@@ -47,7 +47,8 @@ if [ ! -f "$QEMU_SRC/hw/sh4/meson.build" ]; then
     exit 1
 fi
 
-# SH-4 interrupt and timer fixes; see patches/README.md. They form a stack:
+# SH-4 interrupt and timer fixes, then the TCG fast paths; see
+# patches/README.md. They form a stack:
 # the priority-order patch edits lines the IMASK patch wrote, so once it is in,
 # the IMASK patch checks neither forward nor reverse. Find the last patch that
 # is already applied, take everything before it as applied too, and apply the
@@ -55,13 +56,29 @@ fi
 set -- \
     "$REPO/patches/qemu-sh-intc-priority-imask.patch" \
     "$REPO/patches/qemu-sh-intc-priority-order.patch" \
-    "$REPO/patches/qemu-sh-tmu-stop-reset.patch"
+    "$REPO/patches/qemu-sh-tmu-stop-reset.patch" \
+    "$REPO/patches/qemu-sh4-tcg-fast-paths.patch"
 applied=0
 index=0
 for patch in "$@"; do
     index=$((index + 1))
     if patch -d "$QEMU_SRC" -p1 --reverse --force --silent --dry-run < "$patch" >/dev/null 2>&1; then
         applied=$index
+    fi
+done
+# The reverse check cannot tell an older version of a patch from the current
+# one, so record what was applied and refuse a tree whose record differs.
+stamp=$QEMU_SRC/.cdj2000-patches
+patch_id() { printf '%s %s\n' "$(basename "$1")" "$(cksum < "$1" | cut -d' ' -f1-2)"; }
+index=0
+for patch in "$@"; do
+    index=$((index + 1))
+    [ "$index" -le "$applied" ] || break
+    if ! grep -qxF "$(patch_id "$patch")" "$stamp" 2>/dev/null; then
+        echo "$QEMU_SRC carries a different or unrecorded version of $(basename "$patch")." >&2
+        echo "Restore a clean tree (files the patches added too) and re-run, e.g.:" >&2
+        echo "  git -C $QEMU_SRC checkout -- . && git -C $QEMU_SRC clean -fd -e build" >&2
+        exit 1
     fi
 done
 index=0
@@ -77,6 +94,7 @@ for patch in "$@"; do
         exit 1
     fi
 done
+for patch in "$@"; do patch_id "$patch"; done > "$stamp"
 
 echo "mirroring board sources into $QEMU_SRC/hw/sh4"
 for source in "$REPO"/emulator/qemu/*.c "$REPO"/emulator/qemu/*.h; do

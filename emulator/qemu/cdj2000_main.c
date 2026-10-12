@@ -33,6 +33,7 @@
 #include "qemu/timer.h"
 #include "qapi/error.h"
 #include "target/sh4/cpu.h"
+#include "exec/tb-flush.h"
 #include "hw/core/boards.h"
 #include "hw/core/loader.h"
 #include "hw/block/flash.h"
@@ -4901,7 +4902,17 @@ static void cdj_ccn_write(void *opaque, hwaddr offset, uint64_t value,
     case CCN_PTEL:   env->ptel = value; return;
     case CCN_TTB:    env->ttb = value; return;
     case CCN_TEA:    env->tea = value; return;
-    case CCN_MMUCR:  env->mmucr = value; return;
+    case CCN_MMUCR:
+        if ((env->mmucr ^ value) & MMUCR_AT) {
+            /*
+             * The SH-4 translator chains blocks across pages only while the
+             * MMU is off (CDJ_TB_XPAGE, qemu-sh4-tcg-fast-paths.patch); a
+             * mapping change must not leave those direct jumps in place.
+             */
+            queue_tb_flush(env_cpu(env));
+        }
+        env->mmucr = value;
+        return;
     case CCN_TRA:    env->tra = value & 0x7ff; return;
     case CCN_EXPEVT: env->expevt = value & 0x7ff; return;
     case CCN_INTEVT: env->intevt = value & 0x7ff; return;

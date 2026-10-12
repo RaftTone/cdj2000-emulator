@@ -1,0 +1,583 @@
+diff --git a/accel/tcg/cpu-exec.c b/accel/tcg/cpu-exec.c
+index 46b723cb73..3b80673d6b 100644
+--- a/accel/tcg/cpu-exec.c
++++ b/accel/tcg/cpu-exec.c
+@@ -42,6 +42,7 @@
+ #include "exec/helper-proto-common.h"
+ #include "tcg-accel-ops.h"
+ #include "tb-jmp-cache.h"
++#include "exec/cdj-tcg-prof.h"
+ #include "tb-hash.h"
+ #include "tb-context.h"
+ #include "tb-internal.h"
+@@ -213,6 +214,114 @@ static TranslationBlock *tb_htable_lookup(CPUState *cpu, TCGTBCPUState s)
+     return qht_lookup_custom(&tb_ctx.htable, &desc, h, tb_lookup_cmp);
+ }
+ 
++/*
++ * CDJ_JCPROF=1: why do TB lookups happen, and why does the jump cache miss?
++ *
++ * Adapted from cdj-nxs2-qemu by Stijn Jacobs
++ * (https://github.com/Stijn-Jacobs/cdj-nxs2-qemu), used with permission.
++ *
++ * Counts, per lookup site (cpu loop vs helper_lookup_tb_ptr) and per TB-exit
++ * kind (CDJ_EXIT_*, stored by target/sh4/translate.c), how many lookups hit
++ * the per-CPU jump cache and how the misses split: empty slot (cold or
++ * flushed), a slot holding another pc (conflict), or the same pc under other
++ * flags. Also prints TLB/TB flush counts and the store-to-code-page counts of
++ * tb-maint.c. Printed every 2^26 lookups and at exit. Read-only: it never
++ * changes what tb_lookup() returns.
++ */
++uint32_t cdj_exit_kind;
++
++bool cdj_knob(const char *name, int *cache, bool dflt)
++{
++    if (unlikely(*cache < 0)) {
++        const char *e = getenv(name);
++
++        *cache = e && *e ? strcmp(e, "0") != 0 : dflt;
++        if (*cache != dflt) {
++            fprintf(stderr, "[CDJ] %s=%d\n", name, *cache);
++        }
++    }
++    return *cache;
++}
++
++enum { CDJ_JC_HIT, CDJ_JC_EMPTY, CDJ_JC_CONFLICT, CDJ_JC_FLAGS, CDJ_JC_NOUT };
++
++static int cdj_jcprof = -1;
++static uint64_t cdj_jc_count[2][CDJ_EXIT_NKINDS][CDJ_JC_NOUT];
++static uint64_t cdj_jc_total;
++static CPUState *cdj_jc_cpu;
++
++static void cdj_jcprof_print(void)
++{
++    static const char *const kname[CDJ_EXIT_NKINDS] = {
++        "unknown", "rts", "call", "jmp", "xpage", "fpscr", "stop", "predmiss",
++    };
++    CPUState *cpu = cdj_jc_cpu;
++    int s, k;
++
++    if (!cpu) {
++        return;
++    }
++    fprintf(stderr, "[CDJ] jcprof lookups=%" PRIu64 " tlbflush full=%zu "
++            "part=%zu tbflush=%u smc stores=%" PRIu64 " overlap=%" PRIu64
++            " fastreject=%" PRIu64 "\n", cdj_jc_total,
++            cpu->neg.tlb.c.full_flush_count, cpu->neg.tlb.c.part_flush_count,
++            qatomic_read(&tb_ctx.tb_flush_count), cdj_smc_stores,
++            cdj_smc_overlap, cdj_smc_rejected);
++    for (s = 0; s < 2; s++) {
++        for (k = 0; k < CDJ_EXIT_NKINDS; k++) {
++            uint64_t *c = cdj_jc_count[s][k];
++
++            if (c[CDJ_JC_HIT] | c[CDJ_JC_EMPTY] | c[CDJ_JC_CONFLICT]
++                | c[CDJ_JC_FLAGS]) {
++                fprintf(stderr, "[CDJ] jcprof %s %-8s hit=%" PRIu64
++                        " empty=%" PRIu64 " conflict=%" PRIu64
++                        " flags=%" PRIu64 "\n", s ? "helper" : "loop  ",
++                        kname[k], c[CDJ_JC_HIT], c[CDJ_JC_EMPTY],
++                        c[CDJ_JC_CONFLICT], c[CDJ_JC_FLAGS]);
++            }
++        }
++    }
++}
++
++static void cdj_jcprof_note(CPUState *cpu, int site, TCGTBCPUState st)
++{
++    CPUJumpCache *jc = cpu->tb_jmp_cache;
++    uint32_t hash = tb_jmp_cache_hash_func(st.pc);
++    TranslationBlock *tb = qatomic_read(&jc->array[hash].tb);
++    unsigned kind = cdj_exit_kind;
++    int out;
++
++    if (!cdj_jc_cpu) {
++        cdj_jc_cpu = cpu;
++        atexit(cdj_jcprof_print);
++    }
++    cdj_exit_kind = CDJ_EXIT_UNKNOWN;
++    if (kind >= CDJ_EXIT_NKINDS) {
++        kind = CDJ_EXIT_UNKNOWN;
++    }
++    if (!tb) {
++        out = CDJ_JC_EMPTY;
++    } else if (jc->array[hash].pc != st.pc) {
++        out = CDJ_JC_CONFLICT;
++    } else if (tb->cs_base != st.cs_base || tb->flags != st.flags
++               || tb_cflags(tb) != st.cflags) {
++        out = CDJ_JC_FLAGS;
++    } else {
++        out = CDJ_JC_HIT;
++    }
++    cdj_jc_count[site][kind][out]++;
++    if ((++cdj_jc_total & ((1u << 26) - 1)) == 0) {
++        cdj_jcprof_print();
++    }
++}
++
++#define CDJ_JCPROF_NOTE(cpu, site, st)                                  \
++    do {                                                                \
++        if (unlikely(cdj_knob("CDJ_JCPROF", &cdj_jcprof, false))) {     \
++            cdj_jcprof_note(cpu, site, st);                             \
++        }                                                               \
++    } while (0)
++
+ /**
+  * tb_lookup:
+  * @cpu: CPU that will execute the returned translation block
+@@ -395,6 +504,7 @@ const void *HELPER(lookup_tb_ptr)(CPUArchState *env)
+         cpu_loop_exit(cpu);
+     }
+ 
++    CDJ_JCPROF_NOTE(cpu, 1, s);
+     tb = tb_lookup(cpu, s);
+     if (tb == NULL) {
+         return tcg_code_gen_epilogue;
+@@ -962,6 +1072,7 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
+                 break;
+             }
+ 
++            CDJ_JCPROF_NOTE(cpu, 0, s);
+             tb = tb_lookup(cpu, s);
+             if (tb == NULL) {
+                 CPUJumpCache *jc;
+diff --git a/accel/tcg/tb-maint.c b/accel/tcg/tb-maint.c
+index 4313864d2c..ef9204691b 100644
+--- a/accel/tcg/tb-maint.c
++++ b/accel/tcg/tb-maint.c
+@@ -29,6 +29,7 @@
+ #include "accel/tcg/cpu-loop.h"
+ #include "accel/tcg/cpu-ops.h"
+ #include "tb-internal.h"
++#include "exec/cdj-tcg-prof.h"
+ #include "system/tcg.h"
+ #include "tcg/tcg.h"
+ #include "tb-hash.h"
+@@ -1207,11 +1208,64 @@ void tb_invalidate_phys_range(CPUState *cpu, tb_page_addr_t start,
+  * Called via softmmu_template.h when code areas are written to with
+  * iothread mutex not held.
+  */
++/*
++ * CDJ_SMC_FASTREJECT (default on; =0 restores QEMU's path): a page keeps
++ * TLB_NOTDIRTY for as long as any TB lives in it, so every guest store to it,
++ * even to data nowhere near the code, comes here. The full path g_malloc()s a
++ * page_collection, builds a QTree, walks the page's TBs and, in the common
++ * case, invalidates nothing. Look at the one page under its own lock first: if
++ * no TB overlaps the written bytes and the page still has TBs, the full path
++ * would neither invalidate nor unprotect, so skip it. Any overlap, or an
++ * empty page, takes the full path. Guest-visible behaviour is unchanged.
++ *
++ * Adapted from cdj-nxs2-qemu by Stijn Jacobs
++ * (https://github.com/Stijn-Jacobs/cdj-nxs2-qemu), used with permission.
++ */
++uint64_t cdj_smc_stores, cdj_smc_overlap, cdj_smc_rejected;
++
++static bool cdj_smc_no_overlap(PageDesc *p, tb_page_addr_t start,
++                               tb_page_addr_t last)
++{
++    TranslationBlock *tb;
++    PageForEachNext n;
++    bool hit = false;
++
++    page_lock(p);
++    /* Same arithmetic as tb_invalidate_phys_page_range__locked(). */
++    PAGE_FOR_EACH_TB(start, last, p, tb, n) {
++        tb_page_addr_t tb_start, tb_last;
++
++        tb_start = tb_page_addr0(tb);
++        tb_last = tb_start + tb->size - 1;
++        if (n == 0) {
++            tb_last = MIN(tb_last, tb_start | ~TARGET_PAGE_MASK);
++        } else {
++            tb_start = tb_page_addr1(tb);
++            tb_last = tb_start + (tb_last & ~TARGET_PAGE_MASK);
++        }
++        if (!(tb_last < start || tb_start > last)) {
++            hit = true;
++            break;
++        }
++    }
++    hit |= !p->first_tb;
++    page_unlock(p);
++    cdj_smc_stores++;
++    cdj_smc_overlap += hit;
++    return !hit;
++}
++
+ void tb_invalidate_phys_range_fast(CPUState *cpu, ram_addr_t start,
+                                    unsigned len, uintptr_t ra)
+ {
++    static int fastreject = -1;
+     PageDesc *p = page_find(start >> TARGET_PAGE_BITS);
+ 
++    if (p && cdj_knob("CDJ_SMC_FASTREJECT", &fastreject, true)
++        && cdj_smc_no_overlap(p, start, start + len - 1)) {
++        cdj_smc_rejected++;
++        return;
++    }
+     if (p) {
+         ram_addr_t last = start + len - 1;
+         struct page_collection *pages = page_collection_lock(start, last);
+diff --git a/hw/sh4/sh7750.c b/hw/sh4/sh7750.c
+index 6aa7f63773..f0a81cf82e 100644
+--- a/hw/sh4/sh7750.c
++++ b/hw/sh4/sh7750.c
+@@ -37,6 +37,7 @@
+ #include "hw/sh4/sh_intc.h"
+ #include "hw/timer/tmu012.h"
+ #include "exec/cputlb.h"
++#include "exec/tb-flush.h"
+ #include "trace.h"
+ 
+ typedef struct SH7750State {
+@@ -371,6 +372,10 @@ static void sh7750_mem_writel(void *opaque, hwaddr addr,
+         if (mem_value & MMUCR_TI) {
+             cpu_sh4_invalidate_tlb(&s->cpu->env);
+         }
++        if ((s->cpu->env.mmucr ^ mem_value) & MMUCR_AT) {
++            /* CDJ_TB_XPAGE chains across pages only while AT is clear. */
++            queue_tb_flush(CPU(s->cpu));
++        }
+         s->cpu->env.mmucr = mem_value & ~MMUCR_TI;
+         return;
+     case SH7750_PTEH_A7:
+diff --git a/include/exec/cdj-tcg-prof.h b/include/exec/cdj-tcg-prof.h
+new file mode 100644
+index 0000000000..694dc59e2a
+--- /dev/null
++++ b/include/exec/cdj-tcg-prof.h
+@@ -0,0 +1,37 @@
++/*
++ * CDJ-2000 emulator: TB-exit fast paths and the jump-cache profiler.
++ *
++ * Adapted from cdj-nxs2-qemu by Stijn Jacobs
++ * (https://github.com/Stijn-Jacobs/cdj-nxs2-qemu), used with permission.
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++#ifndef EXEC_CDJ_TCG_PROF_H
++#define EXEC_CDJ_TCG_PROF_H
++
++/*
++ * Why the last TB left through a TB lookup, stored by translated code when
++ * CDJ_JCPROF=1 and read by accel/tcg/cpu-exec.c.
++ * ponytail: one global, not per-CPU; every CDJ board has a single vCPU.
++ */
++enum {
++    CDJ_EXIT_UNKNOWN = 0,   /* cpu loop entry: irq, exception, exit request */
++    CDJ_EXIT_RTS,           /* rts: return through PR */
++    CDJ_EXIT_CALL,          /* jsr @Rn, bsrf Rn */
++    CDJ_EXIT_JMP,           /* jmp @Rn, braf Rn */
++    CDJ_EXIT_XPAGE,         /* direct branch or fall-through to another page */
++    CDJ_EXIT_FPSCR,         /* LDS FPSCR changed PR/SZ/FR */
++    CDJ_EXIT_STOP,          /* DISAS_STOP: exit_tb to the cpu loop */
++    CDJ_EXIT_CALLPRED_MISS, /* predicted jsr/jmp target was wrong */
++    CDJ_EXIT_NKINDS
++};
++
++extern uint32_t cdj_exit_kind;
++
++/* Stores into pages holding code (tb-maint.c), for the CDJ_JCPROF report. */
++extern uint64_t cdj_smc_stores, cdj_smc_overlap, cdj_smc_rejected;
++
++/* Read an on-by-default knob once: unset or anything but "0" means on. */
++bool cdj_knob(const char *name, int *cache, bool dflt);
++
++#endif
+diff --git a/target/sh4/translate.c b/target/sh4/translate.c
+index c79ea07757..fb06e31303 100644
+--- a/target/sh4/translate.c
++++ b/target/sh4/translate.c
+@@ -22,6 +22,7 @@
+ #include "tcg/tcg-op.h"
+ #include "exec/helper-proto.h"
+ #include "exec/helper-gen.h"
++#include "exec/cdj-tcg-prof.h"
+ #include "exec/translation-block.h"
+ #include "exec/translator.h"
+ #include "exec/target_page.h"
+@@ -47,6 +48,19 @@ typedef struct DisasContext {
+     uint16_t opcode;
+ 
+     bool has_movcal;
++
++    /*
++     * TB-exit fast paths, see cdj_xpage_ok(). cdj_jkind names the pending
++     * delayed jump for CDJ_JCPROF; cdj_lit[] holds the value each register
++     * was last given by a PC-relative literal load in this TB, the guess
++     * CDJ_TB_CALLPRED checks a jsr/jmp target against.
++     */
++    uint8_t cdj_jkind;
++    bool cdj_xpage;
++    bool cdj_pred_ok;
++    uint32_t cdj_pred;
++    uint16_t cdj_lit_valid;
++    uint32_t cdj_lit[16];
+ } DisasContext;
+ 
+ #if defined(CONFIG_USER_ONLY)
+@@ -61,6 +75,8 @@ typedef struct DisasContext {
+ /* We want to exit back to the cpu loop for some reason.
+    Usually this is to recognize interrupts immediately.  */
+ #define DISAS_STOP    DISAS_TARGET_0
++/* LDS FPSCR under CDJ_TB_FPSCR: chain on when PR/SZ/FR did not change. */
++#define DISAS_CDJ_FPSCR DISAS_TARGET_1
+ 
+ /* global register indexes */
+ static TCGv cpu_gregs[32];
+@@ -234,11 +250,76 @@ static inline bool use_exit_tb(DisasContext *ctx)
+             (TB_FLAG_GUSA_EXCLUSIVE | TB_FLAG_DELAY_SLOT_RTE)) != 0;
+ }
+ 
++/*
++ * TB-exit fast paths. Each is on by default and off with <NAME>=0. None moves
++ * a TB boundary, so interrupts and icount see the same instructions at the
++ * same points; they only change how one TB reaches the next.
++ *
++ * Adapted from cdj-nxs2-qemu by Stijn Jacobs
++ * (https://github.com/Stijn-Jacobs/cdj-nxs2-qemu), used with permission.
++ *
++ *   CDJ_JCPROF=1      (default off) store why each TB left (CDJ_EXIT_*) for
++ *                     the jump-cache profiler in accel/tcg/cpu-exec.c.
++ *   CDJ_TB_FPSCR      LDS FPSCR no longer exits to the cpu loop: if PR/SZ/FR
++ *                     are unchanged it chains to the next insn, else it looks
++ *                     the next TB up in place.
++ *   CDJ_TB_XPAGE      allow goto_tb across guest pages for privileged code
++ *                     while the MMU is off. QEMU forbids cross-page chaining
++ *                     because a page's virtual mapping can change under a
++ *                     direct jump; with MMUCR.AT clear no mapping below P4
++ *                     can, and turning the MMU on flushes every TB.
++ *   CDJ_TB_CALLPRED   for jsr/jmp @Rn whose Rn came from a literal load in the
++ *                     same TB, compare the runtime target with the literal and
++ *                     chain directly when equal; otherwise look up as before.
++ */
++static int cdj_knob_jcprof = -1, cdj_knob_fpscr = -1, cdj_knob_xpage = -1,
++           cdj_knob_callpred = -1;
++#define CDJ_TB_JCPROF()   cdj_knob("CDJ_JCPROF", &cdj_knob_jcprof, false)
++#define CDJ_TB_FPSCR()    cdj_knob("CDJ_TB_FPSCR", &cdj_knob_fpscr, true)
++#define CDJ_TB_XPAGE()    cdj_knob("CDJ_TB_XPAGE", &cdj_knob_xpage, true)
++#define CDJ_TB_CALLPRED() cdj_knob("CDJ_TB_CALLPRED", &cdj_knob_callpred, true)
++
++static void cdj_gen_exit_kind(unsigned kind)
++{
++    if (unlikely(CDJ_TB_JCPROF())) {
++        tcg_gen_st_i32(tcg_constant_i32(kind),
++                       tcg_constant_ptr(&cdj_exit_kind), 0);
++    }
++}
++
++/*
++ * May this TB chain directly to dest on another page? Set up in
++ * sh4_tr_init_disas_context(): privileged code with MMUCR.AT clear, where
++ * every address below P4 has a fixed physical mapping and no access check.
++ * Whatever sets MMUCR.AT must flush all TBs (cdj2000_main.c, sh7750.c).
++ */
++static bool cdj_xpage_ok(DisasContext *ctx, vaddr dest)
++{
++    return ctx->cdj_xpage && dest < 0xe0000000;
++}
++
++/*
++ * How an LDS FPSCR ends its TB. The TB still ends right after it; only where
++ * it goes next changes. Not in a delay slot (the branch there ends the TB) and
++ * not where the TB must leave the cpu loop anyway.
++ */
++static int cdj_fpscr_stop(DisasContext *ctx)
++{
++    if (CDJ_TB_FPSCR() && !(ctx->envflags & TB_FLAG_DELAY_SLOT_MASK)
++        && !use_exit_tb(ctx)) {
++        return DISAS_CDJ_FPSCR;
++    }
++    return DISAS_STOP;
++}
++
+ static bool use_goto_tb(DisasContext *ctx, vaddr dest)
+ {
+     if (use_exit_tb(ctx)) {
+         return false;
+     }
++    if (cdj_xpage_ok(ctx, dest)) {
++        return !(tb_cflags(ctx->base.tb) & CF_NO_GOTO_TB);
++    }
+     return translator_use_goto_tb(&ctx->base, dest);
+ }
+ 
+@@ -253,6 +334,7 @@ static void gen_goto_tb(DisasContext *ctx, unsigned tb_slot_idx, vaddr dest)
+         if (use_exit_tb(ctx)) {
+             tcg_gen_exit_tb(NULL, 0);
+         } else {
++            cdj_gen_exit_kind(CDJ_EXIT_XPAGE);
+             tcg_gen_lookup_and_goto_ptr();
+         }
+     }
+@@ -262,6 +344,21 @@ static void gen_goto_tb(DisasContext *ctx, unsigned tb_slot_idx, vaddr dest)
+ static void gen_jump(DisasContext * ctx)
+ {
+     if (ctx->delayed_pc == -1) {
++        unsigned kind = ctx->cdj_jkind;
++
++        /* CDJ_TB_CALLPRED: chain straight to the literal the target came
++         * from, but only after checking at run time that it IS the target. */
++        if (ctx->cdj_pred_ok && use_goto_tb(ctx, ctx->cdj_pred)) {
++            TCGLabel *miss = gen_new_label();
++
++            tcg_gen_brcondi_i32(TCG_COND_NE, cpu_delayed_pc, ctx->cdj_pred,
++                                miss);
++            gen_goto_tb(ctx, 0, ctx->cdj_pred);
++            gen_set_label(miss);
++            kind = CDJ_EXIT_CALLPRED_MISS;
++        }
++        ctx->cdj_pred_ok = false;
++        ctx->cdj_jkind = CDJ_EXIT_UNKNOWN;
+         /* Target is not statically known, it comes necessarily from a
+            delayed jump as immediate jump are conditinal jumps */
+         tcg_gen_mov_i32(cpu_pc, cpu_delayed_pc);
+@@ -269,6 +366,7 @@ static void gen_jump(DisasContext * ctx)
+         if (use_exit_tb(ctx)) {
+             tcg_gen_exit_tb(NULL, 0);
+         } else {
++            cdj_gen_exit_kind(kind);
+             tcg_gen_lookup_and_goto_ptr();
+         }
+         ctx->base.is_jmp = DISAS_NORETURN;
+@@ -441,6 +539,7 @@ static void _decode_opc(DisasContext * ctx)
+         tcg_gen_mov_i32(cpu_delayed_pc, cpu_pr);
+         ctx->envflags |= TB_FLAG_DELAY_SLOT;
+         ctx->delayed_pc = (uint32_t) - 1;
++        ctx->cdj_jkind = CDJ_EXIT_RTS;
+         return;
+     case 0x0028: /* clrmac */
+         tcg_gen_movi_i32(cpu_mach, 0);
+@@ -539,9 +638,23 @@ static void _decode_opc(DisasContext * ctx)
+     case 0xd000: /* mov.l @(disp,PC),Rn */
+         CHECK_NOT_DELAY_SLOT
+         {
+-            TCGv addr = tcg_constant_i32((ctx->base.pc_next + 4 + B7_0 * 4) & ~3);
++            uint32_t lit = (ctx->base.pc_next + 4 + B7_0 * 4) & ~3;
++            TCGv addr = tcg_constant_i32(lit);
+             tcg_gen_qemu_ld_i32(REG(B11_8), addr, ctx->memidx,
+                                 MO_TESL | MO_ALIGN);
++            /*
++             * CDJ_TB_CALLPRED: peek at the literal through the TB's own host
++             * page (no MMIO, no page tracking). Only a prediction: gen_jump
++             * re-checks it at run time, so a later write to the pool or to Rn
++             * can cost a miss but never a wrong branch.
++             */
++            ctx->cdj_lit_valid &= ~(1u << B11_8);
++            if (CDJ_TB_CALLPRED() && ctx->base.host_addr[0]
++                && ((lit ^ ctx->base.pc_first) & TARGET_PAGE_MASK) == 0) {
++                ctx->cdj_lit[B11_8] = ldl_p((uint8_t *)ctx->base.host_addr[0]
++                                            + (lit - ctx->base.pc_first));
++                ctx->cdj_lit_valid |= 1u << B11_8;
++            }
+         }
+         return;
+     case 0x7000: /* add #imm,Rn */
+@@ -1339,6 +1452,7 @@ static void _decode_opc(DisasContext * ctx)
+         tcg_gen_addi_i32(cpu_delayed_pc, REG(B11_8), ctx->base.pc_next + 4);
+         ctx->envflags |= TB_FLAG_DELAY_SLOT;
+         ctx->delayed_pc = (uint32_t) - 1;
++        ctx->cdj_jkind = CDJ_EXIT_JMP;
+         return;
+     case 0x0003: /* bsrf Rn */
+         CHECK_NOT_DELAY_SLOT
+@@ -1346,6 +1460,7 @@ static void _decode_opc(DisasContext * ctx)
+         tcg_gen_add_i32(cpu_delayed_pc, REG(B11_8), cpu_pr);
+         ctx->envflags |= TB_FLAG_DELAY_SLOT;
+         ctx->delayed_pc = (uint32_t) - 1;
++        ctx->cdj_jkind = CDJ_EXIT_CALL;
+         return;
+     case 0x4015: /* cmp/pl Rn */
+         tcg_gen_setcondi_i32(TCG_COND_GT, cpu_sr_t, REG(B11_8), 0);
+@@ -1362,6 +1477,9 @@ static void _decode_opc(DisasContext * ctx)
+         tcg_gen_mov_i32(cpu_delayed_pc, REG(B11_8));
+         ctx->envflags |= TB_FLAG_DELAY_SLOT;
+         ctx->delayed_pc = (uint32_t) - 1;
++        ctx->cdj_jkind = CDJ_EXIT_JMP;
++        ctx->cdj_pred_ok = (ctx->cdj_lit_valid >> B11_8) & 1;
++        ctx->cdj_pred = ctx->cdj_lit[B11_8];
+         return;
+     case 0x400b: /* jsr @Rn */
+         CHECK_NOT_DELAY_SLOT
+@@ -1369,6 +1487,9 @@ static void _decode_opc(DisasContext * ctx)
+         tcg_gen_mov_i32(cpu_delayed_pc, REG(B11_8));
+         ctx->envflags |= TB_FLAG_DELAY_SLOT;
+         ctx->delayed_pc = (uint32_t) - 1;
++        ctx->cdj_jkind = CDJ_EXIT_CALL;
++        ctx->cdj_pred_ok = (ctx->cdj_lit_valid >> B11_8) & 1;
++        ctx->cdj_pred = ctx->cdj_lit[B11_8];
+         return;
+     case 0x400e: /* ldc Rm,SR */
+         CHECK_PRIVILEGED
+@@ -1449,7 +1570,7 @@ static void _decode_opc(DisasContext * ctx)
+     case 0x406a: /* lds Rm,FPSCR */
+         CHECK_FPU_ENABLED
+         gen_helper_ld_fpscr(tcg_env, REG(B11_8));
+-        ctx->base.is_jmp = DISAS_STOP;
++        ctx->base.is_jmp = cdj_fpscr_stop(ctx);
+         return;
+     case 0x4066: /* lds.l @Rm+,FPSCR */
+         CHECK_FPU_ENABLED
+@@ -1459,7 +1580,7 @@ static void _decode_opc(DisasContext * ctx)
+                                 MO_TESL | MO_ALIGN);
+             tcg_gen_addi_i32(REG(B11_8), REG(B11_8), 4);
+             gen_helper_ld_fpscr(tcg_env, addr);
+-            ctx->base.is_jmp = DISAS_STOP;
++            ctx->base.is_jmp = cdj_fpscr_stop(ctx);
+         }
+         return;
+     case 0x006a: /* sts FPSCR,Rn */
+@@ -1797,7 +1918,6 @@ static void _decode_opc(DisasContext * ctx)
+ static void decode_opc(DisasContext * ctx)
+ {
+     uint32_t old_flags = ctx->envflags;
+-
+     _decode_opc(ctx);
+ 
+     if (old_flags & TB_FLAG_DELAY_SLOT_MASK) {
+@@ -2210,6 +2330,12 @@ static void sh4_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
+     ctx->gbank = ((tbflags & (1 << SR_MD)) &&
+                   (tbflags & (1 << SR_RB))) * 0x10;
+     ctx->fbank = tbflags & FPSCR_FR ? 0x10 : 0;
++    ctx->cdj_jkind = CDJ_EXIT_UNKNOWN;
++    ctx->cdj_pred_ok = false;
++    ctx->cdj_lit_valid = 0;
++    ctx->cdj_xpage = CDJ_TB_XPAGE() && (tbflags & (1u << SR_MD))
++        && !(cpu_env(cs)->mmucr & MMUCR_AT)
++        && ctx->base.pc_first < 0xe0000000;
+ 
+ #ifdef CONFIG_USER_ONLY
+     if (tbflags & TB_FLAG_GUSA_MASK) {
+@@ -2295,8 +2421,32 @@ static void sh4_tr_tb_stop(DisasContextBase *dcbase, CPUState *cs)
+     switch (ctx->base.is_jmp) {
+     case DISAS_STOP:
+         gen_save_cpu_state(ctx, true);
++        cdj_gen_exit_kind(CDJ_EXIT_STOP);
+         tcg_gen_exit_tb(NULL, 0);
+         break;
++    case DISAS_CDJ_FPSCR: {
++        /*
++         * The next TB is keyed on FPSCR.PR/SZ/FR. If the load left them as
++         * this TB was translated with, the successor is the same every time
++         * and can be chained; if not, look it up with the new flags. Either
++         * way the cpu loop is not needed here: LDS FPSCR cannot make an
++         * interrupt deliverable, and a raised one still stops the next TB at
++         * its exit-request check.
++         */
++        TCGLabel *changed = gen_new_label();
++        TCGv t = tcg_temp_new();
++
++        gen_save_cpu_state(ctx, false);
++        tcg_gen_andi_i32(t, cpu_fpscr, TB_FLAG_FPSCR_MASK);
++        tcg_gen_brcondi_i32(TCG_COND_NE, t,
++                            ctx->tbflags & TB_FLAG_FPSCR_MASK, changed);
++        gen_goto_tb(ctx, 0, ctx->base.pc_next);
++        gen_set_label(changed);
++        tcg_gen_movi_i32(cpu_pc, ctx->base.pc_next);
++        cdj_gen_exit_kind(CDJ_EXIT_FPSCR);
++        tcg_gen_lookup_and_goto_ptr();
++        break;
++    }
+     case DISAS_NEXT:
+     case DISAS_TOO_MANY:
+         gen_save_cpu_state(ctx, false);

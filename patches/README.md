@@ -10,6 +10,7 @@ licence of each.
 | `qemu-sh-intc-priority-imask.patch` | QEMU 11.x | `scripts/build-qemu-sh4.sh` |
 | `qemu-sh-intc-priority-order.patch` | QEMU 11.x, after the IMASK patch | `scripts/build-qemu-sh4.sh` |
 | `qemu-sh-tmu-stop-reset.patch` | QEMU 11.x | `scripts/build-qemu-sh4.sh` |
+| `qemu-sh4-tcg-fast-paths.patch` | QEMU 11.x, after the three above | `scripts/build-qemu-sh4.sh` |
 | `01-gdb-17.2-bfin-parallel-dsp32alu.patch` | GDB 17.2 | `scripts/build-bfin-sim.sh` |
 | `02-gdb-17.2-bfin-cdj2000-board.patch` | GDB 17.2 | `scripts/build-bfin-sim.sh` |
 
@@ -125,6 +126,36 @@ the tick outranks the prologue's own `IMASK = 10`, re-enters it, and the guest
 resets after ~2 s; at 10, 8 and 4 the guest runs, and 8 is the level the
 firmware itself programs. The stall happens at every level in the working range,
 because the decline itself — not which level caused it — is what wedges the CPU.
+
+---
+
+## `qemu-sh4-tcg-fast-paths.patch` — SH-4 MAIN translation speed
+
+Adapted from cdj-nxs2-qemu by Stijn Jacobs
+(https://github.com/Stijn-Jacobs/cdj-nxs2-qemu, `patches/accel_tcg_*`,
+`target_sh4_translate.c.patch`), used with permission and rebased from QEMU
+9.1 to 11.x. Every path is exact by construction: no TB boundary moves, so
+interrupts and icount see the same instructions at the same points. Each is on
+by default and off with `NAME=0` in QEMU's environment.
+
+| knob | what |
+|---|---|
+| `CDJ_SMC_FASTREJECT` | a store into a page that holds code first checks that one page under its own lock; when no TB overlaps the written bytes it skips the `page_collection` (g_malloc + QTree + walk) that would have invalidated nothing (`accel/tcg/tb-maint.c`) |
+| `CDJ_TB_CALLPRED` | `jsr`/`jmp @Rn` whose `Rn` came from a `mov.l @(disp,PC)` in the same TB compares the run-time target with that literal and chains directly when equal |
+| `CDJ_TB_XPAGE` | `goto_tb` across guest pages for privileged code while `MMUCR.AT` is clear (every address below P4 then has a fixed mapping); writing `AT` queues a full TB flush (board CCN in `cdj2000_main.c`, and `sh7750.c`) |
+| `CDJ_TB_FPSCR` | `LDS FPSCR` chains to the next instruction when PR/SZ/FR are unchanged instead of returning to the cpu loop |
+| `CDJ_JCPROF=1` | off by default: counts TB lookups per exit kind (rts, call, jmp, xpage, fpscr, stop, prediction miss) and jump-cache hit/empty/conflict/flags, plus the store-to-code counts; printed to stderr every 2^26 lookups and at exit |
+
+Measured on stock NXS MAIN with the behavioural DSP (profile and throughput in
+[docs/SH4_TCG_FAST_PATHS.md](../docs/SH4_TCG_FAST_PATHS.md)):
+`CDJ_JCPROF` showed 99.6 % jump-cache hits (so the flat-hash `CDJ_JC_HASH` was
+not ported) and lookups split evenly between `jsr` and `rts`; the store path
+saw 8.5 M stores into code pages in a 27 s run and not one overlapped a TB.
+`cpu_io_recompile` was under 1 % of the vCPU thread, so `CDJ_IOSPLIT` was not
+ported either. A `rts` predictor (guess the PR the TB was translated with) was
+tried and dropped: MAIN's hot `strlen` (`0x04388e48`) and `strncmp`
+(`0x04388500`) are first translated under boot-time callers and mispredicted
+342 M times.
 
 ---
 

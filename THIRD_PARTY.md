@@ -37,12 +37,18 @@ device modelling that only makes sense for this player.
 | what | `qemu-system-sh4`, version 11.x or newer |
 | where from | `https://gitlab.com/qemu-project/qemu.git`, cloned by you; `scripts/build-qemu-sh4.sh` builds it |
 | licence | GPL-2.0-only for the emulator as a whole |
-| our changes | `patches/qemu-sh-intc-priority-imask.patch` |
+| our changes | `patches/qemu-sh-intc-priority-imask.patch`, `qemu-sh-intc-priority-order.patch`, `qemu-sh-tmu-stop-reset.patch`, `qemu-sh4-tcg-fast-paths.patch` |
 
 That patch corrects four omissions in QEMU's SH-4 interrupt path
 (`hw/intc/sh_intc.c`, `target/sh4/translate.c`); `patches/README.md` explains
 each one and what it costs to leave it out. Being derivative of QEMU, **it is
 GPL-2.0**.
+
+`qemu-sh4-tcg-fast-paths.patch` (SH-4 TB-exit fast paths, the store-to-code
+fast reject and the jump-cache profiler) is adapted from
+[cdj-nxs2-qemu](https://github.com/Stijn-Jacobs/cdj-nxs2-qemu) by Stijn
+Jacobs, GPL-2.0-or-later, used with the author's permission; the patched files
+carry a credit line. It is GPL-2.0 like the rest of the QEMU patches.
 
 The board model in `emulator/qemu/` is our own code, not a patch. The build
 script copies it into a QEMU checkout and wires it into meson and Kconfig
