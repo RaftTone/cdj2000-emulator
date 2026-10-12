@@ -444,12 +444,40 @@ static void init_cpu(CdjC674x *cpu, System *s, uint32_t a10, uint32_t b10)
     cpu->cycle_opaque = s;
 }
 
+/* same() compares whole structures, and padding is not state: GCC leaves the
+ * bytes after CdjC674xLoad.sign_extend as the stack had them, so two runs in
+ * step differed there (MinGW GCC 16: loads[1] + 33..35).  Rewrite the queue
+ * elements that have padding member by member over zeroes. */
+static void zero_padding(CdjC674x *c)
+{
+    for (unsigned i = 0; i < sizeof c->loads / sizeof c->loads[0]; ++i) {
+        CdjC674xLoad v = c->loads[i], *d = &c->loads[i];
+        memset(d, 0, sizeof *d);
+        d->due = v.due; d->value = v.value; d->address = v.address;
+        d->bank = v.bank; d->dst = v.dst; d->size = v.size;
+        d->sign_extend = v.sign_extend;
+    }
+    for (unsigned i = 0; i < sizeof c->branch_queue / sizeof c->branch_queue[0]; ++i) {
+        uint64_t due = c->branch_queue[i].due;
+        uint32_t target = c->branch_queue[i].target;
+        memset(&c->branch_queue[i], 0, sizeof c->branch_queue[i]);
+        c->branch_queue[i].due = due; c->branch_queue[i].target = target;
+    }
+    for (unsigned i = 0; i < sizeof c->loop_instructions / sizeof c->loop_instructions[0]; ++i) {
+        CdjC674xInstruction v = c->loop_instructions[i], *d = &c->loop_instructions[i];
+        memset(d, 0, sizeof *d);
+        d->word = v.word; d->pc = v.pc; d->header = v.header; d->compact = v.compact;
+    }
+}
+
 static void same(const CdjC674x *a, const System *sa, const CdjC674x *b,
                  const System *sb, unsigned seed, unsigned step)
 {
     if (count_sys) tick_flush();
     CdjC674x x = *a, y = *b;
     x.cycle_opaque = y.cycle_opaque = NULL;
+    zero_padding(&x);
+    zero_padding(&y);
     bool fault = a->fault != b->fault ||
                  (a->fault && strcmp(a->fault, b->fault));
     x.fault = y.fault = NULL;
