@@ -525,6 +525,14 @@ static bool nxs_pcm_word(NxsHpi *s, unsigned slot, uint32_t word)
         return false;
     ++s->pcm_frames;
     s->pcm_nonzero_frames += (s->pcm_left != 0 || sample != 0);
+    /* Once a second of audio the header is brought up to date: the shutdown
+     * notifier never runs in a QEMU that is killed, which is how every run
+     * ends on Windows (the launcher's terminate()), and the file was then
+     * left with a data size of 0 and without its unflushed tail. */
+    if (s->pcm_frames % NXS_AUDIO_RATE == 0 &&
+        (!nxs_pcm_header(s->pcm_wav, (uint32_t)s->pcm_frames) ||
+         fseek(s->pcm_wav, 0, SEEK_END) != 0 || fflush(s->pcm_wav) != 0))
+        return false;
     return true;
 }
 
