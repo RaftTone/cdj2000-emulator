@@ -10339,7 +10339,7 @@ static unsigned jk_bulk(CdjC674x *cpu, JitLoop *l, const JitKernel *k,
     /* The loop condition register must not be one the kernel changes. */
     unsigned pb = cpu->loop_pred_bank, pr = cpu->loop_pred_reg;
     if ((pb == lo->bank && pr == lo->b) || (pb == so->bank && pr == so->b) ||
-        (pb == lo->side && (pr == lo->dst || pr == lo->dst + 1)))
+        (pb == lo->side && (pr == lo->dst || pr == lo->dst + 1u)))
         return 0;
     const uint64_t c0 = loop->cycle, K = (uint64_t)periods * ii;
     const int64_t s = 8;
@@ -10677,10 +10677,13 @@ static const AotNode *aot_node_of(const CdjC674xCacheEntry *e,
         if (n->outcome == v->outcome && n->loads == s->loads &&
             n->stores == s->stores && n->branches == s->branches &&
             !memcmp(n->branch_rd, s->branch_rd, s->branches) &&
-            (!s->loads ||
-             !memcmp(n->load, s->load, s->loads * sizeof(s->load[0]))) &&
-            (!s->stores ||
-             !memcmp(n->store, s->store, s->stores * sizeof(s->store[0]))))
+            /* a node without a table matches nothing: the fallback
+             * aot_nodes[1] of a build with no AOT file has none, and GCC
+             * rejects memcmp on its constant NULL (-Wnonnull) */
+            (!s->loads || (n->load &&
+             !memcmp(n->load, s->load, s->loads * sizeof(s->load[0])))) &&
+            (!s->stores || (n->store &&
+             !memcmp(n->store, s->store, s->stores * sizeof(s->store[0])))))
             return n;
     }
     return NULL;
