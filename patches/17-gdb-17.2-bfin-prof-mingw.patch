@@ -1,0 +1,72 @@
+--- a/sim/bfin/interp.c
++++ b/sim/bfin/interp.c
+@@ -1129,6 +1129,50 @@
+   return 1;
+ }
+ 
++/* The frame lines are collected while the window is open and appended to
++   the profile when it closes.  POSIX collects them in a memory stream;
++   MinGW has no open_memstream, so there they go to a file beside the
++   profile and are read back.  */
++#ifdef _WIN32
++static FILE *
++bfin_prof_frames_open (void)
++{
++  char path[4096];
++
++  snprintf (path, sizeof (path), "%s.frames", bfin_prof.path);
++  return fopen (path, "w+b");
++}
++
++static void
++bfin_prof_frames_close (void)
++{
++  char path[4096];
++  long len = ftell (bfin_prof.frames);
++
++  bfin_prof.frames_len = 0;
++  bfin_prof.frames_buf = malloc (len > 0 ? len : 1);
++  rewind (bfin_prof.frames);
++  if (bfin_prof.frames_buf && len > 0)
++    bfin_prof.frames_len = fread (bfin_prof.frames_buf, 1, len,
++				  bfin_prof.frames);
++  fclose (bfin_prof.frames);
++  snprintf (path, sizeof (path), "%s.frames", bfin_prof.path);
++  remove (path);
++}
++#else
++static FILE *
++bfin_prof_frames_open (void)
++{
++  return open_memstream (&bfin_prof.frames_buf, &bfin_prof.frames_len);
++}
++
++static void
++bfin_prof_frames_close (void)
++{
++  fclose (bfin_prof.frames);
++}
++#endif
++
+ static void
+ bfin_prof_open (SIM_DESC sd)
+ {
+@@ -1137,8 +1181,7 @@
+   bfin_prof.slot = calloc (BFIN_PROF_SLOTS, sizeof (*bfin_prof.slot));
+   snprintf (stk_path, sizeof (stk_path), "%s.stk", bfin_prof.path);
+   bfin_prof.stk = fopen (stk_path, "wb");
+-  bfin_prof.frames = open_memstream (&bfin_prof.frames_buf,
+-				     &bfin_prof.frames_len);
++  bfin_prof.frames = bfin_prof_frames_open ();
+   if (!bfin_prof.slot || !bfin_prof.stk || !bfin_prof.frames)
+     {
+       fprintf (stderr, "bfin: BFIN_PROF cannot allocate or open %s\n",
+@@ -1167,7 +1210,7 @@
+   bfin_prof.state = 3;
+   bfin_prof_stores = 0;
+   fclose (bfin_prof.stk);
+-  fclose (bfin_prof.frames);
++  bfin_prof_frames_close ();
+   out = fopen (bfin_prof.path, "w");
+   if (!out)
+     return;

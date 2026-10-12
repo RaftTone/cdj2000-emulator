@@ -586,3 +586,11 @@ still have it.
 15. `15-gdb-17.2-gui-frame-archive.patch`: `BFIN_GUI_ARCHIVE_DIR=DIR` keeps every frame the GUI publishes as
     `DIR/f<n>-t<guest seconds>.ppm` while `DIR/ARM` exists (a glitch of a few video frames is invisible to a poller of the
     single output file). Off by default. `boot_vm --dense-frames` drives it (see RUNNING.md, "Dense frames").
+
+16. `15-gdb-17.2-parent-watch.patch`, `16-gdb-17.2-bfin-prof.patch`, `32-gdb-17.2-native-partial-dma.patch` and
+    `33-gdb-17.2-native-fifo-dma.patch`: the launcher's orphan watchdog (the pipe in `CDJ_PARENT_FD`; POSIX only), the
+    `BFIN_PROF` guest profiler, and native partial and FIFO DMA for short DLNK bursts (`BFIN_LINK_NATIVE_PARTIAL_DMA`).
+
+17. `17-gdb-17.2-bfin-prof-mingw.patch`: the profiler collects its frame lines in a memory stream, and MinGW has no
+    `open_memstream`, so `sim/bfin/interp.c` did not compile on Windows once patch 16 was in. There the lines go to
+    `<profile>.frames` beside the profile and are read back when the window closes. POSIX is unchanged.
