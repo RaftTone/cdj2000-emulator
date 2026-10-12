@@ -75,11 +75,12 @@ a player. It is not a way to use a CDJ-2000 on a desktop.
   ENTER contact; short clicks and long holds have different meanings.
 * Switching sources after boot is unreliable (six of eight); the card given at
   launch is reliable. The USB stick as a music source has not been tried.
-* The default GUI simulator (GNU sim, `--gui-sim gdb`) is about thirty times
-  slower than the chip on real work, and the live link has intermittent stalls
+* The NXS GUI board runs by default on a fast vendored Blackfin core
+  (`bin/cdj-gui-run`, at GNU sim parity; see BUILD.md). The reference GNU sim
+  (`--gui-sim gdb`, and the original CDJ-2000 profile) is about thirty times
+  slower than the chip on real work, and its live link has intermittent stalls
   and, rarely, a double fault. Run it again; the fault line is in the
-  simulator's log. `--gui-sim fast` runs the GUI board on a faster vendored
-  Blackfin core; see BUILD.md.
+  simulator's log.
 * Pro DJ Link between players is limited to `tools/cdj_main/link_hub.py`
   (emulated decks, and on macOS a real interface with `--bridge`).
 
@@ -109,8 +110,13 @@ you give wins. Ports are picked automatically (the first free block of 5980,
 5990, ...), the run directory is timestamped, and DSP capture is fault-only;
 pass `--no-lightweight` when you need every checkpoint and the event
 transcript for replay. `python -m tools.cdj_main.nxs_vm --help` groups the
-remaining options. `--dsp-thread` (the DSP on its own host thread) and
-`--gui-sim fast` are faster opt-ins that will become defaults once qualified.
+remaining options. By default the GUI board runs on the fast Blackfin core
+(`--gui-sim gdb` selects GNU sim) and the DSP on its own host thread.
+`--no-dsp-thread` keeps the deterministic synchronous DSP, and nxs_vm falls
+back to it by itself for `--no-lightweight`, `--cosim`, `--dsp-legacy-budget`,
+`--capture-dsp-fault-history`, the McASP clock experiments, `--debug-paused`
+and `--dsp-model`; `run.json` records which was used (`dsp_thread`,
+`dsp_thread_choice`).
 
 This creates a timestamped run under `runs/`, prints follow-up commands, and
 records the firmware and emulator hashes. The deck shows run progress below

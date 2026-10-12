@@ -45,7 +45,8 @@ def deck_arguments(forwarded: Sequence[str], environ=os.environ) -> list[str]:
     """nxs_vm arguments for an interactive deck: the viewer, QMP/GDB, an hour,
     playback DSP, media (CDJ_USB, else a generated test track) pressed once
     the media manager is ready.  Ports and the run directory are already
-    automatic in nxs_vm, and so is fault-only DSP capture."""
+    automatic in nxs_vm, and so are fault-only DSP capture, the DSP thread
+    and the fast GUI core."""
 
     given = {item.split("=", 1)[0] for item in forwarded}
     extra = []
@@ -64,8 +65,6 @@ def deck_arguments(forwarded: Sequence[str], environ=os.environ) -> list[str]:
     if (given & {"--sd", "--usb", "--test-track"}
             and not given & {*SOURCE_OPTIONS, "--source-key-when-ready"}):
         extra.append("--source-key-when-ready")
-    # TODO(default): add --dsp-thread once the dsp-thread regression bisect ends,
-    # and --gui-sim fast (the fast core reached gdb parity; flip with nxs_vm).
     return [*extra, *forwarded]
 
 

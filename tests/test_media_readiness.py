@@ -87,6 +87,35 @@ def test_observe_run_times_out_without_mutating_guest(tmp_path, monkeypatch):
     assert client.command.call_count == 7
 
 
+def test_observe_run_waits_for_a_starting_run(tmp_path, monkeypatch):
+    import json
+    from unittest.mock import MagicMock
+    from tools.cdj_main import media_readiness as media
+    client = MagicMock()
+    client.__enter__.return_value = client
+    client.command.side_effect = lambda name, arguments: (
+        f"{int(arguments['command-line'].split()[-1], 16):08x}: 0x00000000\n")
+    monkeypatch.setattr(media, 'Qmp', lambda *a, **kw: client)
+    now = [0.0]
+    def sleep(delay):
+        now[0] += delay
+        (tmp_path / 'run.json').write_text(json.dumps({
+            'profile': 'experimental NXS', 'endpoints': {'qmp': 'qmp.sock'}}))
+    monkeypatch.setattr(media.time, 'monotonic', lambda: now[0])
+    monkeypatch.setattr(media.time, 'sleep', sleep)
+    assert not media.observe_run(tmp_path, timeout=5, poll=1)['ok']
+    assert client.command.called
+    (tmp_path / 'run.json').unlink()
+    now[0] = 0
+    monkeypatch.setattr(media.time, 'sleep', lambda delay: now.__setitem__(0, now[0] + delay))
+    try:
+        media.observe_run(tmp_path, timeout=2, poll=1)
+    except FileNotFoundError:
+        pass
+    else:
+        raise AssertionError('a run that never starts must still fail')
+
+
 def test_observe_run_source_key_waits_past_mount_gate(tmp_path, monkeypatch):
     import json
     from unittest.mock import MagicMock

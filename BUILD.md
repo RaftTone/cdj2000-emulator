@@ -385,7 +385,8 @@ wall-clock base (`nxs_vm`'s default) is capped at real time; this runs at
 
 ### Linked to MAIN -- `nxs_vm --gui-sim fast`
 
-`nxs_vm --gui-sim fast` (default `gdb` until qualified) runs this in place of
+`nxs_vm --gui-sim fast` (the default since it reached GNU sim parity;
+`--gui-sim gdb` keeps the reference) runs this in place of
 `bin/cdj-run` on the same inputs: the `--gui-firmware` ELF is loaded as
 `bin/cdj-run` loads it (PT_LOAD segments, entry), the flash image is mapped
 beside it, and the `BFIN_*` environment nxs_vm builds is read unchanged.

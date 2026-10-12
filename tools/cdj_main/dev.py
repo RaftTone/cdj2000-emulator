@@ -697,6 +697,11 @@ def wait_playback(run: Path, timeout: float = 120, poll: float = 0.25,
     if isinstance(min_frames, bool) or not isinstance(min_frames, int) or min_frames <= 0:
         raise ValueError("min-frames must be a positive integer")
     _require_running(run)
+    manifest = _manifest(run)
+    if manifest.get("dsp_audio_clock") == "stopped-clock" and not manifest.get("dsp_model"):
+        # The real DSP only consumes PCM on McASP slots, so the counter cannot move.
+        raise ValueError("run uses the stopped DSP audio clock, so the counter cannot advance; "
+                         "relaunch with --functional-dsp-audio (or --dsp-model)")
     observer = LinkObserver()
     deadline = time.monotonic() + timeout
     previous = None

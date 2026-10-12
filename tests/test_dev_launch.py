@@ -76,7 +76,7 @@ def test_gui_firmware_override_launches_with_generated_board_and_records_it(
     monkeypatch.setattr(nxs_vm, 'ROOT', tmp_path)
     monkeypatch.setattr(nxs_vm, 'occupied_local_ports', lambda base, debug: [])
     monkeypatch.setattr(nxs_vm.sys, 'argv', [
-        'nxs_vm', 'run', '--seconds', '1', '--lightweight',
+        'nxs_vm', 'run', '--seconds', '1', '--lightweight', '--gui-sim', 'gdb',
         '--gui-firmware', str(gui),
         *([] if idle_skip else ['--no-dsp-idle-skip'])])
     sleeps = []
@@ -248,7 +248,7 @@ def test_debug_chardev_stays_unix_on_posix_and_tcp_on_windows(tmp_path, monkeypa
     monkeypatch.setattr(nxs_vm, 'ROOT', tmp_path)
     monkeypatch.setattr(nxs_vm, 'occupied_local_ports', lambda base, debug: [])
     monkeypatch.setattr(nxs_vm.sys, 'argv', [
-        'nxs_vm', 'run', '--seconds', '1', '--lightweight', '--debug',
+        'nxs_vm', 'run', '--seconds', '1', '--lightweight', '--gui-sim', 'gdb', '--debug',
         '--qemu-sync-profile'])
     commands = []
 
@@ -288,3 +288,15 @@ def test_port_defaults_to_first_free_block(monkeypatch):
     assert nxs_vm.free_port_block(True, False) == 6000
     monkeypatch.setattr(nxs_vm, 'occupied_local_ports', lambda base, debug: [base])
     assert nxs_vm.free_port_block(True, False) is None
+
+
+def test_dsp_thread_is_default_unless_a_mode_needs_the_synchronous_dsp():
+    from types import SimpleNamespace
+    base = dict(dsp_model=False, lightweight=True, cosim=False, dsp_legacy_budget=None,
+                capture_dsp_fault_history=False, virtual_mcasp_clock=False,
+                dsp_cycle_mcasp_clock=False, render_dsp_audio_wav=False,
+                debug_paused=False)
+    assert nxs_vm.synchronous_dsp_reason(SimpleNamespace(**base)) is None
+    for name, value in (('lightweight', False), ('cosim', True), ('dsp_model', True),
+                        ('dsp_legacy_budget', 65536), ('capture_dsp_fault_history', True)):
+        assert nxs_vm.synchronous_dsp_reason(SimpleNamespace(**{**base, name: value}))

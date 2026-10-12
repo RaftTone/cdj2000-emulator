@@ -118,21 +118,30 @@ def source_key_ready(snapshot: dict) -> bool:
 
 def observe_run(run: Path, timeout: float = 0, poll: float = 0.25,
                 source: str = "sd", for_source_key: bool = False) -> dict:
-    manifest = json.loads((run / "run.json").read_text())
-    if not isinstance(manifest, dict) or manifest.get("profile") != "experimental NXS":
-        raise ValueError("run manifest is not an experimental NXS profile")
-    endpoint = manifest.get("endpoints", {}).get("qmp")
-    if not isinstance(endpoint, str) or not endpoint:
-        raise ValueError("run has no QMP endpoint; launch with --debug")
-    from tools.cdj_main.qmp import parse_endpoint
-    endpoint = parse_endpoint(endpoint, relative_to=run)
     if not math.isfinite(timeout) or timeout < 0 or timeout > 3600:
         raise ValueError("timeout must be 0..3600 seconds")
     if not math.isfinite(poll) or poll <= 0 or poll > 60:
         raise ValueError("poll must be >0 and <=60 seconds")
     # One-shot sampling still has a finite total I/O budget.
     deadline = time.monotonic() + (timeout if timeout else 3)
-    with Qmp(endpoint, timeout=min(3, timeout or 3)) as qmp:
+    from tools.cdj_main.qmp import parse_endpoint
+    # A run that is still starting has not written its manifest or opened its
+    # QMP socket yet; wait for both within the same deadline.
+    while True:
+        try:
+            manifest = json.loads((run / "run.json").read_text())
+            if not isinstance(manifest, dict) or manifest.get("profile") != "experimental NXS":
+                raise ValueError("run manifest is not an experimental NXS profile")
+            endpoint = manifest.get("endpoints", {}).get("qmp")
+            if not isinstance(endpoint, str) or not endpoint:
+                raise ValueError("run has no QMP endpoint; launch with --debug")
+            qmp = Qmp(parse_endpoint(endpoint, relative_to=run), timeout=min(3, timeout or 3))
+            break
+        except (FileNotFoundError, ConnectionRefusedError):
+            if time.monotonic() + poll >= deadline:
+                raise
+            time.sleep(poll)
+    with qmp:
         def read_word(address):
             remaining = deadline - time.monotonic()
             if remaining <= 0:

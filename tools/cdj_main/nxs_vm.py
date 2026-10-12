@@ -309,6 +309,28 @@ PORT_STRIDE = 10
 PORT_TRIES = 20
 
 
+def synchronous_dsp_reason(args) -> str | None:
+    """Why this run keeps the DSP inside MAIN's HPI write, or None for the thread.
+
+    The thread is the default because it is faster; anything that needs the
+    deterministic synchronous DSP (checkpoints, replay, co-simulation, an
+    explicit legacy budget, the offline clock experiments) or that the
+    thread refuses keeps the old mode without being asked."""
+    for wanted, reason in (
+            (args.dsp_model, '--dsp-model executes no DSP'),
+            (not args.lightweight, '--no-lightweight wants every checkpoint'),
+            (args.cosim, '--cosim runs both boards in one guest time'),
+            (args.dsp_legacy_budget is not None, '--dsp-legacy-budget is a synchronous knob'),
+            (args.capture_dsp_fault_history, '--capture-dsp-fault-history needs fault checkpoints'),
+            (args.virtual_mcasp_clock, '--virtual-mcasp-clock is refused by the thread'),
+            (args.dsp_cycle_mcasp_clock, '--dsp-cycle-mcasp-clock is a deterministic experiment'),
+            (args.render_dsp_audio_wav, '--render-dsp-audio-wav is a deterministic experiment'),
+            (args.debug_paused, '--debug-paused steps MAIN from reset')):
+        if wanted:
+            return reason
+    return None
+
+
 def removed_option(argv: list[str]) -> str | None:
     """The first removed option on a command line, with its replacement."""
     for item in argv:
@@ -738,13 +760,10 @@ def main():
                         help='--cosim link latency and lookahead in microseconds (100)')
     diag.add_argument('--cosim-shift', type=int, default=2,
                         help='--cosim: MAIN runs 2^N ns per instruction (-icount shift=N)')
-    # TODO(default): flip to 'fast' (here and in launch.deck_arguments) once
-    # the regression bisect, whose comparison runs use today's defaults, ends.
-    diag.add_argument('--gui-sim', choices=('gdb', 'fast'), default='gdb',
-                        help='GUI board simulator: gdb, bin/cdj-run (default until the '
-                             'fast one is qualified), or fast, bin/cdj-gui-run on the '
-                             'vendored Blackfin core (same firmware inputs, link and '
-                             'captures; no gdb probes)')
+    diag.add_argument('--gui-sim', choices=('gdb', 'fast'), default='fast',
+                        help='GUI board simulator: fast (default), bin/cdj-gui-run on the '
+                             'vendored Blackfin core, at GNU sim parity; or gdb, '
+                             'bin/cdj-run, the reference, for gdb probes and A/B checks')
     diag.add_argument('--gui-env', action='append', default=[], metavar='NAME=VALUE',
                         help='extra GUI simulator environment variable (e.g. BFIN_PROF=...); may be repeated')
     diag.add_argument('--gui-flash-boot', type=Path, metavar='FLASH',
@@ -761,14 +780,15 @@ def main():
                         help='behavioural DSP: answer MAIN without executing the C674x '
                              '(fast; real-time transport position, no audio, so not audio '
                              'or DSP evidence)')
-    # TODO(default): make --dsp-thread the default for interactive runs once
-    # the dsp-thread regression bisect finishes, keeping the
-    # synchronous scheduler automatically whenever checkpoints are wanted
-    # (--no-lightweight) or a replay is being produced.
-    dsp.add_argument('--dsp-thread', action='store_true',
+    dsp.add_argument('--dsp-thread', action=argparse.BooleanOptionalAction, default=None,
                         help='run the real C674x on its own host thread, paced to at most one '
                              'quantum ahead of QEMU virtual time, instead of inside MAIN\'s HPI '
-                             'write (no checkpoints; the event transcript is diagnostic, not replay evidence)')
+                             'write (no checkpoints; the event transcript is diagnostic, not '
+                             'replay evidence). Default: on, unless an option needs the '
+                             'deterministic synchronous DSP (--no-lightweight, --cosim, '
+                             '--dsp-legacy-budget, --capture-dsp-fault-history, the '
+                             'McASP clock experiments, --debug-paused, --dsp-model); '
+                             '--no-dsp-thread forces synchronous')
     dsp.add_argument('--dsp-thread-access-packets', type=int, default=256,
                         help='--dsp-thread: DSP packets MAIN waits for per HPI access '
                              '(0..1000000, default 256)')
@@ -919,6 +939,11 @@ def main():
         parser.error('--dsp-model executes no DSP code; drop the functional DSP options')
     if not 0 <= args.dsp_thread_access_packets <= 1000000:
         parser.error('--dsp-thread-access-packets must be 0..1000000')
+    dsp_thread_choice = 'explicit' if args.dsp_thread is not None else None
+    if args.dsp_thread is None:
+        blocker = synchronous_dsp_reason(args)
+        args.dsp_thread = blocker is None
+        dsp_thread_choice = 'default' if blocker is None else f'synchronous: {blocker}'
     if args.dsp_thread and (args.dsp_model or args.virtual_mcasp_clock):
         parser.error('--dsp-thread runs the real DSP with the legacy scheduler; '
                      'drop --dsp-model/--virtual-mcasp-clock')
@@ -1331,6 +1356,7 @@ def main():
         dsp_scheduler_mode=dsp_scheduler_mode,
         dsp_model=args.dsp_model,
         dsp_thread=args.dsp_thread,
+        dsp_thread_choice=dsp_thread_choice,
         dsp_jit=args.dsp_jit,
         dsp_aot=args.dsp_aot,
         dsp_audio_clock=('virtual-clock-batch' if args.virtual_mcasp_clock else

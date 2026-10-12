@@ -14,7 +14,9 @@ python -m tools.cdj_main.launch deck
 
 (`deck` expands to `nxs_vm --ui --debug --seconds 3600 --functional-dsp-audio
 --source-key-when-ready --test-track`, or `--usb $CDJ_USB` when that is set;
-options you add override it.)
+options you add override it. The GUI board runs on the fast Blackfin core
+and the DSP on its own thread unless an option needs the synchronous DSP;
+see README.md.)
 
 The launcher chooses a fresh timestamped directory under `runs/` and prints its
 path and follow-up commands. You can also give an explicit new path as the first

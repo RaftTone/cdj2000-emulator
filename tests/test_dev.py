@@ -362,6 +362,21 @@ def test_wait_playback_refuses_stopped_run_and_invalid_deadlines(tmp_path, capsy
     assert dev.main([str(run), "wait-playback", "--poll", "0"]) == 2
 
 
+def test_wait_playback_refuses_stopped_audio_clock(tmp_path, capsys):
+    run = _run(tmp_path)
+    manifest = json.loads((run / "run.json").read_text())
+    manifest["dsp_audio_clock"] = "stopped-clock"
+    (run / "run.json").write_text(json.dumps(manifest))
+    assert dev.main([str(run), "wait-playback"]) == 2
+    assert "--functional-dsp-audio" in capsys.readouterr().err
+    manifest["dsp_model"] = True
+    (run / "run.json").write_text(json.dumps(manifest))
+    observer = mock.Mock()
+    observer.poll.return_value = _transport_snapshot(10, 1500)
+    with mock.patch.object(dev, "LinkObserver", return_value=observer):
+        assert dev.wait_playback(run, timeout=.01, poll=.002) == 1
+
+
 def test_wait_browser_does_not_match_partial_list_or_stopped_run(tmp_path, capsys):
     run = _run(tmp_path)
     body = [0x10, 0, 1, 0, 0, 0, 0, 0, 2, 0x55, 0, 4]

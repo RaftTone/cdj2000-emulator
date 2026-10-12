@@ -449,7 +449,7 @@ operands, 0 disagreements; the only fetch rejections are 818 blocks of
 0xffffffff fill that objdump also calls undefined. Operands of in-place
 compact forms and of 32-bit arms are outside this check.
 
-## DSP on its own thread (`nxs_vm --dsp-thread`, opt-in, 2026-10-05)
+## DSP on its own thread (`nxs_vm --dsp-thread`, 2026-10-05; default since 2026-10-06)
 
 `CDJ_NXS_DSP_THREAD=1` runs the C674x on its own host thread instead of inside
 MAIN's HPI MMIO write (pattern after Stijn Jacobs' cdj-nxs2-qemu; see
