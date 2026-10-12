@@ -391,9 +391,12 @@ static unsigned instruction_unit(const CdjC674xInstruction *insn)
     unsigned side = insn->compact ? w & 1 : (w >> 1) & 1;
     if (!insn->compact) {
         if ((w & 0x0c) == 12) return 32u; /* Long offsets always use .D2. */
+        /* Figures C-4, C-6 and C-7 (printed page 724): load/store unit is
+         * the y bit; s only names the data register file (Table 3-2), so
+         * LDW .D2T1 is a .D2 operation for SPMASK. */
+        if ((w & 0x0c) == 4) return 16u << ((w >> 7) & 1);
         if ((w & 0x1c) == 0x18) return 1u << side;
-        if ((w & 0x0c) == 4 || (w & 0x0c) == 12 ||
-            (w & 0x7c) == 0x40 || (w & 0xc3c) == 0x830) return 16u << side;
+        if ((w & 0x7c) == 0x40 || (w & 0xc3c) == 0x830) return 16u << side;
         if ((w & 0x3c) == 0x20 || (w & 0x3c) == 0x28 ||
             (w & 0x3c) == 8 || (w & 0x7c) == 0x10 ||
             (w & 0x7c) == 0x50 || (w & 0xc3c) == 0xc30) return 4u << side;
@@ -495,15 +498,31 @@ static bool loop_retained_schedule_complete(const CdjC674x *cpu)
     return true;
 }
 
-/* Side-effect-free RAM reads; nonaligned words may span two bus words. */
-static bool read_scalar(CdjC674xRead read, void *opaque, uint32_t address,
-                        unsigned size, uint64_t *value)
+/* Data loads from the reserved gap above L2 RAM complete with zero; see
+ * cdj_c674x_set_data_gap in cdj_c674x.h.  Default on. */
+static bool data_gap = true;
+static uint64_t data_gap_reads;
+void cdj_c674x_set_data_gap(bool on) { data_gap = on; }
+uint64_t cdj_c674x_data_gap_reads(void) { return data_gap_reads; }
+
+/* Side-effect-free RAM reads; nonaligned words may span two bus words.
+ * `count` is set only for the read that completes a load (not for the
+ * issue-time mapping probes), so each gap word is counted once. */
+static bool read_scalar_counted(CdjC674xRead read, void *opaque,
+                                uint32_t address, unsigned size,
+                                uint64_t *value, bool count)
 {
     if ((uint64_t)address + size > UINT64_C(0x100000000)) return false;
     *value = 0;
     for (unsigned done = 0; done < size;) {
         uint32_t word, current = address + done;
-        if (!read(opaque, current & ~3u, &word)) return false;
+        if (!read(opaque, current & ~3u, &word)) {
+            if (!data_gap || (current & ~3u) < CDJ_C674X_DATA_GAP_BASE ||
+                (current & ~3u) >= CDJ_C674X_DATA_GAP_END)
+                return false;
+            word = 0;
+            if (count) ++data_gap_reads;
+        }
         unsigned lane = current & 3, n = 4 - lane;
         if (n > size - done) n = size - done;
         word >>= lane * 8;
@@ -516,19 +535,40 @@ static bool read_scalar(CdjC674xRead read, void *opaque, uint32_t address,
 
 /* High size byte retains issue-time circular width for nonaligned memory.
  * Delayed E3 transactions must not re-read a subsequently changed AMR. */
-static bool read_transfer(CdjC674xRead read, void *opaque, uint32_t address,
-                          unsigned encoded_size, uint64_t *value)
+static bool read_scalar(CdjC674xRead read, void *opaque, uint32_t address,
+                        unsigned size, uint64_t *value)
+{
+    return read_scalar_counted(read, opaque, address, size, value, false);
+}
+
+static bool read_transfer_counted(CdjC674xRead read, void *opaque,
+                                  uint32_t address, unsigned encoded_size,
+                                  uint64_t *value, bool count)
 {
     unsigned size = encoded_size & 255, width = encoded_size >> 8;
-    if (!width) return read_scalar(read, opaque, address, size, value);
+    if (!width) return read_scalar_counted(read, opaque, address, size, value, count);
     *value = 0;
     for (unsigned i = 0; i < size; ++i) {
         uint64_t byte;
-        if (!read_scalar(read, opaque, circular_address(address, address + i, width), 1, &byte))
+        if (!read_scalar_counted(read, opaque, circular_address(address, address + i, width), 1, &byte, count))
             return false;
         *value |= byte << (8 * i);
     }
     return true;
+}
+
+/* The read that completes a load: counts gap words. */
+static bool read_transfer(CdjC674xRead read, void *opaque, uint32_t address,
+                          unsigned encoded_size, uint64_t *value)
+{
+    return read_transfer_counted(read, opaque, address, encoded_size, value, true);
+}
+
+/* Issue-time mapping probe: does not count. */
+static bool read_transfer_probe(CdjC674xRead read, void *opaque, uint32_t address,
+                                unsigned encoded_size, uint64_t *value)
+{
+    return read_transfer_counted(read, opaque, address, encoded_size, value, false);
 }
 
 static bool write_transfer(CdjC674xWrite write, void *opaque, uint32_t address,
@@ -624,6 +664,14 @@ bool cdj_c674x_interrupt(CdjC674x *cpu, uint32_t pending)
      * one is live. False conditional branches do not yet have pipeline state.
      */
     if (cpu->branch_due || cpu->branch_count) return true;
+    /* The only idle SPLX state is the B IRP/NRP return window (7.7.3.2).
+     * Its next target packet starts SPLOOP; 5.4.2 forbids recognition in
+     * that packet. Do not take a pending interrupt between the interpreter's
+     * branch redirect and the return setup, losing the restart SPLX state.
+     * IFR was latched above and remains pending for a legal loop boundary.
+     */
+    if (!cpu->loop_active &&
+        (cpu->control[26] & CDJ_C674X_TSR_SPLX)) return true;
     if (cpu->loop_active) {
         /* Hardware may interrupt a reload in specific PC/branch states;
          * that restart path is outside this implementation. */
@@ -1089,7 +1137,7 @@ static bool arm_scalar_memory(CdjC674xArm *x)
         if (pair) store_value |= (uint64_t)x->cpu->r[x->side][x->dst + 1] << 32;
         if ((!nonaligned && (address & (size - 1))) ||
             (is_store ? !write_transfer(x->write, x->opaque, address, store_value, encoded_size, false)
-                      : !read_transfer(x->read, x->opaque, address, encoded_size, &dummy)))
+                      : !read_transfer_probe(x->read, x->opaque, address, encoded_size, &dummy)))
             return stop(x->cpu, x->pc, x->insn->word, "unaligned or unmapped scalar memory access");
         if (is_store) {
             if (x->out->store_count == 24) return stop(x->cpu, x->pc, x->insn->word, "store queue full");
@@ -2547,14 +2595,47 @@ static bool arm_approx(CdjC674xArm *x)
 }
 
 
-/* A 64-bit DP operand whose encoded register field names the EVEN register of
- * the pair.  Every instruction that reads src_l one cycle before src_h -
- * ADDDP, SUBDP, MPYDP, MPYSPDP and the DP compares - is encoded that way, as
- * read back from TI's assembler (ADDDP .L1 A5:A4,A7:A6,A9:A8 = 04188318h has
- * src1 = 4 and src2 = 6). */
-static uint64_t dp_pair(const CdjC674x *cpu, unsigned bank, unsigned reg)
+/* A register as an instruction reads it `delay` cycles after issue: the
+ * register file at that cycle, i.e. the current one plus every delayed result
+ * already queued that lands by then (the last due wins; a later queue slot
+ * wins a tie).  The DP instructions read the halves of a pair on different
+ * pipeline stages (SPRUFE8B Tables 4-15, 4-16, 4-19, 4-20: ADDDP, SUBDP and
+ * the compares read src_l on E1 and src_h on E2), and TI's code relies on
+ * it: __c6xabi_divf issues SUBDP on the cycle its MPYSP2DP source's low word
+ * lands, so the high word lands exactly on E2.  Reading both at issue saw the
+ * stale high word.  Results written in the cycles in between by instructions
+ * not yet issued are not visible at issue time and are not modelled. */
+static uint32_t reg_at(const CdjC674x *cpu, unsigned bank, unsigned reg,
+                       unsigned delay)
 {
-    return (uint64_t)cpu->r[bank][reg + 1] << 32 | cpu->r[bank][reg];
+    uint32_t value = cpu->r[bank][reg];
+    uint64_t best = 0;
+    bool found = false;
+    for (unsigned i = 0; i < cpu->load_count; ++i) {
+        const CdjC674xLoad *load = &cpu->loads[i];
+        unsigned count = queued_result_registers(load);
+        if (!count || load->bank != bank || load->due > cpu->cycles + delay ||
+            reg < load->dst || reg >= load->dst + count ||
+            (found && load->due < best))
+            continue;
+        best = load->due;
+        found = true;
+        value = (uint32_t)(load->value >> (32 * (reg - load->dst)));
+    }
+    return value;
+}
+
+/* A 64-bit DP operand whose encoded register field names the EVEN register of
+ * the pair (every instruction that reads src_l before src_h - ADDDP, SUBDP,
+ * MPYDP, MPYSPDP and the DP compares - is encoded that way, as read back from
+ * TI's assembler: ADDDP .L1 A5:A4,A7:A6,A9:A8 = 04188318h has src1 = 4 and
+ * src2 = 6), with its low half read lo cycles and its high half hi cycles
+ * after issue. */
+static uint64_t dp_pair_at(const CdjC674x *cpu, unsigned bank, unsigned reg,
+                           unsigned lo, unsigned hi)
+{
+    return (uint64_t)reg_at(cpu, bank, reg + 1, hi) << 32 |
+           reg_at(cpu, bank, reg, lo);
 }
 
 /* Queue one already-computed 32-bit delayed result with the same
@@ -2658,8 +2739,8 @@ static bool arm_cmpdp(CdjC674xArm *x)
     x->reg_write = false;
     if (x->enabled) {
         CdjC674xDpResult result = cdj_c674x_compare_dp(
-            dp_pair(x->cpu, x->side, x->a),
-            dp_pair(x->cpu, x->cross, x->b), relation);
+            dp_pair_at(x->cpu, x->side, x->a, 0, 1),
+            dp_pair_at(x->cpu, x->cross, x->b, 0, 1), relation);
         uint64_t due = x->cpu->cycles + 2;
         if (x->out->load_count + (result.status ? 2u : 1u) > 40)
             return stop(x->cpu, x->pc, x->insn->word,
@@ -2704,11 +2785,11 @@ static bool arm_addsubdp(CdjC674xArm *x)
                     "invalid double-precision result register pair");
     x->reg_write = false;
     if (x->enabled) {
-        uint64_t source1 = dp_pair(x->cpu, x->side, x->a);
-        uint64_t source2 = dp_pair(x->cpu, x->cross, x->b);
+        uint64_t source1 = dp_pair_at(x->cpu, x->side, x->a, 0, 1);
+        uint64_t source2 = dp_pair_at(x->cpu, x->cross, x->b, 0, 1);
         if (encoding == 0x3b8) {
-            source1 = dp_pair(x->cpu, x->cross, x->a);
-            source2 = dp_pair(x->cpu, x->side, x->b);
+            source1 = dp_pair_at(x->cpu, x->cross, x->a, 0, 1);
+            source2 = dp_pair_at(x->cpu, x->side, x->b, 0, 1);
         }
         unsigned rmode = (x->cpu->control[18] >>
                           ((x->side ? 16u : 0u) + 9)) & 3;
@@ -2750,9 +2831,12 @@ static bool arm_mpydp(CdjC674xArm *x)
                     "invalid double-precision result register pair");
     x->reg_write = false;
     if (x->enabled) {
-        uint64_t left = pair_src1 ? dp_pair(x->cpu, x->side, x->a)
+        /* Table 4-19 (MPYDP): src1_l and src2_l on E1, src2_h on E2, src1_h
+         * on E3 (each is read again later, the first read is taken).
+         * Table 4-20 (MPYSPDP): src1 and src2_l on E1, src2_h on E2. */
+        uint64_t left = pair_src1 ? dp_pair_at(x->cpu, x->side, x->a, 0, 2)
             : cdj_c674x_sp_operand_to_dp(x->cpu->r[x->side][x->a]);
-        uint64_t right = pair_src2 ? dp_pair(x->cpu, x->cross, x->b)
+        uint64_t right = pair_src2 ? dp_pair_at(x->cpu, x->cross, x->b, 0, 1)
             : cdj_c674x_sp_operand_to_dp(x->cpu->r[x->cross][x->b]);
         unsigned rmode = (x->cpu->control[20] >>
                           ((x->side ? 16u : 0u) + 9)) & 3;
@@ -2779,10 +2863,12 @@ static bool arm_dp_convert(CdjC674xArm *x)
      *
      * All three name the ODD register of the source pair, for the same
      * reason ABSDP does: "the operand is read in one cycle by using the src2
-     * port for the 32 MSBs and the src1 port for the 32 LSBs".  TI asm6x
-     * emits zero in the encoded src1 field even for nonzero pairs; older GNU
-     * tic6x puts the even register number there.  Both select b:b-1, so do
-     * not use the encoded a field to locate the low word. */
+     * port for the 32 MSBs and the src1 port for the 32 LSBs".  The TI
+     * cl6x 8.5 driver puts the even (low) register number in src1 (DPSP .L1
+     * A7:A6,A8 = 041CC138h has src1 = 6); standalone asm6x and older GNU
+     * tic6x leave it zero.  Both
+     * select b:b-1, so do not use the encoded a field to locate the low
+     * word, and the opcode mask must not constrain it. */
     unsigned encoding = x->w & 0xffc;
     if (!(x->b & 1))
         return stop(x->cpu, x->pc, x->insn->word,
@@ -3493,7 +3579,11 @@ static const CdjC674xArmEntry cdj_c674x_arms[] = {
     { 0x00000ffc, 0x00000fa0, NULL,                  arm_approx },
     { 0x00000ffc, 0x00000b60, NULL,                  arm_approx },
     { 0x00000ffc, 0x00000ba0, NULL,                  arm_approx },
-    { 0x0003effc, 0x00000b20, NULL,                  arm_two_cycle_dp },
+    /* ABSDP's src1 field may carry the pair's LOW register (code built with
+     * the TI cl6x 8.5 driver has ABSDP .S1 A7:A6 with src1 = 6, src2 = 7;
+     * standalone asm6x emits 0), so only SPDP, whose src1 is unused, may
+     * require it zero. */
+    { 0x00000ffc, 0x00000b20, NULL,                  arm_two_cycle_dp },
     { 0x0003effc, 0x000000a0, NULL,                  arm_two_cycle_dp },
     { 0x00000ffc, 0x00000a20, NULL,                  arm_cmpdp },
     { 0x00000ffc, 0x00000a60, NULL,                  arm_cmpdp },
@@ -5006,12 +5096,46 @@ static bool loop_step(CdjC674x *cpu, CdjC674xRead read, CdjC674xWrite write, voi
     return true;
 }
 
+/* SPRUFE8B 7.7.3.2 (printed page 678): the buffer stays active only until
+ * "the SPLOOP(D) loop is finished draining".  loop_step runs the cycle at
+ * end_cycle, which issues nothing from the buffer, as a loop cycle and idles
+ * after it, so a post-loop SPLOOP(D/W) fetched in exactly that cycle (stock
+ * 0xc0016b72, right after the 0xc0016a88 loop's epilog, MASTER TEMPO) went
+ * to execute as an ordinary instruction.  In that one case go idle first so
+ * the normal path starts the new loop.  1 idled, 0 not, -1 fetch fault (the
+ * fault loop_step's own fetch of this packet would raise). */
+static int loop_drained_before_sploop(CdjC674x *cpu, CdjC674xRead read,
+                                      void *opaque)
+{
+    const CdjC674xLoop *loop = &cpu->loop;
+    if (!loop->sealed || loop->predicate_loop ||
+        loop->cycle < loop->end_cycle || loop->cycle < loop->post_cycle ||
+        loop_immediate_reload(cpu) || loop_interrupt_armed(cpu) ||
+        loop_interrupt_draining(cpu) || loop_retained_valid(cpu) ||
+        (cpu->loop_pred_history & CDJ_C674X_LOOP_RETURNING) ||
+        cpu->idle_cycles)
+        return 0;
+    CdjC674xPacket source;
+    if (!cdj_c674x_fetch(cpu, read, opaque, &source)) return -1;
+    const CdjC674xInstruction *first = &source.instructions[0];
+    uint32_t w = first->word;
+    bool sploop = first->compact ?
+        (w & 0xbc7e) == 0x0c66 :            /* SPLOOP, SPLOOPD */
+        ((w & 0x007ffffc) == 0x38000 || (w & 0x007ffffc) == 0x3a000 ||
+         (w & 0x007ffffe) == 0x3e000);      /* SPLOOP, SPLOOPD, SPLOOPW */
+    if (!sploop) return 0;
+    loop_set_active(cpu, false);
+    return 1;
+}
+
 bool cdj_c674x_step_capture_direct(CdjC674x *cpu, CdjC674xRead read,
                                   CdjC674xWrite write, void *opaque,
                                   CdjC674xPacket *direct)
 {
     if (direct) direct->count = 0;
     if (cpu->fault) return false;
+    if (cpu->loop_active && loop_drained_before_sploop(cpu, read, opaque) < 0)
+        return false;
     if (cpu->loop_active) return loop_step(cpu, read, write, opaque);
     if (cpu->idle_cycles) {
         CdjC674xPacket idle = {.next_pc = cpu->pc, .single_cycle = true};

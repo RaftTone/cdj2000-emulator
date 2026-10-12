@@ -327,6 +327,70 @@ static void test_multicycle_nop_spmask_conflict(void)
     assert(c.cycles == 1 && c.pc == 0x1008);
 }
 
+/* Stock dsp_spectral_block_sequencer (0xc001abba-0xc001abf6, MASTER TEMPO):
+ * SPMASK D2 || LDW .D2T1 *+B15(4),A30 in the loop body, SPKERNEL || STNDW.
+ * Figure C-4 takes the load/store unit from y (bit 7), not s, so the LDW is
+ * masked and the kernel's STNDW issues alone (3.8.5, printed page 80). The
+ * old s-bit classifier buffered the LDW and faulted every stage overlap.
+ * Unmasked, the buffered LDW genuinely pairs with the STNDW and must fault. */
+static void test_spmask_load_unit_is_y(void)
+{
+    CdjC674x c;
+    for (unsigned masked = 0; masked < 2; ++masked) {
+        memset(memory, 0, sizeof(memory)); cdj_c674x_reset(&c, 0x1000);
+        c.control[13] = 3;
+        c.r[1][15] = 0x10c0; c.r[0][6] = 0x10d1;
+        c.r[0][4] = 0x44332211; c.r[0][5] = 0x88776655;
+        memory[49] = 0x1234;
+        unsigned slot = 0;
+        memory[slot++] = 0x38000;                 /* SPLOOP 1 */
+        if (masked) memory[slot++] = 0x830001;    /* SPMASK D2 || */
+        memory[slot++] = 0x0f3c22e4;              /* LDW .D2T1 *+B15(4),A30 */
+        memory[slot++] = 0x34001;                 /* SPKERNEL || */
+        memory[slot++] = 0x02983774;              /* STNDW .D1T1 A5:A4,*A6++[1] */
+        bool ok = true;
+        for (unsigned i = 0; i < 16 && ok && (i < 2 || c.loop_active); ++i)
+            ok = cdj_c674x_step(&c, read_word, write_memory, NULL);
+        if (!masked) {
+            assert(!ok && c.fault && !strcmp(c.fault,
+                "parallel access with nonaligned memory instruction"));
+            continue;
+        }
+        assert(ok && !c.loop_active && c.loop_tags == 1);
+        for (unsigned i = 0; i < 8; ++i)
+            assert(cdj_c674x_step(&c, read_word, write_memory, NULL));
+        assert(c.r[0][30] == 0x1234 && c.r[0][6] == 0x10d1 + 3 * 8);
+        for (unsigned k = 0; k < 3; ++k) {
+            const uint8_t *bytes = (const uint8_t *)memory;
+            assert(bytes[0xd1 + 8 * k] == 0x11 && bytes[0xd8 + 8 * k] == 0x88);
+        }
+    }
+}
+
+/* SPRUFE8B 7.7.3.2 (printed page 678): the buffer is active only until the
+ * SPLOOP(D) finishes draining, so a post-loop SPLOOPD fetched in the first
+ * cycle after the epilog starts a new loop (stock 0xc0016b72 follows the
+ * 0xc0016a88 loop's last epilog cycle that way under MASTER TEMPO).  Here
+ * II=1, dynlen 1 and SPKERNEL 0,0: post fetch and drain both land on cycle 4.
+ * Before the fix the second SPLOOPD executed inside loop_step and faulted. */
+static void test_sploop_after_drained_epilog(void)
+{
+    CdjC674x c;
+    memset(memory, 0, sizeof(memory)); cdj_c674x_reset(&c, 0x1000);
+    memory[0] = 0x3a000;                           /* SPLOOPD 1 */
+    memory[1] = 0x34001;                           /* SPKERNEL 0,0 || */
+    memory[2] = 3u << 23 | 3u << 18 | 1u << 13 | 0x58; /* ADD 1,A3,A3 */
+    memory[3] = 0x3a000;                           /* SPLOOPD 1 */
+    memory[4] = 0x34001;                           /* SPKERNEL 0,0 || */
+    memory[5] = 4u << 23 | 4u << 18 | 1u << 13 | 0x58; /* ADD 1,A4,A4 */
+    unsigned steps = 0;
+    while (c.pc < 0x1018 || c.loop_active) {
+        assert(cdj_c674x_step(&c, read_word, write_memory, NULL));
+        assert(++steps < 40);
+    }
+    assert(c.r[0][3] == 4 && c.r[0][4] == 4 && !(c.control[26] & (1u << 14)));
+}
+
 /* SPRUFE8B SPMASKR, printed page 489: an SPMASKR outside the software-loop
  * mechanism is a NOP; an active-loop reload must not be silently discarded. */
 static void test_spmaskr_outside_loop(void)
@@ -678,6 +742,8 @@ int main(void)
     test_equal_count_parallel_nops();
     test_multicycle_nop_spmask_conflict();
     test_spmaskr_outside_loop();
+    test_spmask_load_unit_is_y();
+    test_sploop_after_drained_epilog();
     test_idle_waits_for_an_interrupt_or_a_branch();
     CdjC674x c;
     /* Board clocks advance on every cycle, including PROT/NOP delays;

@@ -60,10 +60,11 @@ def instruction_unit(event):
     if not event['compact']:
         if word & 0x0c == 12:
             return 32
+        if word & 0x0c == 4:
+            return 16 << ((word >> 7) & 1)
         if word & 0x1c == 0x18:
             return 1 << side
-        if (word & 0x0c in (4, 12) or word & 0x7c == 0x40 or
-                word & 0xc3c == 0x830):
+        if word & 0x7c == 0x40 or word & 0xc3c == 0x830:
             return 16 << side
         if (word & 0x3c in (0x20, 0x28, 8) or word & 0x7c in (0x10, 0x50) or
                 word & 0xc3c == 0xc30):

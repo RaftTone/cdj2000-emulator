@@ -167,6 +167,21 @@ def test_c674x_packets_and_branch_delays(tmp_path):
     subprocess.run([str(binary)], check=True, timeout=5)
 
 
+def test_c674x_splx_return_window_keeps_pending_irq(tmp_path):
+    """A pending IRQ must not be taken between B IRP and the SPLOOP packet it
+    returns to (SPRUFE8B 5.4.2, 7.7.3.2); taking it corrupted the MP3 decoder."""
+    cc = shutil.which('cc')
+    if not cc: pytest.skip('requires C compiler')
+    binary = tmp_path / 'c674x-return-window'
+    helpers = ('uncond', 'mpy', 'dotp', 'packed8', 'packed16', 'packbits', 'mpy32',
+               'dp', 'approx', 'sp', 'control', 'loop')
+    subprocess.run([cc, '-std=c11', '-O2', '-I', str(ROOT / 'emulator/qemu'),
+        str(ROOT / 'tests/cstub/c674x-return-window.c'), str(ROOT / 'emulator/qemu/cdj_c674x.c'),
+        *[str(ROOT / f'emulator/qemu/cdj_c674x_{h}.c') for h in helpers],
+        '-o', str(binary), '-lm'], check=True)
+    subprocess.run([str(binary)], check=True, timeout=30)
+
+
 def test_c674x_nonconditional_encodings(tmp_path):
     cc = shutil.which('cc')
     if not cc: pytest.skip('requires C compiler')

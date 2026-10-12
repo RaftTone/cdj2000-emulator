@@ -102,6 +102,25 @@ typedef bool (*CdjC674xWrite)(void *, uint32_t, uint64_t, unsigned, bool commit)
  * fault_pc and fault_word. Observers may supply a scratch CPU with only
  * pc/fault initialized. Registers, pipeline and loop state are not accessed. */
 bool cdj_c674x_fetch(CdjC674x *, CdjC674xRead, void *, CdjC674xPacket *);
+/* The reserved gap between L2 RAM and L1P, 0x11840000-0x11DFFFFF.  Stock's
+ * bit reversal (MP4AACDEC_TIJ_scramble, a plain branch loop at 0xC0030D80)
+ * has LDDW *+A4[A9] at 0xC0030E80 in a delay slot of [A1] B at 0xC0030E6C;
+ * on the last iteration it prefetches pair (16,0), one entry past its
+ * table, into the gap.  SPRUFE8B: a branch's 5 delay slots execute, so the
+ * load really happens on hardware.  TI leaves reserved-address accesses
+ * undefined (SPRS377F section 3.4).  Stock's AAC runs on silicon, so the
+ * load completes without a fatal exception.  Its value is never consumed
+ * (verified: identical output for 0 or 0xDEADBEEF), so 0 is an arbitrary
+ * choice.  With the gap enabled (default) a DATA load of an unmapped word
+ * there completes with zero and is counted once per word read
+ * (cdj_c674x_data_gap_reads); stores and instruction fetches of the gap
+ * still fault.  The gap's local alias 0x00840000-0x00DFFFFF is not handled
+ * (it still faults).  Process-wide. */
+#define CDJ_C674X_DATA_GAP_BASE 0x11840000u
+#define CDJ_C674X_DATA_GAP_END  0x11e00000u
+void cdj_c674x_set_data_gap(bool on);
+uint64_t cdj_c674x_data_gap_reads(void);
+
 /* Optional fetch fast path.  Returns a host pointer to the 32 bytes at the
  * 32-byte-aligned address `block` when that whole block is plain memory which
  * the paired read callback would return word for word (little-endian), else

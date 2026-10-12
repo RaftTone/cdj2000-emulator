@@ -146,6 +146,18 @@ static void test_manual_examples(void)
     assert(get_pair(&c, 0, 2) == UINT64_C(0x4004000000000000));
     assert(!c.load_count && !c.control[19]);
 
+    /* ABSDP .S1 A7:A6,A9:A8 as the TI cl6x 8.5 driver emits it (041CCB20h):
+     * src1 is the pair's low register (6), not zero (standalone asm6x emits
+     * 0).  The decoder once required
+     * src1 == 0, so any pair above A1:A0 was "instruction not implemented"
+     * (stock-AAC / libxaac peak limiter).  Also the .S2 form. */
+    for (unsigned side = 0; side < 2; ++side) {
+        load(&c, 0x041CCB20u | side << 1);
+        set_pair(&c, side, 6, DP_M2_5);
+        run(&c, 2);
+        assert(get_pair(&c, side, 8) == UINT64_C(0x4004000000000000));
+    }
+
     /* ADDDP .L1X B1:B0,A3:A2,A5:A4, printed page 126.  TRANSCRIBED: B1:B0 =
      * 4021 3333h 3333 3333h (8.6), A3:A2 = C004 0000h 0000 0000h (-2.5),
      * "7 cycles after instruction" A5:A4 = 4018 6666h 6666 6666h (6.1).
