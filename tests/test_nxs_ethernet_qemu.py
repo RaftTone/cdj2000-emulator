@@ -7,10 +7,11 @@ flash stands in for the MAIN BIOS and no firmware is needed.
 """
 import os
 from pathlib import Path
-import select
+import queue
 import socket
 import struct
 import subprocess
+import threading
 import time
 
 import pytest
@@ -39,10 +40,14 @@ def test_nxs_ethernet_qemu(tmp_path):
             str(qemu), "-M", "cdj2000nxs-main", "-accel", "qtest",
             "-bios", str(bios), "-display", "none", "-serial", "null",
             "-serial", "null", "-serial", "null", "-monitor", "none",
-            "-qtest", "stdio", "-qtest-log", "/dev/null", "-nic",
+            "-qtest", "stdio", "-qtest-log", os.devnull, "-nic",
             f"socket,model=cdj-nxs-ethernet,connect=127.0.0.1:{port}",
         ], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log,
             text=True, bufsize=1)
+        # A thread reads qtest's replies: select() takes no pipe on Windows.
+        replies = queue.Queue()
+        threading.Thread(target=lambda: [replies.put(line) for line in process.stdout],
+                         daemon=True).start()
         try:
             peer, _ = listener.accept()
             with peer:
@@ -51,8 +56,10 @@ def test_nxs_ethernet_qemu(tmp_path):
                 def command(text):
                     process.stdin.write(text + "\n")
                     process.stdin.flush()
-                    assert select.select([process.stdout], [], [], 5)[0], text
-                    response = process.stdout.readline().strip()
+                    try:
+                        response = replies.get(timeout=5).strip()
+                    except queue.Empty:
+                        raise AssertionError(text) from None
                     assert response.startswith("OK"), (text, response)
                     return response.split()[1:]
 
