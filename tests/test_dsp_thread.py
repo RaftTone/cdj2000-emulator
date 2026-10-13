@@ -244,6 +244,32 @@ int main(void)
     ticks_enabled = true;               /* what vm_start does */
     bql_unlock();
 
+    /* 4c. On host time (the default, CDJ_NXS_DSP_HOST_TIME) the clock runs
+     * through MAIN's wait, and nothing is credited: the DSP's own pacing
+     * sees the time MAIN waited. */
+    dsp_host_time = true;
+    uint64_t credited = t->credited_packets, held_before = ticks_held;
+    bql_lock();
+    main_lock();
+    uint64_t last = hpi.cpu.packets;
+    main_unlock();
+    /* The DSP is now at or past its pacing limit, so the next access has
+     * to wait for it. */
+    uint64_t waits_before = t->main_waits;
+    qatomic_set(&probe_bql_free, false);
+    probe_ticks = false;
+    pthread_create(&probe, NULL, bql_probe, NULL);
+    main_lock();                       /* owes access_packets: waits */
+    assert(t->main_waits == waits_before + 1);
+    assert(hpi.cpu.packets >= last + 50000);
+    assert(qatomic_read(&probe_bql_free) && probe_ticks);
+    assert(ticks_held == held_before && ticks_enabled);
+    assert(t->credited_packets == credited);
+    main_unlock();
+    bql_unlock();
+    pthread_join(probe, NULL);
+    dsp_host_time = false;
+
     /* 5. A halted DSP never makes MAIN wait. */
     pthread_mutex_lock(&t->lock);
     hpi.dsp_halted = true;

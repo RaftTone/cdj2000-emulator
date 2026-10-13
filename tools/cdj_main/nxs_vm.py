@@ -818,6 +818,11 @@ def main():
     dsp.add_argument('--dsp-thread-access-packets', type=int, default=256,
                         help='--dsp-thread: DSP packets MAIN waits for per HPI access '
                              '(0..1000000, default 256)')
+    dsp.add_argument('--dsp-host-time', action=argparse.BooleanOptionalAction, default=True,
+                        help='--dsp-thread: MAIN\'s waits for the DSP are MAIN\'s own time, '
+                             'its clock the wall clock (default); --no-dsp-host-time stops '
+                             'its virtual clock for them (PERFORMANCE.md, "MAIN\'s clock on '
+                             'host time again")')
     dsp.add_argument('--dsp-clock-mpps', type=int, default=150,
                         help='--dsp-thread: DSP clock in million packets per virtual second '
                              '(1..100000, default 150). With --audio-clock virtual this is '
@@ -1329,10 +1334,12 @@ def main():
     main_env.pop('CDJ_NXS_DSP_THREAD_ACCESS_PACKETS', None)
     main_env.pop('CDJ_NXS_DSP_THREAD_MPPS', None)
     main_env.pop('CDJ_NXS_DSP_AUDIO_CLOCK', None)
+    main_env.pop('CDJ_NXS_DSP_HOST_TIME', None)
     if args.dsp_thread:
         main_env['CDJ_NXS_DSP_THREAD'] = '1'
         main_env['CDJ_NXS_DSP_THREAD_ACCESS_PACKETS'] = str(args.dsp_thread_access_packets)
         main_env['CDJ_NXS_DSP_THREAD_MPPS'] = str(args.dsp_clock_mpps)
+        main_env['CDJ_NXS_DSP_HOST_TIME'] = '1' if args.dsp_host_time else '0'
     if args.audio_clock == 'virtual':
         main_env['CDJ_NXS_DSP_AUDIO_CLOCK'] = 'virtual'
     main_env.pop('CDJ_NXS_DSP_MODEL', None)
