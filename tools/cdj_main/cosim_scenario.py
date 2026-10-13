@@ -71,7 +71,10 @@ PY = sys.executable
 # end of the frame buffer and never reach the panel -- a real deck shows none of
 # them (hardware check, 24.09.2026).  Screenshots are cropped like the viewer's
 # (tools/cdj_gui/view_ui.py PANEL_CROP); the raw PPM frames keep all 255 rows.
+# --full-frame (or CDJ_FULL_FRAME=1) saves the whole capture, rows 234..254 included,
+# for checking what the firmware draws below the glass.
 PANEL_WIDTH, PANEL_HEIGHT = 480, 234
+CAPTURE_HEIGHT = 255
 
 
 # The browser shows six rows.  Its requests name the cursor's row on the
@@ -88,7 +91,8 @@ def visible_row(row):
 
 def save_panel(frame, target):
     from PIL import Image
-    Image.open(frame).crop((0, 0, PANEL_WIDTH, PANEL_HEIGHT)).save(target)
+    rows = CAPTURE_HEIGHT if os.environ.get("CDJ_FULL_FRAME") == "1" else PANEL_HEIGHT
+    Image.open(frame).crop((0, 0, PANEL_WIDTH, rows)).save(target)
 
 
 class Run:
@@ -686,7 +690,11 @@ def main(argv=None) -> int:
                         help="end the scenario after this step passes (--then keys still follow it)")
     parser.add_argument("--keep", action="store_true",
                         help="leave the machine running after the last step")
+    parser.add_argument("--full-frame", action="store_true",
+                        help="screenshots keep all 255 capture rows, not just the glass's 234")
     args = parser.parse_args(argv)
+    if args.full_frame:
+        os.environ["CDJ_FULL_FRAME"] = "1"
 
     run = Run(args)
     try:
