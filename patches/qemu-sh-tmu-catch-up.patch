@@ -1,0 +1,102 @@
+--- a/hw/timer/sh_timer.c
++++ b/hw/timer/sh_timer.c
+@@ -43,6 +43,8 @@
+     int freq;
+     int int_level;
+     int old_level;
++    uint32_t missed;    /* underflows behind the one UNF shows; see sh_timer_tick */
++    bool unf_kept;      /* UNF shows one of them: the chip's own is clear */
+     int feat;
+     int enabled;
+     qemu_irq irq;
+@@ -82,6 +84,20 @@
+     return 0;
+ }
+ 
++/*
++ * Forget the underflows kept for the guest (see sh_timer_tick).  UNF is left
++ * as the chip has it: set only if an underflow came after the guest last
++ * cleared it, so a UNF that was set again for a kept underflow goes too.
++ */
++static void sh_timer_drop_missed(SHTimerState *s)
++{
++    s->missed = 0;
++    if (s->unf_kept) {
++        s->unf_kept = false;
++        s->int_level = 0;
++    }
++}
++
+ static void sh_timer_write(void *opaque, hwaddr offset, uint32_t value)
+ {
+     SHTimerState *s = opaque;
+@@ -164,8 +180,17 @@
+             qemu_log_mask(LOG_GUEST_ERROR,
+                           "%s: Reserved ICPE value\n", __func__);
+         }
++        if ((value & TIMER_TCR_UNIE) == 0) {
++            sh_timer_drop_missed(s);
++        }
+         if ((value & TIMER_TCR_UNF) == 0) {
+-            s->int_level = 0;
++            if (s->missed) {
++                s->missed--;        /* the next one: UNF stays set */
++                s->unf_kept = true;
++            } else {
++                s->int_level = 0;
++                s->unf_kept = false;
++            }
+         }
+ 
+         value &= ~TIMER_TCR_UNF;
+@@ -211,6 +236,8 @@
+     ptimer_transaction_begin(s->timer);
+     if (s->enabled && !enable) {
+         ptimer_stop(s->timer);
++        sh_timer_drop_missed(s);
++        sh_timer_update(s);
+     }
+     if (!s->enabled && enable) {
+         ptimer_run(s->timer, 0);
+@@ -219,10 +246,32 @@
+     s->enabled = !!enable;
+ }
+ 
++/*
++ * An underflow while UNF is still set, with its interrupt enabled, is one the
++ * guest has not been told about yet.  On the chip that happens only to a
++ * handler more than a period late, which an RTOS's tick handler never is.
++ * Here the host decides when the timer's callback and the guest's handler
++ * run: a busy host runs two expiries in one pass of the main loop, or keeps
++ * the vCPU from the handler for longer than a period, and an RTOS that counts
++ * one tick per interrupt falls behind QEMU_CLOCK_VIRTUAL for good.  Count
++ * them, and raise UNF again each time the guest clears it until it has seen
++ * every one: late, but none lost, so the guest's time keeps up with the
++ * clock.  At most TIMER_MISSED_MAX are kept.  Stopping the channel, clearing
++ * UNIE or a reset drops them, and UNF with them unless the chip would show it
++ * (sh_timer_drop_missed), so a handler that clears UNF and then stops its
++ * channel takes no interrupt after the stop.
++ */
++#define TIMER_MISSED_MAX 1000
++
+ static void sh_timer_tick(void *opaque)
+ {
+     SHTimerState *s = opaque;
++    if (s->enabled && s->int_level && (s->tcr & TIMER_TCR_UNIE) &&
++        s->missed < TIMER_MISSED_MAX) {
++        s->missed++;
++    }
+     s->int_level = s->enabled;
++    s->unf_kept = false;
+     sh_timer_update(s);
+ }
+ 
+@@ -355,6 +404,8 @@
+     s->enabled = 0;
+     s->int_level = 0;
+     s->old_level = 0;
++    s->missed = 0;
++    s->unf_kept = false;
+     s->tcor = UINT32_MAX;
+     s->tcnt = UINT32_MAX;
+     s->tcr = 0;

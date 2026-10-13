@@ -24,7 +24,7 @@ pytestmark = pytest.mark.skipif(
 
 
 @contextmanager
-def machine(rom: bytes, *, virtual_clock: bool = False):
+def machine(rom: bytes, *, virtual_clock: bool = False, icount: bool = False):
     if not QEMU.is_file():
         pytest.skip('requires the custom QEMU build')
     # A short directory: Unix socket paths are limited to about 104 bytes.
@@ -40,6 +40,10 @@ def machine(rom: bytes, *, virtual_clock: bool = False):
             command += ['-accel', 'qtest']
         else:
             command += ['-S']
+            if icount:
+                # Guest time from instructions only: what the guest does
+                # between two timer ticks is the same on every host.
+                command += ['-icount', 'shift=0,sleep=off']
         command += ['-qtest', f'unix:{qtest_path},server=on,wait=off',
                     '-qmp', f'unix:{qmp_path},server=on,wait=off']
         process = subprocess.Popen(command, stdin=subprocess.DEVNULL,
@@ -114,6 +118,67 @@ def test_tmu_stop_keeps_underflow_and_reset_restores_registers():
         assert request('readb 0xffd80004') == 0
 
 
+def test_tmu_keeps_underflows_the_guest_has_not_seen():
+    """qemu-sh-tmu-catch-up.patch: each underflow is one interrupt."""
+    with machine(bytes(64), virtual_clock=True) as (request, execute):
+        # P-phi/4 is 13.5 MHz on this board: TCOR 13499 is a 1 ms tick.
+        request('writel 0xffd80008 13499')
+        request('writel 0xffd8000c 13499')
+        request('writew 0xffd80010 0x20')  # TCR.UNIE
+        request('writeb 0xffd80004 1')
+        request('clock_step 3500000')  # three underflows, none acknowledged
+
+        def clears_until_unf_is_clear():
+            clears = 0
+            while request('readw 0xffd80010') & 0x100:
+                request('writew 0xffd80010 0x20')
+                clears += 1
+                assert clears <= 5
+            return clears
+
+        # UNF stays set until the guest has cleared it once for each.
+        assert clears_until_unf_is_clear() == 3
+        request('clock_step 1000000')
+        assert clears_until_unf_is_clear() == 1
+
+        # Stopping the channel drops what it kept; UNF stays until cleared.
+        request('clock_step 3000000')
+        request('writeb 0xffd80004 0')
+        assert clears_until_unf_is_clear() == 1
+
+
+def test_tmu_drops_what_it_kept_leaving_unf_as_the_chip_has_it():
+    """qemu-sh-tmu-catch-up.patch: a UNF set again for a kept underflow goes
+    when the channel stops or UNIE is cleared, as the chip's would be clear."""
+    with machine(bytes(64), virtual_clock=True) as (request, execute):
+        request('writel 0xffd80008 13499')
+        request('writel 0xffd8000c 13499')
+        request('writew 0xffd80010 0x20')  # TCR.UNIE
+        request('writeb 0xffd80004 1')
+
+        def unf():
+            return bool(request('readw 0xffd80010') & 0x100)
+
+        # A handler that clears UNF, then stops its channel: after the clear
+        # the chip's UNF is clear, so the stop leaves no interrupt behind.
+        request('clock_step 3500000')  # three underflows, none acknowledged
+        request('writew 0xffd80010 0x20')
+        assert unf()  # one of the two kept
+        request('writeb 0xffd80004 0')
+        assert not unf()
+
+        # Clearing UNIE drops them too, also when UNF is written back as 1
+        # (a read-modify-write of TCR): the next underflow is one interrupt.
+        request('writeb 0xffd80004 1')
+        request('clock_step 3500000')
+        request('writew 0xffd80010 0x100')  # UNIE clear
+        request('writew 0xffd80010 0x120')  # UNIE set again
+        request('clock_step 1000000')
+        assert unf()
+        request('writew 0xffd80010 0x20')
+        assert not unf()
+
+
 def _priority_rom():
     # Boot with SR.BL set. Poll a RAM word until the test has observed both
     # pending TMU flags, then clear BL so the first accepted vector is stable.
@@ -140,6 +205,60 @@ def _priority_rom():
                            (0x38, 0x04003000), (0x3c, 0x40000000)):
         literal(address, value)
     return bytes(code)
+
+
+def _stopping_handler(clear_first):
+    # TMU0's handler at VBR + 0x600: clear UNF and stop the channel, in either
+    # order, count the interrupt in RAM at 0x04002000, and return.
+    clear = [1, 0xe020, 0x2101]  # R1 = TCR0; MOV #0x20,R0; MOV.W R0,@R1
+    stop = [2, 0xe000, 0x2200]   # R2 = TSTR; MOV #0,R0; MOV.B R0,@R2
+    count = [3, 0x6032, 0x7001, 0x2302]  # R3 = counter; R0 = @R3 + 1; @R3 = R0
+    code = (clear + stop if clear_first else stop + clear) + count + [0x002b, 0x0009]
+    assert len(code) % 2 == 0  # the literals follow, 4-byte aligned
+    pool = 2 * len(code)
+    literals = (0xffd80010, 0xffd80004, 0x04002000)  # TCR0, TSTR, counter
+    for index, word in enumerate(code):
+        if word < 4:  # MOV.L @(disp,PC),Rn of literal n
+            pc = 2 * index
+            address = pool + 4 * (word - 1)
+            code[index] = 0xd000 | (word << 8) | ((address - ((pc & ~3) + 4)) // 4)
+    return struct.pack(f'<{len(code)}H3I', *code, *literals)
+
+
+@pytest.mark.parametrize('clear_first', [True, False],
+                         ids=['clear-then-stop', 'stop-then-clear'])
+def test_tmu_handler_that_stops_its_channel_takes_one_interrupt(clear_first):
+    """qemu-sh-tmu-catch-up.patch: underflows kept for a handler that then
+    stops its channel bring no interrupt after the stop, as on the chip."""
+    with machine(_priority_rom(), icount=True) as (request, execute):
+        handler = _stopping_handler(clear_first)
+        request(f'write 0x04000600 {len(handler)} 0x{handler.hex()}')
+        request('writel 0xffd40000 0x04000000')  # TMU0 level 4
+        request('writel 0xffd80008 13499')  # 1 ms
+        request('writel 0xffd8000c 13499')
+        request('writew 0xffd80010 0x20')  # TCR.UNIE
+        request('writeb 0xffd80004 1')
+        execute('cont')
+
+        # Three underflows while the guest runs with SR.BL set: the first
+        # sets UNF, the catch-up keeps the other two.
+        wraps, count = 0, request('readl 0xffd8000c')
+        deadline = time.monotonic() + 5
+        while wraps < 3:
+            last, count = count, request('readl 0xffd8000c')
+            wraps += count > last
+            if time.monotonic() > deadline:
+                pytest.fail('TMU0 did not underflow three times')
+
+        request('writel 0x04003000 1')  # the guest clears SR.BL
+        deadline = time.monotonic() + 5
+        while not request('readl 0x04002000'):
+            if time.monotonic() > deadline:
+                pytest.fail('the guest took no TMU0 interrupt')
+            time.sleep(.01)
+        time.sleep(.1)  # any further interrupt comes at once
+        assert request('readl 0x04002000') == 1
+        assert not request('readw 0xffd80010') & 0x100
 
 
 def test_intc_selects_higher_priority_pending_tmu_vector():

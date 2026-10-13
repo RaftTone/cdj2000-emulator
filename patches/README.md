@@ -11,6 +11,7 @@ licence of each.
 | `qemu-sh-intc-priority-order.patch` | QEMU 11.x, after the IMASK patch | `scripts/build-qemu-sh4.sh` |
 | `qemu-sh-tmu-stop-reset.patch` | QEMU 11.x | `scripts/build-qemu-sh4.sh` |
 | `qemu-sh4-tcg-fast-paths.patch` | QEMU 11.x, after the three above | `scripts/build-qemu-sh4.sh` |
+| `qemu-sh-tmu-catch-up.patch` | QEMU 11.x, after the TMU reset patch | `scripts/build-qemu-sh4.sh` |
 | `01-gdb-17.2-bfin-parallel-dsp32alu.patch` | GDB 17.2 | `scripts/build-bfin-sim.sh` |
 | `02-gdb-17.2-bfin-cdj2000-board.patch` | GDB 17.2 | `scripts/build-bfin-sim.sh` |
 
@@ -100,6 +101,25 @@ clears their interrupt levels, and restores the visible registers. Without this,
 a pending timer line can survive a guest reset and interrupt the new boot before
 it has initialized its handlers. Stopping a channel through `TSTR` leaves
 `TCR.UNF` (and so the line) as it is, as on the chip: software clears it.
+
+`qemu-sh-tmu-catch-up.patch` keeps the underflows the guest has not seen. A
+channel that underflows while `TCR.UNF` is still set, with its interrupt
+enabled, counts the underflow, and when the guest clears `UNF` the flag stays
+set until it has cleared it once for each: the ticks come late, but none is
+lost. On the chip a tick handler is never a period late. Here the host decides
+when the timer's callback and the guest's handler run: QEMU's main loop runs
+two expiries in one pass when it wakes late, and a long MMIO access keeps the
+vCPU from the handler for longer than a period (the NXS's synchronous DSP runs
+inside MAIN's HPI accesses). At most 1 000 are kept. Stopping the channel,
+clearing `UNIE` or a reset drops them, and a `UNF` set only for one of them
+goes with them, since the chip's own would read 0: a handler that clears `UNF`
+and then stops its channel takes no interrupt after the stop. A host's delay
+and a guest's own look alike: a guest that keeps the interrupt masked for more
+than a period gets those underflows afterwards too, where the chip merges
+them. Measured on an M2 Pro (macOS), stock NXS 1.44 with the synchronous DSP
+(`--no-dsp-thread`): the RTOS saw 70-73% of its 1 ms ticks and sent its 2 s Pro
+DJ Link keep-alive every 2.73 s; with the patch it saw all of them and sent it
+every 2.000 s, where a real NXS sends it every 2.003 s.
 
 ### What each one costs
 
