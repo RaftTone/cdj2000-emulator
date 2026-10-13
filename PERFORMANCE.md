@@ -1703,3 +1703,45 @@ cursor-advance loop, the board's per-slot work, the MAIN hand-over) did not
 get faster; the replay gains are in the memcpy and the loop machinery the
 decoder uses, which only run once the background gets time.  E-8302 stays.
 Real time needs ~2.5x on the playing ISR mix as well as the background.
+
+## MAIN's clock on host time again (`--dsp-thread`, 2026-10-13)
+
+`CDJ_NXS_DSP_HOST_TIME` now defaults to on: QEMU_CLOCK_VIRTUAL keeps
+running while MAIN waits for the DSP thread, as before "Virtual time held
+while MAIN waits for the DSP"; `CDJ_NXS_DSP_HOST_TIME=0`
+(`nxs_vm --no-dsp-host-time`) holds it as that section does.
+
+**Why.** The held clock makes MAIN's time run slower than the wall clock,
+and with it everything MAIN times, which on a Pro DJ Link segment is what
+other players see. Stock NXS 1.44, idle with no media, on an Apple M2 Pro
+(macOS), the DSP thread at its defaults (JIT on, idle skip, no functional
+audio), 150 s alone on a link:
+
+| | keep-alive interval (wall) | QEMU_CLOCK_VIRTUAL / wall | MAIN waiting for the DSP |
+| --- | ---: | ---: | ---: |
+| held clock | 3.123 s | 0.874 | 13% of virtual time |
+| host time | 2.666 s | 1.000 | 13% |
+| held clock, macOS main-loop patch | 2.406 s | 0.831 | 18% |
+| host time, macOS main-loop patch | 2.0004 s (median 1.9999) | 1.000 | 17% |
+
+A real NXS sends its keep-alive every 2.003 s (`S01-cold-boot-a` in
+TriMixxx's prolink captures). On host time the rest of the gap is macOS's:
+QEMU's main loop there waits in whole milliseconds and the RTOS loses about a
+quarter of its 1 ms ticks, which the macOS main-loop patch (a separate change
+against `main`) fixes. Idle, MAIN makes ~10K HPI accesses a second
+(fixed-address data reads and writes, address writes, HPIC), each waiting
+~15 us for the DSP thread's 256 packets and the lock hand-over. On host time
+those waits are MAIN's loss instead of the clock's: ~16% of its time, on an
+SH-4 translation several times faster than the SH7764 (`docs/
+SH4_TCG_FAST_PATHS.md`), and its tick, tasks and network keep their rates.
+
+**Playback** with `--functional-dsp-audio` stays bound by the interpreter
+either way. In two runs on #38's tip before it was merged (the same code), on
+this host, a 174 BPM track played at 0.04-0.09x (its beat packets every
+3-11 s instead of 0.345 s), MAIN waited for the DSP 60-70% of its time, and
+the keep-alive interval rose to ~2.02 s. The stall the held clock fixed (the
+stream to the DSP stopping ~150 half frames after PLAY) did not recur: the
+counter kept advancing, and PLAY paused and resumed it. It came at 80-85%
+(`main-wait` 8.0 s per 10 s, above, on a shared host), and that margin is
+what keeps it away on host time: a slower or busier host can bring it back,
+and `CDJ_NXS_DSP_HOST_TIME=0` keeps the hold for that.

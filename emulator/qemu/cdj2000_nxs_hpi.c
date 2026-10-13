@@ -336,10 +336,20 @@ static NxsDspThread dsp_thread;
  * MAIN's tick-driven status polls (~100 HPI words every few ms) waited ~80%
  * of every virtual second, its file task starved, and the stream to the DSP
  * stopped after the frames buffered before PLAY (PERFORMANCE.md, "Virtual
- * time held while MAIN waits for the DSP").  The clock stops for the wait as
- * it does while the VM is stopped (cpu_disable_ticks), and restarts with the
- * BQL held only if the VM still runs, so a stop or start meanwhile keeps the
- * run state's clock.  CDJ_NXS_DSP_HOST_TIME=1 restores the old charging.
+ * time held while MAIN waits for the DSP").  CDJ_NXS_DSP_HOST_TIME=0 stops
+ * the clock for the wait as it does while the VM is stopped
+ * (cpu_disable_ticks), and restarts it with the BQL held only if the VM
+ * still runs, so a stop or start meanwhile keeps the run state's clock.
+ *
+ * It is no longer the default: a held clock is MAIN's time running slower
+ * than the wall clock, and everything MAIN times does too.  Idle, with no
+ * track, MAIN waits ~10K times a virtual second, ~15 us each, and its 2 s
+ * Pro DJ Link keep-alive went out every 3.12 s of wall time (2.41 s with the
+ * macOS main-loop fix) where a real NXS's comes every 2.003 s.  Charged to
+ * the wall clock, as before the hold, it comes every 2.67 s (2.00 s with that
+ * fix), and MAIN loses the waits instead: ~16% of its time idle, against an
+ * SH-4 translation several times faster than the SH7764.  Playback with
+ * --functional-dsp-audio is bound by the interpreter either way.
  * The synchronous modes are left alone: holding the clock while the DSP runs
  * inside MAIN's DSPINT write (zero cost, or the packets at 150 Mpps) slowed
  * MAIN's virtual time 7-14x against the wall-clock GUI board, and Enter on
@@ -3170,7 +3180,7 @@ void cdj_nxs_hpi_init(MemoryRegion *system, void (*hint)(void *, bool), void *op
     s->sdram = g_malloc0(SDRAM_SIZE);
     s->hint = hint;
     s->opaque = opaque;
-    dsp_host_time = !g_strcmp0(getenv("CDJ_NXS_DSP_HOST_TIME"), "1");
+    dsp_host_time = g_strcmp0(getenv("CDJ_NXS_DSP_HOST_TIME"), "0");
     const char *threaded = getenv("CDJ_NXS_DSP_THREAD");
     if (threaded && !strcmp(threaded, "1")) {
         NxsDspThread *t = &dsp_thread;
