@@ -61,10 +61,17 @@ def test_gui_board_override_points_cfi_at_selected_flash(tmp_path):
     assert f'/core/bfin_ebiu_amc/cfi@0/file "{flash.resolve().as_posix()}"' == output.read_text().strip()
 
 
-@pytest.mark.parametrize('host_time', [True, False])
+@pytest.mark.parametrize('clock_args, host_time', [
+    ([], True),
+    (['--no-dsp-host-time'], False),
+    # The DSP's audio path keeps the interpreter busy enough that MAIN,
+    # charged for its waits, stops feeding the stream: there the hold stays.
+    (['--functional-dsp-audio'], False),
+    (['--functional-dsp-audio', '--dsp-host-time'], True),
+])
 @pytest.mark.parametrize('idle_skip', [True, False])
 def test_gui_firmware_override_launches_with_generated_board_and_records_it(
-        tmp_path, monkeypatch, idle_skip, host_time):
+        tmp_path, monkeypatch, idle_skip, clock_args, host_time):
     for name in ('bin/cdj-run', 'build/qemu/build/qemu-system-sh4',
                  'firmware/nxs/main-firmware.bin'):
         path = tmp_path / name
@@ -82,8 +89,7 @@ def test_gui_firmware_override_launches_with_generated_board_and_records_it(
     monkeypatch.setattr(nxs_vm.sys, 'argv', [
         'nxs_vm', 'run', '--seconds', '1', '--lightweight', '--gui-sim', 'gdb',
         '--gui-firmware', str(gui),
-        *([] if idle_skip else ['--no-dsp-idle-skip']),
-        *([] if host_time else ['--no-dsp-host-time'])])
+        *([] if idle_skip else ['--no-dsp-idle-skip']), *clock_args])
     sleeps = []
     monkeypatch.setattr(nxs_vm.time, 'sleep', sleeps.append)
 
@@ -131,7 +137,8 @@ def test_gui_firmware_override_launches_with_generated_board_and_records_it(
     assert sleeps[0] == (2.0 if idle_skip else 1)
     main_env = environments[1 if gui_first else 0]
     assert main_env.get('CDJ_NXS_DSP_IDLE_SKIP') == ('1' if idle_skip else None)
-    # MAIN's waits for the DSP thread are its own time unless asked otherwise.
+    # MAIN's waits for the DSP thread are its own time unless asked otherwise,
+    # or unless the DSP runs its audio path.
     assert main_env['CDJ_NXS_DSP_THREAD'] == '1'
     assert main_env['CDJ_NXS_DSP_HOST_TIME'] == ('1' if host_time else '0')
     assert main_env['CDJ_NXS_DSP_CHECKPOINT_POLICY'] == 'fault'

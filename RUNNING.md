@@ -408,7 +408,8 @@ this board and the QEMU board, which was always on the wall clock, see the same
 time. (With `--dsp-thread`, the default, MAIN's waits for the interpreted
 DSP on an HPI access are MAIN's own time, on the wall clock;
 `nxs_vm --no-dsp-host-time` (`CDJ_NXS_DSP_HOST_TIME=0` in QEMU's
-environment) stops MAIN's virtual clock for them instead. See
+environment) stops MAIN's virtual clock for them instead, and `nxs_vm`
+chooses that by itself with `--functional-dsp-audio`. See
 PERFORMANCE.md, "Virtual time held while MAIN waits for the DSP" and "MAIN's
 clock on host time again".) Bursts the interpreter cannot keep up with make guest time fall behind,
 up to `BFIN_WALL_LAG_MS` (50); the excess is dropped and reported.

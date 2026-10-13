@@ -1745,3 +1745,25 @@ counter kept advancing, and PLAY paused and resumed it. It came at 80-85%
 (`main-wait` 8.0 s per 10 s, above, on a shared host), and that margin is
 what keeps it away on host time: a slower or busier host can bring it back,
 and `CDJ_NXS_DSP_HOST_TIME=0` keeps the hold for that.
+
+**A Windows host brought it back** (2026-10-13, Windows 11, x86-64, 20
+threads, one binary, `nxs_vm --test-track --functional-dsp-audio
+--dsp-thread`, ENTER twice to load the 10 s test tone, which the firmware
+then plays by itself):
+
+| | load ENTER to the duration reply | native counter, of 1,500 half frames |
+| --- | ---: | --- |
+| host time | 136 s, 104 s | 239 at the reply, 319 within 30 s, then still: for 3 min 45 s to the end of one run, for 2 min before another 80 in the other (`dev wait-playback` times out) |
+| held clock (`--no-dsp-host-time`) | 5 s | to the end in 2 min 4 s, 110-140 half frames per 10 s |
+
+So `nxs_vm` keeps the hold when `--functional-dsp-audio` runs on the DSP
+thread, and `--dsp-host-time` asks for host time there. Everywhere else the
+default is host time, and on this host it is what puts the link on time:
+alone on a hub with the test track, 150 s, the keep-alive came every 2.44 s
+with the hold (DHCP discovers 1.22 and 2.45 s apart) and every 2.000 s on host
+time (1.000, 2.000). The mechanism of this stall was not established: MAIN
+waited for the DSP ~6% of its time on host time (`main-wait` 0.6 s per 10
+virtual s), not the 80-85% above. One more held-clock run never loaded: its
+DSP stopped during boot (unaligned fetch at 0xdeadbeef after 29 M packets),
+which six further 45 s boots of that configuration, three with and three
+without the TMU catch-up patch, did not repeat.
