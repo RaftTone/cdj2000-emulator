@@ -57,7 +57,8 @@ set -- \
     "$REPO/patches/qemu-sh-intc-priority-imask.patch" \
     "$REPO/patches/qemu-sh-intc-priority-order.patch" \
     "$REPO/patches/qemu-sh-tmu-stop-reset.patch" \
-    "$REPO/patches/qemu-sh4-tcg-fast-paths.patch"
+    "$REPO/patches/qemu-sh4-tcg-fast-paths.patch" \
+    "$REPO/patches/qemu-main-loop-macos-hires.patch"
 applied=0
 index=0
 for patch in "$@"; do
