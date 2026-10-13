@@ -17,10 +17,40 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 QEMU = Path(os.environ.get('CDJ_TEST_QEMU', ROOT / 'build/qemu/build/qemu-system-sh4'))
 
-# qtest and QMP are reached over Unix sockets.
-pytestmark = pytest.mark.skipif(
-    sys.platform == 'win32' or not hasattr(socket, 'AF_UNIX'),
-    reason='needs Unix-domain sockets for qtest/QMP')
+# qtest and QMP are reached over Unix sockets, and over loopback TCP where
+# Python has none (Windows).
+UNIX_SOCKETS = sys.platform != 'win32' and hasattr(socket, 'AF_UNIX')
+
+
+def _free_ports(count):
+    # Held open together, so the system cannot hand out the same port twice.
+    probes = [socket.socket() for _ in range(count)]
+    try:
+        for probe in probes:
+            probe.bind(('127.0.0.1', 0))
+        return [probe.getsockname()[1] for probe in probes]
+    finally:
+        for probe in probes:
+            probe.close()
+
+
+def _connect(address, process, log, deadline):
+    # QEMU opens its control sockets while it starts: try until one answers.
+    while True:
+        sock = socket.socket(socket.AF_UNIX if isinstance(address, str) else socket.AF_INET)
+        try:
+            sock.connect(address)
+        except OSError:
+            sock.close()
+        else:
+            sock.settimeout(5)
+            return sock
+        if process.poll() is not None:
+            pytest.fail(f'QEMU exited with {process.returncode}: '
+                        + log.read_text(errors='replace'))
+        if time.monotonic() > deadline:
+            pytest.fail('QEMU control sockets did not open')
+        time.sleep(.01)
 
 
 @contextmanager
@@ -33,7 +63,12 @@ def machine(rom: bytes, *, virtual_clock: bool = False, icount: bool = False):
         root = Path(directory)
         image = root / 'reset.bin'
         image.write_bytes(rom)
-        qtest_path, qmp_path = root / 'qtest.sock', root / 'qmp.sock'
+        if UNIX_SOCKETS:
+            addresses = [str(root / 'qtest.sock'), str(root / 'qmp.sock')]
+            chardevs = [f'unix:{address}' for address in addresses]
+        else:
+            addresses = [('127.0.0.1', port) for port in _free_ports(2)]
+            chardevs = [f'tcp:127.0.0.1:{port}' for _, port in addresses]
         command = [str(QEMU), '-M', 'cdj2000nxs-main', '-display', 'none',
                    '-nodefaults', '-bios', str(image)]
         if virtual_clock:
@@ -44,23 +79,19 @@ def machine(rom: bytes, *, virtual_clock: bool = False, icount: bool = False):
                 # Guest time from instructions only: what the guest does
                 # between two timer ticks is the same on every host.
                 command += ['-icount', 'shift=0,sleep=off']
-        command += ['-qtest', f'unix:{qtest_path},server=on,wait=off',
-                    '-qmp', f'unix:{qmp_path},server=on,wait=off']
-        process = subprocess.Popen(command, stdin=subprocess.DEVNULL,
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        command += ['-qtest', f'{chardevs[0]},server=on,wait=off',
+                    '-qmp', f'{chardevs[1]},server=on,wait=off']
+        # QEMU logs every qtest command to stderr.  A file takes it: a pipe
+        # nobody reads fills (4 KiB on Windows, some 60 commands), and QEMU
+        # then blocks in the write with the BQL held.
+        log = root / 'stderr.txt'
+        with open(log, 'wb') as stderr:
+            process = subprocess.Popen(command, stdin=subprocess.DEVNULL,
+                                       stdout=subprocess.DEVNULL, stderr=stderr)
         try:
             deadline = time.monotonic() + 10
-            while not (qtest_path.exists() and qmp_path.exists()):
-                if process.poll() is not None:
-                    pytest.fail(process.stderr.read().decode(errors='replace'))
-                if time.monotonic() > deadline:
-                    pytest.fail('QEMU control sockets did not open')
-                time.sleep(.01)
-            with socket.socket(socket.AF_UNIX) as qtest, socket.socket(socket.AF_UNIX) as qmp:
-                qtest.settimeout(5)
-                qmp.settimeout(5)
-                qtest.connect(str(qtest_path))
-                qmp.connect(str(qmp_path))
+            with _connect(addresses[0], process, log, deadline) as qtest, \
+                    _connect(addresses[1], process, log, deadline) as qmp:
                 qt = qtest.makefile('rwb', buffering=0)
                 qm = qmp.makefile('rwb', buffering=0)
                 assert 'QMP' in json.loads(qm.readline())
@@ -88,7 +119,6 @@ def machine(rom: bytes, *, virtual_clock: bool = False, icount: bool = False):
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=5)
-            process.stderr.close()
 
 
 def test_tmu_stop_keeps_underflow_and_reset_restores_registers():
