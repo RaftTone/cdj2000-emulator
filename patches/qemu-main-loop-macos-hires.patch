@@ -1,0 +1,111 @@
+--- a/util/main-loop.c
++++ b/util/main-loop.c
+@@ -23,6 +23,9 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#ifdef CONFIG_DARWIN
++#include <sys/event.h>
++#endif
+ #include "qapi/error.h"
+ #include "qemu/cutils.h"
+ #include "qemu/timer.h"
+@@ -292,17 +295,85 @@
+         g_main_context_dispatch(context);
+     }
+ }
++
++#ifdef CONFIG_DARWIN
++/*
++ * The macOS counterpart of the Windows arm_short_wait below.  g_poll takes
++ * whole milliseconds and rounds up, and macOS ends the wait ~0.25 ms past
++ * that, so a 1 ms periodic timer is served every ~1.3 ms, and ptimer, which
++ * schedules each expiry from the previous one, then catches up with two
++ * expiries in one pass.  A guest whose tick is that timer (the CDJ's RTOS)
++ * sees the two as one underflow and loses a tick: measured 27% of them, the
++ * RTOS's 2 s Pro DJ Link keep-alive then sent every ~2.7 s of
++ * QEMU_CLOCK_VIRTUAL.  For a wait under 4 ms, arm a one-shot kqueue timer for
++ * the exact interval (NOTE_CRITICAL: not coalesced) and poll the kqueue
++ * alongside the other descriptors, so the wait ends when the timer fires or
++ * when anything else becomes ready.  CDJ_MAIN_LOOP_HIRES=0 switches it off.
++ */
++static int short_wait_kq = -1;
++
++static bool arm_short_wait(int64_t timeout_ns)
++{
++    static int enabled = -1;
++    struct kevent ev;
++    GPollFD pfd = { .events = G_IO_IN };
+ 
++    if (enabled < 0) {
++        const char *env = getenv("CDJ_MAIN_LOOP_HIRES");
++        enabled = !(env && *env == '0');
++        if (enabled) {
++            short_wait_kq = kqueue();
++            if (short_wait_kq >= 0) {
++                qemu_set_cloexec(short_wait_kq);
++            }
++        }
++    }
++    if (!enabled || short_wait_kq < 0 || timeout_ns <= 0 ||
++        timeout_ns >= 4 * SCALE_MS) {
++        return false;
++    }
++    EV_SET(&ev, 1, EVFILT_TIMER, EV_ADD | EV_ONESHOT,
++           NOTE_NSECONDS | NOTE_CRITICAL, timeout_ns, NULL);
++    if (kevent(short_wait_kq, &ev, 1, NULL, 0, NULL) < 0) {
++        return false;
++    }
++    pfd.fd = short_wait_kq;
++    g_array_append_val(gpollfds, pfd);
++    return true;
++}
++
++/* Drop the timer, fired or not, and its entry at the end of gpollfds. */
++static void disarm_short_wait(void)
++{
++    struct kevent ev;
++
++    EV_SET(&ev, 1, EVFILT_TIMER, EV_DELETE, 0, 0, NULL);
++    kevent(short_wait_kq, &ev, 1, NULL, 0, NULL);
++    g_array_set_size(gpollfds, gpollfds->len - 1);
++}
++#endif
++
+ #define MAX_MAIN_LOOP_SPIN (1000)
+ 
+ static int os_host_main_loop_wait(int64_t timeout)
+ {
+     GMainContext *context = g_main_context_default();
+     int ret;
++#ifdef CONFIG_DARWIN
++    bool short_wait;
++#endif
+ 
+     g_main_context_acquire(context);
+ 
+     glib_pollfds_fill(&timeout);
++
++#ifdef CONFIG_DARWIN
++    short_wait = arm_short_wait(timeout);
++    if (short_wait) {
++        /* The kqueue timer ends the wait; this is only a backstop. */
++        timeout = 20 * SCALE_MS;
++    }
++#endif
+ 
+     bql_unlock();
+     replay_mutex_unlock();
+@@ -311,6 +382,12 @@
+ 
+     replay_mutex_lock();
+     bql_lock();
++
++#ifdef CONFIG_DARWIN
++    if (short_wait) {
++        disarm_short_wait();
++    }
++#endif
+ 
+     glib_pollfds_poll();
+ 

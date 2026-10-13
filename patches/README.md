@@ -12,6 +12,7 @@ licence of each.
 | `qemu-sh-tmu-stop-reset.patch` | QEMU 11.x | `scripts/build-qemu-sh4.sh` |
 | `qemu-sh4-tcg-fast-paths.patch` | QEMU 11.x, after the three above | `scripts/build-qemu-sh4.sh` |
 | `qemu-sh-tmu-catch-up.patch` | QEMU 11.x, after the TMU reset patch | `scripts/build-qemu-sh4.sh` |
+| `qemu-main-loop-macos-hires.patch` | QEMU 11.x | `scripts/build-qemu-sh4.sh` |
 | `01-gdb-17.2-bfin-parallel-dsp32alu.patch` | GDB 17.2 | `scripts/build-bfin-sim.sh` |
 | `02-gdb-17.2-bfin-cdj2000-board.patch` | GDB 17.2 | `scripts/build-bfin-sim.sh` |
 
@@ -120,6 +121,23 @@ them. Measured on an M2 Pro (macOS), stock NXS 1.44 with the synchronous DSP
 (`--no-dsp-thread`): the RTOS saw 70-73% of its 1 ms ticks and sent its 2 s Pro
 DJ Link keep-alive every 2.73 s; with the patch it saw all of them and sent it
 every 2.000 s, where a real NXS sends it every 2.003 s.
+
+`qemu-main-loop-macos-hires.patch` is item 6 of the IMASK patch for macOS,
+which had no fix: there too `g_poll` takes whole milliseconds and rounds up,
+and macOS ends a 1 ms wait ~0.26 ms late. The 1 ms TMU0 tick was served every
+1.1 to 2 ms, and `ptimer`, which schedules each expiry from the previous one,
+caught up with two expiries in one main-loop pass, which the guest saw as one
+underflow. The patch arms a one-shot kqueue timer (`EVFILT_TIMER`,
+`NOTE_NSECONDS | NOTE_CRITICAL`) for any wait under 4 ms and polls the kqueue
+alongside the other descriptors, as the Windows patch does with a waitable
+timer. A one-shot kqueue timer ends a `poll` 20-70 us after its deadline here.
+`CDJ_MAIN_LOOP_HIRES=0` switches it off, as on Windows. Measured on an M2 Pro
+(macOS), the same binary with and without `CDJ_MAIN_LOOP_HIRES=0`: a guest
+with no firmware, its TMU0 handler clearing `UNF` and counting at 1 ms, saw
+79.7% of the underflows in 30 s, and all of them with the patch. Stock NXS
+1.44, idle: 26.8% of TMU0's underflows merged, and the RTOS sent its 2 s Pro
+DJ Link keep-alive every 2.73 s of `QEMU_CLOCK_VIRTUAL`; with the patch 0.02%,
+every 2.00 s.
 
 ### What each one costs
 
