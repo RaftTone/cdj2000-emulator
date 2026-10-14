@@ -139,9 +139,41 @@ elif ! grep -q "files($sources)" "$meson_build"; then
     # rewriting just that line keeps this idempotent across future additions.
     echo "refreshing the board source list in hw/sh4/meson.build"
     tmp=$(mktemp)
-    sed "s|^sh4_ss.add(when: 'CONFIG_CDJ2000_MAIN'.*|sh4_ss.add(when: 'CONFIG_CDJ2000_MAIN', if_true: files($sources))|" \
+    sed "s|^sh4_ss.add(when: 'CONFIG_CDJ2000_MAIN', if_true: files(.*|sh4_ss.add(when: 'CONFIG_CDJ2000_MAIN', if_true: files($sources))|" \
         "$meson_build" > "$tmp"
     mv "$tmp" "$meson_build"
+fi
+
+# The C66x DSP core (emulator/c6x/, vendored from cdj-nxs2-qemu, see its
+# VENDORED.md) is a static library of its own: its float results must be exact
+# per operation, so it gets -ffp-contract=off -frounding-math and the board
+# sources do not. The board includes it as "c6x/c66x.h".
+echo "mirroring the C66x core into $QEMU_SRC/hw/sh4/c6x"
+mkdir -p "$QEMU_SRC/hw/sh4/c6x/binutils"
+for source in "$REPO"/emulator/c6x/*.[ch] "$REPO"/emulator/c6x/binutils/*.h; do
+    destination=$QEMU_SRC/hw/sh4/c6x/${source#"$REPO"/emulator/c6x/}
+    cmp -s "$source" "$destination" || cp -v "$source" "$destination"
+done
+c6x_sources=$(cd "$REPO/emulator/c6x" && ls *.c | sed "s/.*/'c6x\/&'/" | paste -sd, -)
+# The JIT's auto-generation (C66X_JIT_AUTO) runs cdj-nxs2-qemu's generator
+# against its offline core library; both paths are baked in as strings.
+c6x_tools=${C66X_JIT_TOOLS:-$HOME/Developer/cdj-nxs2-qemu/hw/cdj/c6x/tools}
+c6x_libdir=${C66X_JIT_LIBDIR:-$HOME/build/c6x}
+c6x_block="cdjc6x = static_library('cdjc6x', files($c6x_sources), c_args: ['-O3', '-ffp-contract=off', '-frounding-math', '-Wno-error', '-DC66X_JIT_TOOLS=\"$c6x_tools\"', '-DC66X_JIT_LIBDIR=\"$c6x_libdir\"'], build_by_default: false)"
+if ! grep -qF "$c6x_block" "$meson_build" || ! grep -q 'link_whole: cdjc6x' "$meson_build"; then
+    echo "wiring the C66x core library into hw/sh4/meson.build"
+    tmp=$(mktemp)
+    awk -v block="$c6x_block" '/^# cdjc6x begin/ { skip = 1 } !skip { print } /^# cdjc6x end/ { skip = 0 }' \
+        "$meson_build" > "$tmp"
+    awk -v block="$c6x_block" '/^hw_arch \+=/ && !done {
+             print "# cdjc6x begin"
+             print block
+             print "sh4_ss.add(when: '\''CONFIG_CDJ2000_MAIN'\'', if_true: declare_dependency(link_whole: cdjc6x))"
+             print "# cdjc6x end"
+             print ""
+             done = 1
+         } { print }' "$tmp" > "$meson_build"
+    rm -f "$tmp"
 fi
 
 kconfig=$QEMU_SRC/hw/sh4/Kconfig
