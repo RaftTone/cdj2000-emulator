@@ -5,6 +5,7 @@
  */
 #include "qemu/osdep.h"
 #include "cdj_dsp_host.h"
+#include "exec/icount.h"
 #include "qemu/main-loop.h"
 #include "qemu/error-report.h"
 #include "qemu/bswap.h"
@@ -100,6 +101,7 @@ static void *host_thread(void *opaque)
     CdjDspHost *h = opaque;
     uint64_t done, run;
 
+    cdj_thread_prefer_fast_core();
     while (qatomic_read(&h->running)) {
         int64_t virt = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
 
@@ -460,8 +462,9 @@ void cdj_dsp_host_init(CdjDspHost *h, const char *name, const char *env_prefix,
 
     h->name = name;
     h->enabled = !(on && !strcmp(on, "0"));
-    h->cycles_per_chunk = (mhz ? strtoull(mhz, NULL, 0) : default_mhz)
-                          * CHUNK_NS / 1000;
+    /* At least one cycle a chunk: the thread divides by it. */
+    h->cycles_per_chunk = MAX((mhz ? strtoull(mhz, NULL, 0) : default_mhz)
+                              * CHUNK_NS / 1000, 1);
     h->slice_cycles = SLICE_CYCLES;
     qemu_mutex_init(&h->lock);
     qemu_mutex_init(&h->progress_lock);
@@ -469,6 +472,19 @@ void cdj_dsp_host_init(CdjDspHost *h, const char *name, const char *env_prefix,
     qemu_cond_init(&h->progress);
     slack = getenv(slack_var);
     h->slack_ns = slack ? strtoull(slack, NULL, 0) * 1000 : 0;
+    /*
+     * Holding MAIN back stops the virtual clock only under -icount (boot_vm
+     * --cosim). Without it the virtual clock is the host's: a core slower
+     * than real time never catches up, each wait is longer than the last,
+     * and the main loop, MAIN's timers and its monitor with it, stall for
+     * good (Windows, 14.10.2026: tens of seconds a tick within two minutes,
+     * the DSP still in its boot loader).
+     */
+    if (h->slack_ns && !icount_enabled()) {
+        warn_report("%s: %s needs -icount (boot_vm --cosim); without it the "
+                    "core is not held to the virtual clock", name, slack_var);
+        h->slack_ns = 0;
+    }
     /* The chip's ROM boot loader raises HINT at reset to tell the host it
      * is ready; MAIN waits for that before it loads anything. */
     h->hpic = HPIC_HINT;

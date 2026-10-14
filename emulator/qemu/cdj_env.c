@@ -24,7 +24,11 @@ bool cdj_report_enabled(void)
 /*
  * Apple Silicon schedules a thread at the default QoS onto an efficiency core
  * when the load is light, and the DSP thread needs a performance core for the
- * whole run. Elsewhere this does nothing. Only the first call per thread acts.
+ * whole run. Windows 11 does the same to a thread it rates as background work
+ * (EcoQoS), which a QEMU without a foreground window is; the thread opts out
+ * of the execution-speed throttling there (the process already opts out of the
+ * timer-resolution one, cdj2000_main.c). Elsewhere this does nothing. Only the
+ * first call per thread acts.
  */
 void cdj_thread_prefer_fast_core(void)
 {
@@ -34,6 +38,30 @@ void cdj_thread_prefer_fast_core(void)
     if (!done) {
         done = true;
         pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+    }
+#elif defined(_WIN32)
+    typedef BOOL (WINAPI *set_information_t)(HANDLE, int, LPVOID, DWORD);
+    static __thread bool done;
+    HMODULE kernel32;
+    set_information_t set_information;
+
+    if (done) {
+        return;
+    }
+    done = true;
+    kernel32 = GetModuleHandleA("kernel32.dll");
+    set_information = kernel32
+        ? (set_information_t)(void *)GetProcAddress(kernel32,
+                                                    "SetThreadInformation")
+        : NULL;
+    if (set_information) {
+        /* THREAD_POWER_THROTTLING_STATE, version 1; control bit 1 is
+         * THREAD_POWER_THROTTLING_EXECUTION_SPEED, state 0 means "do not
+         * throttle". ThreadPowerThrottling is class 3. */
+        struct {
+            ULONG version, control_mask, state_mask;
+        } throttling = { 1, 1, 0 };
+        set_information(GetCurrentThread(), 3, &throttling, sizeof(throttling));
     }
 #endif
 }
