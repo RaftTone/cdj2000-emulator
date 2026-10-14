@@ -24,7 +24,9 @@
  *   the DSP's own clock, as 44.1 kHz 16-bit stereo: the file's time line is
  *   the deck's, with no ring, rate control or host clock in between, so a
  *   silence in it is a silence the DSP produced. The header's sizes are
- *   written at exit. (This tap is ours, not cdj-nxs2-qemu's.) Its first
+ *   written every second of frames and at exit, so a run that ends in a
+ *   kill (Windows has no SIGTERM: taskkill /F skips the exit notifiers)
+ *   still leaves a WAV file. (This tap is ours, not cdj-nxs2-qemu's.) Its first
  *   frame and every 10 s of frames log the virtual clock ("PCM tap frame N
  *   at t=..."), to put the file on the same time line as the panel presses.
  */
@@ -82,6 +84,7 @@ void cdj_dsp_audio_arm(void)
             warn_report("dsp: cannot open CDJ_DSP_PCM_TAP %s", path);
         } else {
             tap_header(tap, 0);
+            fflush(tap);
             tap_exit.notify = tap_close;
             qemu_add_exit_notifier(&tap_exit);
             info_report("dsp: PCM tap -> %s", path);
@@ -101,7 +104,11 @@ void cdj_dsp_audio_frame(unsigned mcasp, uint32_t left, uint32_t right)
             info_report("dsp: PCM tap frame %" PRIu64 " at t=%.6f", tap_frames,
                         qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / 1e9);
         }
-        tap_frames++;
+        if (++tap_frames % 44100 == 0) {
+            tap_header(tap, tap_frames);
+            fseek(tap, 0, SEEK_END);
+            fflush(tap);
+        }
     }
     if (sink && mcasp == DAC_MCASP) {
         cdj_host_audio_put(sink, (int32_t)left >> 16, (int32_t)right >> 16);
