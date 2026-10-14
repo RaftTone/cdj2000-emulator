@@ -65,10 +65,39 @@ static inline uint32_t f2u(float f) { uint32_t v; memcpy(&v, &f, 4); return v; }
 static inline double u2d(uint64_t v) { double d; memcpy(&d, &v, 8); return d; }
 static inline uint64_t d2u(double d) { uint64_t v; memcpy(&v, &d, 8); return v; }
 
+/*
+ * Local change (cdj2000-emulator, 14.10.2026, see VENDORED.md): a NaN result
+ * is the C67x's NaN_out, 0x7FFFFFFF (a product's with the sign of the
+ * product), rather than the host's default NaN, which x86 (0xFFC00000) and
+ * arm64 (0x7FC00000) do not agree on.
+ */
+static inline uint32_t sp_out(float f, uint32_t sign)
+{
+    return f != f ? (sign & 0x80000000u) | 0x7fffffffu : f2u(f);
+}
+
+static inline uint64_t dp_out(double d, uint64_t sign)
+{
+    return d != d ? (sign & 0x8000000000000000ull) | 0x7fffffffffffffffull : d2u(d);
+}
+
+/* The sign bit of the product of two doubles, for dp_out. */
+static inline uint64_t dp_sign(double p, double q)
+{
+    return signbit(p) != signbit(q) ? 0x8000000000000000ull : 0;
+}
+
+/*
+ * Local change (cdj2000-emulator, 14.10.2026): NaN, infinities and values out
+ * of range saturate by sign, 0x7FFFFFFF or 0x80000000, as SPINT, SPTRUNC,
+ * DPINT and DPTRUNC do (SPRU733 notes; cdj_c674x_sp_to_integer). It was
+ * 0x80000000 for all of them, so a sample clipped through SPINT came out at
+ * negative full scale.
+ */
 static int32_t f_to_i32(double x, int mode_trunc, int rm)
 {
     if (x != x || x >= 2147483648.0 || x < -2147483648.0)
-        return (int32_t)0x80000000;
+        return signbit(x) ? (int32_t)0x80000000 : 0x7fffffff;
     if (mode_trunc)
         return (int32_t)x;
     double r;
@@ -79,7 +108,7 @@ static int32_t f_to_i32(double x, int mode_trunc, int rm)
     default: r = nearbyint(x); break;
     }
     if (r >= 2147483648.0 || r < -2147483648.0)
-        return (int32_t)0x80000000;
+        return signbit(r) ? (int32_t)0x80000000 : 0x7fffffff;
     return (int32_t)r;
 }
 
@@ -350,7 +379,9 @@ int fop_run(c66x_core *c, const c66x_insn *in, uint32_t next_pc)
         float p = u2f(c->reg[op[0].reg]), q = u2f(c->reg[op[1].reg]);
         float res = in->fop == F_ADDSP ? p + q : in->fop == F_SUBSP ? p - q : p * q;
         if (rm) host_round(0);
-        sched(c, op[2].low_first - 1, WK_REG, op[2].reg, f2u(res), 0);
+        sched(c, op[2].low_first - 1, WK_REG, op[2].reg,
+              sp_out(res, in->fop == F_MPYSP
+                          ? c->reg[op[0].reg] ^ c->reg[op[1].reg] : 0), 0);
         return 0;
     }
     default:
@@ -1025,7 +1056,7 @@ void exec_insn(c66x_core *c, c66x_insn *in, xctx *x)
         float p = u2f((uint32_t)v[0]), q = u2f((uint32_t)v[1]);
         float res = h == H_ADDSP ? p + q : h == H_SUBSP ? p - q : p * q;
         if (rm) host_round(0);
-        W(2, f2u(res));
+        W(2, sp_out(res, h == H_MPYSP ? (uint32_t)(v[0] ^ v[1]) : 0));
         return;
     }
     case H_ADDDP: case H_SUBDP: case H_MPYDP: case H_MPYSPDP: case H_MPYSP2DP: {
@@ -1037,7 +1068,7 @@ void exec_insn(c66x_core *c, c66x_insn *in, xctx *x)
         else { p = u2d(v[0]); q = u2d(v[1]); }
         res = h == H_ADDDP ? p + q : h == H_SUBDP ? p - q : p * q;
         if (rm) host_round(0);
-        W(2, d2u(res));
+        W(2, dp_out(res, h == H_ADDDP || h == H_SUBDP ? 0 : dp_sign(p, q)));
         return;
     }
     case H_CMPEQSP: W(2, u2f((uint32_t)v[0]) == u2f((uint32_t)v[1])); return;
@@ -1060,21 +1091,21 @@ void exec_insn(c66x_core *c, c66x_insn *in, xctx *x)
     case H_DPINT: W(1, (uint32_t)f_to_i32(u2d(v[0]), 0, rmode(c, in))); return;
     case H_SPTRUNC: W(1, (uint32_t)f_to_i32(u2f((uint32_t)v[0]), 1, 0)); return;
     case H_DPTRUNC: W(1, (uint32_t)f_to_i32(u2d(v[0]), 1, 0)); return;
-    case H_SPDP: W(1, d2u((double)u2f((uint32_t)v[0]))); return;
+    case H_SPDP: W(1, dp_out((double)u2f((uint32_t)v[0]), 0)); return;
     case H_DPSP: {
         unsigned rm = rmode(c, in);
         if (rm) host_round(rm);
         float f = (float)u2d(v[0]);
         if (rm) host_round(0);
-        W(1, f2u(f));
+        W(1, sp_out(f, 0));
         return;
     }
     /* The silicon returns an 8-bit-accurate seed for Newton iteration; the
      * exact value converges to the same result. */
-    case H_RCPSP: W(1, f2u(1.0f / u2f((uint32_t)v[0]))); return;
-    case H_RCPDP: W(1, d2u(1.0 / u2d(v[0]))); return;
-    case H_RSQRSP: W(1, f2u(1.0f / sqrtf(u2f((uint32_t)v[0])))); return;
-    case H_RSQRDP: W(1, d2u(1.0 / sqrt(u2d(v[0])))); return;
+    case H_RCPSP: W(1, sp_out(1.0f / u2f((uint32_t)v[0]), 0)); return;
+    case H_RCPDP: W(1, dp_out(1.0 / u2d(v[0]), 0)); return;
+    case H_RSQRSP: W(1, sp_out(1.0f / sqrtf(u2f((uint32_t)v[0])), 0)); return;
+    case H_RSQRDP: W(1, dp_out(1.0 / sqrt(u2d(v[0])), 0)); return;
 
     /* C66x two-way SIMD: the same 32-bit operation on each half of a pair. */
     case H_DADD: case H_DSUB: case H_DSADD: case H_DSSUB: {
@@ -1097,7 +1128,8 @@ void exec_insn(c66x_core *c, c66x_insn *in, xctx *x)
         uint32_t o[2];
         for (int k = 0; k < 2; k++) {
             float p = u2f((uint32_t)(v[0] >> (32 * k))), q = u2f((uint32_t)(v[1] >> (32 * k)));
-            o[k] = f2u(h == H_DADDSP ? p + q : h == H_DSUBSP ? p - q : p * q);
+            o[k] = sp_out(h == H_DADDSP ? p + q : h == H_DSUBSP ? p - q : p * q,
+                          h == H_DMPYSP ? (uint32_t)((v[0] ^ v[1]) >> (32 * k)) : 0);
         }
         if (rm) host_round(0);
         W(2, ((uint64_t)o[1] << 32) | o[0]);
@@ -1108,7 +1140,8 @@ void exec_insn(c66x_core *c, c66x_insn *in, xctx *x)
         if (rm) host_round(rm);
         for (int k = 0; k < 4; k++) {
             float p = u2f(c->reg[op[0].reg + k]), q = u2f(c->reg[op[1].reg + k]);
-            sched(c, op[2].low_first - 1, WK_REG, op[2].reg + k, f2u(p * q), 0);
+            sched(c, op[2].low_first - 1, WK_REG, op[2].reg + k,
+                  sp_out(p * q, c->reg[op[0].reg + k] ^ c->reg[op[1].reg + k]), 0);
         }
         if (rm) host_round(0);
         return;
@@ -1125,6 +1158,9 @@ void exec_insn(c66x_core *c, c66x_insn *in, xctx *x)
         unsigned rm = rmode(c, in);
         float a_lo = u2f(c->reg[op[0].reg]), a_hi = u2f(c->reg[op[0].reg + 1]);
         float b_lo = u2f(c->reg[op[1].reg]), b_hi = u2f(c->reg[op[1].reg + 1]);
+        uint32_t s_alo = c->reg[op[0].reg], s_ahi = c->reg[op[0].reg + 1];
+        uint32_t s_blo = c->reg[op[1].reg], s_bhi = c->reg[op[1].reg + 1];
+        uint32_t s4[4] = { s_alo ^ s_bhi, ~(s_alo ^ s_blo), s_ahi ^ s_blo, s_ahi ^ s_bhi };
         float r4[4];
 
         if (rm) host_round(rm);
@@ -1133,7 +1169,7 @@ void exec_insn(c66x_core *c, c66x_insn *in, xctx *x)
         r4[2] = a_hi * b_lo;
         r4[3] = a_hi * b_hi;
         for (int k = 0; k < 4; k++)
-            sched(c, op[2].low_first - 1, WK_REG, op[2].reg + k, f2u(r4[k]), 0);
+            sched(c, op[2].low_first - 1, WK_REG, op[2].reg + k, sp_out(r4[k], s4[k]), 0);
         if (rm) host_round(0);
         return;
     }
