@@ -156,10 +156,20 @@ for source in "$REPO"/emulator/c6x/*.[ch] "$REPO"/emulator/c6x/binutils/*.h; do
 done
 c6x_sources=$(cd "$REPO/emulator/c6x" && ls *.c | sed "s/.*/'c6x\/&'/" | paste -sd, -)
 # The JIT's auto-generation (C66X_JIT_AUTO) runs cdj-nxs2-qemu's generator
-# against its offline core library; both paths are baked in as strings.
-c6x_tools=${C66X_JIT_TOOLS:-$HOME/Developer/cdj-nxs2-qemu/hw/cdj/c6x/tools}
-c6x_libdir=${C66X_JIT_LIBDIR:-$HOME/build/c6x}
-c6x_block="cdjc6x = static_library('cdjc6x', files($c6x_sources), c_args: ['-O3', '-ffp-contract=off', '-frounding-math', '-Wno-error', '-DC66X_JIT_TOOLS=\"$c6x_tools\"', '-DC66X_JIT_LIBDIR=\"$c6x_libdir\"'], build_by_default: false)"
+# against its offline core library; C66X_JIT_TOOLS and C66X_JIT_LIBDIR bake
+# their paths in as strings. Unset, the core's own defaults stand, and
+# C66X_JIT_GEN/C66X_JIT_LIB name them at run time. A native Windows binary
+# needs Windows paths there (cygpath -m), not MSYS ones.
+c6x_args="'-O3', '-ffp-contract=off', '-frounding-math', '-Wno-error'"
+if [ -n "${C66X_JIT_TOOLS:-}" ]; then
+    c6x_args="$c6x_args, '-DC66X_JIT_TOOLS=\"$C66X_JIT_TOOLS\"'"
+fi
+if [ -n "${C66X_JIT_LIBDIR:-}" ]; then
+    c6x_args="$c6x_args, '-DC66X_JIT_LIBDIR=\"$C66X_JIT_LIBDIR\"'"
+fi
+# The JIT loads its modules through GModule; QEMU links gmodule only when
+# plugins or modules are enabled, so the library asks for it itself.
+c6x_block="cdjc6x = static_library('cdjc6x', files($c6x_sources), c_args: [$c6x_args], dependencies: dependency('gmodule-no-export-2.0'), build_by_default: false)"
 if ! grep -qF "$c6x_block" "$meson_build" || ! grep -q 'link_whole: cdjc6x' "$meson_build"; then
     echo "wiring the C66x core library into hw/sh4/meson.build"
     tmp=$(mktemp)
