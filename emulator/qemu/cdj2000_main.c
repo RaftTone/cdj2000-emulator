@@ -5073,9 +5073,13 @@ static void cdj_intc_timer_init(MemoryRegion *system, SuperHCPU *cpu)
         cdj_c6727_wires = cdj_c6727_init(system, 0x0C000000);
         qemu_log("cdj2000-main: DSP = C6727 on the C66x core (CDJ_DSP_CORE=c6727)\n");
     } else {
-    cdj_dsp_init(system, dsp_chardev ? qemu_chr_find(dsp_chardev) : NULL,
-                 intc->irqs[CDJ_INTC_DSP_EVENT], cdj_dsp_event_pending,
-                 &cdj_dsp_event_sink);
+        if (dsp_core && *dsp_core) {
+            warn_report("cdj2000-main: CDJ_DSP_CORE=%s is not a DSP core "
+                        "(c6727 is); the DSP model runs", dsp_core);
+        }
+        cdj_dsp_init(system, dsp_chardev ? qemu_chr_find(dsp_chardev) : NULL,
+                     intc->irqs[CDJ_INTC_DSP_EVENT], cdj_dsp_event_pending,
+                     &cdj_dsp_event_sink);
     }
     /*
      * The USB controller sits on the external bus at physical 0x01000000, well

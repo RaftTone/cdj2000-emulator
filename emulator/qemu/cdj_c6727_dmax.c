@@ -149,11 +149,20 @@ static uint32_t *tcc_reg(CdjDmax *d, uint32_t entry, uint32_t *bit)
     return &d->ctl[EV_TCC(entry) < 8 ? CTL_DTCR0 : CTL_DTCR1];
 }
 
+/* The @size bytes at @addr, or NULL unless one RAM holds all of them: the
+ * chip's lookup checks only the first byte, and an element is up to 8. */
+static uint8_t *dmax_ram_span(CdjDmax *d, uint32_t addr, unsigned size)
+{
+    uint8_t *p = d->ram(d->chip, addr);
+
+    return p && d->ram(d->chip, addr + size - 1) == p + size - 1 ? p : NULL;
+}
+
 static void dmax_store(CdjDmax *d, uint32_t dst, const uint8_t *s,
                        unsigned size, uint32_t *port, unsigned *nport,
                        unsigned port_cap, uint32_t *lo, uint32_t *hi)
 {
-    uint8_t *t = d->ram(d->chip, dst);
+    uint8_t *t = dmax_ram_span(d, dst, size);
 
     if (t) {
         memcpy(t, s, size);
@@ -194,7 +203,7 @@ static bool dmax_sync(CdjDmax *d, unsigned max, unsigned event,
         return false;
     }
     for (;;) {
-        uint8_t *s = d->ram(d->chip, src);
+        uint8_t *s = dmax_ram_span(d, src, size);
 
         if (s) {
             dmax_store(d, dst, s, size, port, nport, port_cap, &lo, &hi);

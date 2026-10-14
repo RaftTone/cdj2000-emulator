@@ -147,8 +147,9 @@ static void audio_cb(void *opaque, int avail)
                 int32_t b0 = a->ring[a->rd * 2];
                 int32_t b1 = a->ring[a->rd * 2 + 1];
 
-                out[n++] = (int16_t)(a0 + (((b0 - a0) * f) >> 16));
-                out[n++] = (int16_t)(a1 + (((b1 - a1) * f) >> 16));
+                /* 64-bit: a full-scale step times f is past INT32_MAX. */
+                out[n++] = (int16_t)(a0 + (((int64_t)(b0 - a0) * f) >> 16));
+                out[n++] = (int16_t)(a1 + (((int64_t)(b1 - a1) * f) >> 16));
             }
             a->asrc_frac += a->asrc_step;
             avail -= 4;
@@ -215,10 +216,19 @@ CdjHostAudio *cdj_host_audio_open(const CdjHostAudioCfg *cfg)
     a->ring = g_new0(int16_t, a->cap * 2);
     a->priming = true;
     qemu_mutex_init(&a->lock);
+    /* The audiodev named after the card (-audiodev ...,id=cdj-dsp, as
+     * nxs_vm passes it), else QEMU's default one. Any -audiodev switches the
+     * default off, so the default alone would ignore the one given. */
+    a->be = audio_be_by_name(cfg->card, NULL);
     if (!audio_be_check(&a->be, &err)) {
         warn_report_err(err);
-        warn_report("%s audio: no audio backend (-audio pa,... or wav)",
-                    cfg->label);
+#ifdef _WIN32
+        warn_report("%s audio: no audio backend (-audiodev dsound,id=%s or "
+                    "wav,id=%s)", cfg->label, cfg->card, cfg->card);
+#else
+        warn_report("%s audio: no audio backend (-audiodev pa,id=%s or "
+                    "wav,id=%s)", cfg->label, cfg->card, cfg->card);
+#endif
         return NULL;
     }
     a->voice = audio_be_open_out(a->be, NULL, cfg->voice, a, audio_cb, &as);
