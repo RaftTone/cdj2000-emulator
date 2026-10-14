@@ -1,7 +1,8 @@
 # Third-party software
 
-This repository contains one piece of vendored third-party source (the
-Blackfin core in `emulator/bfin/`, below). Otherwise it contains **patches
+This repository contains two pieces of vendored third-party source (the
+Blackfin core in `emulator/bfin/` and the C66x DSP core in `emulator/c6x/`,
+below). Otherwise it contains **patches
 against** third-party source, and build scripts that fetch it. Each upstream
 keeps its own licence; the patches inherit the licence of what they patch.
 
@@ -77,8 +78,25 @@ QEMU 11.x or newer is required: the board includes `hw/core/boards.h` and
 | licence | GPL-3.0-or-later (SPDX line in the file); the combined `cdj-gui-run` is therefore GPL-3.0-or-later |
 | why | `bin/cdj-run` is the reference the fast core must match bit for bit (`tools/cdj_gui/bfin_diff.py`) |
 
-None of the binutils-derived C66x decoder tables of that repository are
-included; the Blackfin files have no third-party tables.
+The Blackfin files have no third-party tables.
+
+## cdj-nxs2-qemu -- the C66x DSP core behind `CDJ_DSP_CORE=c6727`
+
+| | |
+|---|---|
+| what | `hw/cdj/c6x/` `c66x.h`, `c66x_core_int.h`, `c66x_priv.h`, `c66x_decode.[ch]`, `c66x_ext_table.h`, `c66x_core.c`, `c66x_mem.c`, `c66x_exec.c`, `c66x_step.c`, `c66x_jit.c`, `c66x_core.md` and `binutils/`, in `emulator/c6x/` |
+| where from | Stijn Jacobs, `https://github.com/Stijn-Jacobs/cdj-nxs2-qemu`, commit `c24a89d` (2026-10-10); vendored by RaftTone (PR #47, 2026-10-14) |
+| licence | GPL-2.0-or-later (SPDX line in every core file); `binutils/` and the decoder see below |
+| our changes | two local changes in `c66x_exec.c` (float-to-integer saturation, NaN results), listed in `emulator/c6x/VENDORED.md`; the C6727 chip around the core (`emulator/qemu/cdj_c6727*.c`, `cdj_dsp_host.c`, `cdj_host_audio.c`, `cdj_loop_mute.c`, `cdj_env.c`) is ported from its `hw/cdj/boards/cdj2000/` and `hw/cdj/common/` with a credit line in each file |
+
+### GNU binutils 2.42 C6x tables in `emulator/c6x/binutils/`
+
+| | |
+|---|---|
+| what | `include/opcode/tic6x.h`, `tic6x-opcode-table.h`, `tic6x-insn-formats.h`, `tic6x-control-registers.h`, verbatim except for two includes (`binutils/README`); `c66x_decode.c` is a structured port of `opcodes/tic6x-dis.c` (`print_insn_tic6x`) and includes them |
+| where from | GNU binutils 2.42, Copyright (C) Free Software Foundation, Inc. |
+| licence | GPL-3.0-or-later |
+| consequence | `scripts/build-qemu-sh4.sh` links the core into every `qemu-system-sh4` it builds, so **such a binary combines GPL-3.0-or-later code with GPL-2.0-only QEMU and must not be distributed** (see the last section) |
 
 ## Credit: cdj-nxs2-qemu (Stijn Jacobs)
 
@@ -117,3 +135,12 @@ it is GPL-3.0-or-later as a whole, because `bfin_dsp.c` carries GNU sim code
 (above). Its other files keep their GPL-2.0-or-later SPDX lines;
 `emulator/bfin/LICENSE.md` explains the combination and `emulator/bfin/COPYING3`
 has the licence text. Nothing in `emulator/bfin/` is linked into QEMU.
+
+The second exception is the QEMU build itself, since 14.10.2026: it links
+`emulator/c6x/`, whose decoder carries GNU binutils' GPL-3.0-or-later C6x
+tables (above). Our own files there and in `emulator/qemu/` keep their
+GPL-2.0-or-later SPDX lines, but a `qemu-system-sh4` built from this tree is
+GPL-3.0-or-later code linked with GPL-2.0-only QEMU, which no licence lets
+anyone distribute: build it for your own use only. Our own C674x decoder
+(`emulator/qemu/cdj_c674x.c`) decodes all 79 824 instructions of the 4.33 DSP
+program the same way and could replace the tables, which would lift this.

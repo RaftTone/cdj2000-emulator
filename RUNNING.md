@@ -1227,6 +1227,41 @@ probes need and costs about a third of the throughput; a plain run pays one
 branch per instruction for them. The simulator says `bfin: probes on (NAME is
 set)` on its log when that happens, so a slow run can be explained.
 
+### The real DSP core (`CDJ_DSP_CORE=c6727`)
+
+On the CDJ-2000 (not the NXS profiles) `CDJ_DSP_CORE=c6727` replaces the
+behavioural DSP model with the C6727 on the C66x core of cdj-nxs2-qemu
+(`emulator/c6x/`, see its `VENDORED.md`): MAIN loads the DSP program from its
+own flash through the HPI window and the 4.33 program decodes and plays the
+track. The model's switches (`CDJ_DSP_ACK`, `CDJ_DSP_POSITION`, ...) do not
+apply. With it:
+
+- `CDJ_DSP_PCM_TAP=FILE.wav` -- every frame the DSP sends to the DAC, 44.1 kHz
+  16-bit stereo on the DSP's own clock; the header is rewritten every second,
+  so a run stopped with `taskkill /F` still leaves a valid file;
+- `CDJ_C6727_REPORT_S=N` -- a status line every N s of guest time (`ms
+  behind` is the core's lag behind the virtual clock); `CDJ_REPORT=1` adds
+  the exit reports;
+- `CDJ_DSP_AUDIO=1` -- the output on a host voice: `-audiodev ...,id=cdj-dsp`
+  if one is given, QEMU's default backend otherwise;
+- `CDJ_C6727_SLACK_US=N` -- hold MAIN until the core is within N us of the
+  virtual clock. Only under `-icount` (`boot_vm --cosim`, which Windows does
+  not have): without it the virtual clock is the host's, holding MAIN only
+  stalls its main loop, and the board ignores the setting with a warning.
+
+A track load and PLAY on Windows, with the twoboard recipe above (the core
+kept up there with 0 ms of lag, the tap filled at 1.000x of guest time):
+
+```
+python -m tools.cdj_main.twoboard c6727-1 --card CARD --seconds 360 --keys keys.txt \
+    --env CDJ_DSP_CORE=c6727 --env CDJ_DSP_PCM_TAP=C:/cdj-build/runs/c6727-1-tap.wav \
+    --env CDJ_C6727_REPORT_S=5
+```
+
+with `200 press 16.0` (PLAY) in `keys.txt`. `qemu-stderr.log` then shows
+`cdj2000-dsp: control +0x7ba0 command ...` and `position ... (c6727)` lines in
+the model's format.
+
 ### Media read speed
 
 Both media models hand read data over as fast as the host reads the image
