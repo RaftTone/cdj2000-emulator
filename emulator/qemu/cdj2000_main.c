@@ -268,6 +268,7 @@ enum {
     CDJ_INTC_TMU3,
     CDJ_INTC_TMU4,
     CDJ_INTC_TMU5,
+    CDJ_INTC_USBF,
     CDJ_INTC_NR_SOURCES,
 };
 
@@ -464,6 +465,7 @@ enum {
 #define INTC2_STATUS_SIZE       0x10
 #define INTC2_STATUS2_OFFSET    0x0c        /* 0xffd4005c */
 #define INTC2_DSP_EVENT_BIT     (1u << 24)  /* tested by the DSP stub 0x26260c */
+#define INTC2_USBF_BIT          (1u << 19)  /* its neighbour 0x2625f6: USB-B */
 #define LINK_RX_IRQ    0x50
 #define LINK_TX_IRQ  0x55
 #define INTEVT_LINK_RX   (LINK_RX_IRQ * 0x20)     /* 0xa00 */
@@ -1953,6 +1955,21 @@ typedef struct {
 } CdjDspEventSink;
 
 static CdjDspEventSink cdj_dsp_event_sink;
+
+/* INT0 of the USB-B controller, as bit 19 of the same status word. */
+static CdjIntc2State *cdj_usbf_intc2;
+
+static void cdj_usbf_pending(void *opaque, bool raised)
+{
+    (void)opaque;
+    if (cdj_usbf_intc2) {
+        if (raised) {
+            cdj_usbf_intc2->status2 |= INTC2_USBF_BIT;
+        } else {
+            cdj_usbf_intc2->status2 &= ~INTC2_USBF_BIT;
+        }
+    }
+}
 
 static void cdj_dsp_event_pending(void *opaque, bool raised)
 {
@@ -3966,6 +3983,19 @@ static void cdj_debug_console_init(void)
 #define INTEVT_DSP_EVENT (DSP_EVENT_IRQ * 0x20)  /* 0xfe0 */
 
 /*
+ * The type-B socket's USB controller (M66291GP, cdj2000_usb.c) interrupts on
+ * irq 0x7e, INTEVT 0xfc0, the DSP event's neighbour: its RTOS record at
+ * 0x0409f4c8 is {0x7e, handler 0x042625f6, level 4}, and the handler reads the
+ * second INTC2 status word (0xffd4005c) and calls the USB function driver when
+ * bit 19 is set, exactly as 0x0426260c calls the DSP handler for bit 24.  The
+ * chip's INT0 pin is that bit.  (The record and the handler are read from the
+ * image; the vector sharing with the DSP's is the SoC's, not a guess.)
+ */
+#define USBF_IRQ        0x7e
+#define INTEVT_USBF     (USBF_IRQ * 0x20)       /* 0xfc0 */
+#define USBF_PRIO       4
+
+/*
  * The disc drive.  irq 0x60 with ISR 0x109180, read out of the RTOS thunk
  * block with `isr_map`; 0x10918a loads 0xfff00080, which is the cross-check.
  * Unlike the three above, ATAPI_TSK programs its own level, into INT2PRI6
@@ -4865,6 +4895,7 @@ static void cdj_link_board_init(MemoryRegion *system, struct intc_desc *intc)
                           "cdj2000.intc2-status", INTC2_STATUS_SIZE);
     memory_region_add_subregion(system, INTC2_STATUS, &intc2->iomem);
     cdj_dsp_event_sink.intc2 = intc2;
+    cdj_usbf_intc2 = intc2;
     cdj_dsp_event_sink.flag = flag;
 
     flag->panel_present = !getenv("CDJ_NO_PANEL");
@@ -4977,6 +5008,7 @@ static void cdj_intc_timer_init(MemoryRegion *system, SuperHCPU *cpu)
         INTC_VECT(CDJ_INTC_DSP_DMA, INTEVT_DSP_DMA),
         INTC_VECT(CDJ_INTC_DMA5, INTEVT_DMA5),
         INTC_VECT(CDJ_INTC_DSP_EVENT, INTEVT_DSP_EVENT),
+        INTC_VECT(CDJ_INTC_USBF, INTEVT_USBF),
         INTC_VECT(CDJ_INTC_ATA, INTEVT_ATA),
         INTC_VECT(CDJ_INTC_USB, INTEVT_USB),
         INTC_VECT(CDJ_INTC_USB_DMA, INTEVT_USB_DMA),
@@ -5041,6 +5073,8 @@ static void cdj_intc_timer_init(MemoryRegion *system, SuperHCPU *cpu)
     /* Likewise channel 5's: its record at 0xa40668fc says level 4. */
     intc->sources[CDJ_INTC_DMA5].prio = PANEL_PRIO;
     intc->sources[CDJ_INTC_DSP_EVENT].prio = DSP_PRIO;
+    /* The USB-B controller's vector is registered by the driver, level 4. */
+    intc->sources[CDJ_INTC_USBF].prio = USBF_PRIO;
     cpu->env.intc_handle = intc;
 
     cdj_sdhi_init(system, intc->irqs[CDJ_INTC_SDHI]);
@@ -5087,7 +5121,7 @@ static void cdj_intc_timer_init(MemoryRegion *system, SuperHCPU *cpu)
      * 0x2399c8 never sees its bit and MAIN reports device 3 broken, which is
      * `E-7020: USB-B DEVICE ERROR`.
      */
-    cdj_usb_init(system);
+    cdj_usb_init(system, intc->irqs[CDJ_INTC_USBF], cdj_usbf_pending, NULL);
     /*
      * The disc drive.  Without it 0xfff0001c answers zero, ATAPI_TSK polls the
      * status register 44 856 times in a two-minute run and MAIN reports device

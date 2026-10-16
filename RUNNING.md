@@ -1444,6 +1444,67 @@ python -m tools.cdj_main.nxs_vm runs/nxs-b --seconds 600 --lightweight \
   or dgram netdev) needs the EtherC to pad its short frames: its ARP
   replies are 42 bytes.
 
+## USB-B: a computer on the rear socket (CDJ-2000)
+
+The type-B socket's controller is a Renesas M66291GP. The register window, the
+VBUS bit and the enable-and-poll that decides `E-7020` are LycheeAPPF's
+(`cdj2000_usb.c`); the chip itself, the host interface and the host are
+RaftTone's (`cdj2000_usb_model.c`, `tools/cdj_main/usbb_host.py`), written from
+the M66291GP/HP data sheet (Rev.1.11). The loopback UDP host follows the idea in
+Stijn Jacobs' NXS model (`CDJ_USBF_HOST`) and P2GR's HID relay on it
+(cdj-nxs2-qemu PR #15); the framing, documented at the top of `cdj2000_usb.c`,
+is different, because here the model is the device and the host is outside.
+
+```sh
+# the deck (MAIN only is enough to enumerate); one QEMU at a time
+CDJ_USBB_HOST=5990 build/qemu/build/qemu-system-sh4 -M cdj2000-main \
+  -bios firmware/main-firmware.bin -display none -no-reboot \
+  -serial null -serial null -serial null -monitor none -nodefaults
+
+# the computer: plugs in, resets, GET_DESCRIPTOR, SET_ADDRESS,
+# SET_CONFIGURATION, the HID report descriptor, then polls the HID IN endpoint
+python -m tools.cdj_main.usbb_host --port 5990 --reports 3 --json
+```
+
+`CDJ_USBB_HOST=<port>` makes the emulator listen on UDP 127.0.0.1:<port> and
+starts with no cable (VBUS low); `CDJ_USB_VBUS=1` still means a cable at power
+up, and `CDJ_USB_ABSENT=1` is the machine before the chip existed (`E-7020`).
+`CDJ_USB_TRACE=1` logs every register access, `CDJ_USBB_TRACE=1` the host's
+transactions (`=all` adds the NAKed polls). The chip's INT0 reaches the SH7763 as
+irq 0x7e (INTEVT 0xfc0), bit 19 of the second INTC2 status word.
+
+HID reports need the whole deck, not MAIN alone. MAIN starts its HID IN client
+only after the player's mode logic has switched to PC control mode, which the
+LINK key does once USB-B is connected: the GUI shows `CONTROL MODE (HID
+ADVANCED)` / `USB MIDI` / `PUSH TO CONNECT.`, and the encoder push connects.
+With the Blackfin simulator and `packets/` in place (BUILD.md, RUNNING.md
+above):
+
+```sh
+export CDJ_QEMU=$PWD/build/qemu/build/qemu-system-sh4
+CDJ_USBB_HOST=5990 CDJ_INPUT_PORT=5984 python -m tools.cdj_main.boot_vm \
+  --seconds 420 --frames runs/usbb/frames --frame-every 15 &
+python -m tools.cdj_main.usbb_host --port 5990 --reports 20 --seconds 300 &
+# once the GUI is up (about 100 s):
+python -m tools.cdj_main.panel_control --port 5984 press link --ack
+python -m tools.cdj_main.panel_control --port 5984 press 17.0 --ack   # encoder push
+```
+
+Measured on 2026-10-16 with stock 4.33: after LINK the host receives 20 byte
+reports on EP5 (0x85) and three MIDI packets on EP3 (0x83); after the encoder
+push the display shows `PC` with the deck-to-laptop link, and jog and button
+presses change the reports.
+
+What it shows: the deck connects (TrON high) only after it has seen VBUS, the
+descriptors read, `SET_CONFIGURATION` runs, the HID report descriptor reads,
+MAIN's device-status entry for the USB function stays 1 (no `E-7020`), and with
+the whole deck the HID IN reports flow.
+Not modelled: SOF and isochronous delivery, DMA ports, DATA0/DATA1 toggling,
+timing. Tests: `tests/test_usb_m66291.py` (the chip alone),
+`tests/test_usbb_host.py` (the host against a stand-in), and
+`tests/test_usbb_firmware.py` (the real MAIN, skipped without firmware and a
+built emulator).
+
 ## One QEMU at a time
 
 Run QEMU serially. Several TCG instances distort the timing races this firmware

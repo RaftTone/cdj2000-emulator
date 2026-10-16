@@ -44,12 +44,17 @@
  * inventing a single value.  The one input the guest cannot produce is VBUS,
  * and the model owns that.
  *
- * **No USB traffic is modelled at all** — no reset, no enumeration, no
- * descriptors, no endpoints, no MIDI, HID or audio.  This is the same scope as
- * cdj2000_dsp.c, which models no audio path: the device exists so that the
- * bring-up succeeds and MAIN stops reporting the port as broken.
+ * **No USB traffic was modelled at all** when this was written -- no reset, no
+ * enumeration, no descriptors, no endpoints, no MIDI, HID or audio.  That was
+ * the same scope as cdj2000_dsp.c, which models no audio path: the device
+ * existed so that the bring-up succeeds and MAIN stops reporting the port as
+ * broken.  The chip itself (a Renesas M66291GP) is now modelled behind this
+ * window, with a host on the other side of the cable; that is
+ * cdj2000_usb_model.h and cdj2000_usb_model.c (RaftTone, from the M66291GP/HP
+ * data sheet).  Everything above is LycheeAPPF's derivation and still holds.
  *
  * Copyright (C) 2026 LycheeAPPF
+ * Copyright (C) 2026 RaftTone (the additions marked above)
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
@@ -57,44 +62,27 @@
 #define CDJ2000_USB_H
 
 #include "exec/hwaddr.h"
+#include "hw/core/irq.h"
 #include "system/memory.h"
 
 /*
- * The register window.  The base is not inferred: 0x2399c8, 0x2399bc, 0x2397cc
- * and 0x2df2d4 all build 0xA1000000 with the same `#-95 << 8 << 16`, and P2
- * strips to physical 0x01000000.  The highest offset any code in the image
- * touches is 0x60 (0x23987x and the usbh block at 0x238000..0x240000); a page is
- * mapped so that a stray access lands on the device and is logged rather than
- * disappearing into unassigned memory.
+ * The register window (CDJ_USB_BASE, CDJ_USB_SIZE), the offsets the firmware
+ * proves, the model's constructor and its read and write entry points are in
+ * cdj2000_usb_model.h, which does not depend on QEMU so that the chip can be
+ * tested on its own.
  */
-#define CDJ_USB_BASE          0x01000000
-#define CDJ_USB_SIZE          0x1000
-
-/* The offsets the firmware proves.  Everything else is a plain register. */
-#define CDJ_USB_ENABLE        0x00   /* bit 0 is what 0x2399c8 polls */
-#define CDJ_USB_ENABLE_BIT    0x0001
-#define CDJ_USB_STATUS        0x18   /* bit 7 = VBUS, read at 0x2deb4e */
-#define CDJ_USB_VBUS_BIT      0x0080
-
-typedef struct CdjUsbModel CdjUsbModel;
+#include "cdj2000_usb_model.h"
 
 /*
- * Create a model.  `absent` keeps the window mapped but makes it answer like
- * unmapped memory — reads 0, writes dropped — which is the machine exactly as
- * it was before this device existed, and therefore the control an A/B needs.
+ * The device side, called from the board.  `int0` is the M66291's INT0 pin as
+ * the SH7763 sees it (NULL leaves it unconnected, which is the machine as it
+ * was), and `level` is told the pin's level as well, for the INTC2 status bit
+ * that goes with it.  INT1 is not wired on this board; the firmware assigns
+ * every source to INT0.
  */
-CdjUsbModel *cdj_usb_model_new(bool absent, bool vbus);
+typedef void (*CdjUsbLevelFn)(void *opaque, bool asserted);
 
-/* Back to reset: the module is off and nothing has been configured. */
-void cdj_usb_model_reset(CdjUsbModel *model);
-
-uint16_t cdj_usb_model_read(CdjUsbModel *model, hwaddr offset);
-void cdj_usb_model_write(CdjUsbModel *model, hwaddr offset, uint16_t value);
-
-/* True once the guest has enabled the module, i.e. once bit 0 of 0x00 is set. */
-bool cdj_usb_model_enabled(const CdjUsbModel *model);
-
-/* The device side, called from the board. */
-void cdj_usb_init(MemoryRegion *system);
+void cdj_usb_init(MemoryRegion *system, qemu_irq int0, CdjUsbLevelFn level,
+                  void *opaque);
 
 #endif /* CDJ2000_USB_H */
