@@ -1488,12 +1488,22 @@ python -m tools.cdj_main.usbb_host --port 5990 --reports 20 --seconds 300 &
 # once the GUI is up (about 100 s):
 python -m tools.cdj_main.panel_control --port 5984 press link --ack
 python -m tools.cdj_main.panel_control --port 5984 press 17.0 --ack   # encoder push
+# still `PUSH TO CONNECT.` ten seconds later?  push again
 ```
 
 Measured on 2026-10-16 with stock 4.33: after LINK the host receives 20 byte
 reports on EP5 (0x85) and three MIDI packets on EP3 (0x83); after the encoder
 push the display shows `PC` with the deck-to-laptop link, and jog and button
 presses change the reports.
+
+On Windows (same day, Sep-6 Blackfin simulator) the reports began with the push
+that connected, the moment MAIN enabled EP5's BRDY; before it MAIN only re-arms
+EP4 (HID OUT) about ten times a second. One push was not always enough: with
+LINK at 110 s and the push at 138 s, the first push connected in one run of
+four, a second push 23 s later connected in the run that tried one, and with
+the cable plugged in at 90 s LINK opened the `CONTROL MODE` / `USB MIDI` menu,
+so the first push only selected CONTROL MODE. Once connected: 344 to 449
+reports and 7 to 9 MIDI packets in about 70 s.
 
 What it shows: the deck connects (TrON high) only after it has seen VBUS, the
 descriptors read, `SET_CONFIGURATION` runs, the HID report descriptor reads,

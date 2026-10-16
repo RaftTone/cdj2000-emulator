@@ -423,7 +423,8 @@ def main(argv=None) -> int:
         print(json.dumps(rep.as_dict(), indent=2))
     else:
         say(f"done: {len(rep.reports)} report(s), final state {rep.final_state}")
-    return 0 if rep.configured and rep.reports else 2
+    wanted = rep.reports or args.reports <= 0      # --reports 0: enumerate only
+    return 0 if rep.configured and wanted else 2
 
 
 if __name__ == "__main__":
