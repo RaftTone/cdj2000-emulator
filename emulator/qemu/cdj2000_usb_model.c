@@ -307,6 +307,15 @@ static void ep_clear(CdjUsbModel *m, unsigned i)
     ep->sie_full = false;
     ep->ival = false;
     m->rdy &= ~(1u << i);
+    /*
+     * An IN buffer that has just been cleared is writable at once, and BRDY
+     * says so without waiting for a token (data sheet 2.13: IVAL changing to 0
+     * or DIR going 0 -> 1).  The driver enables BRDY and writes its first
+     * packet on that interrupt; it is what makes the first report go out.
+     */
+    if (i && ep_typ(m, i) && ep_is_in(m, i)) {
+        m->rdy |= 1u << i;
+    }
 }
 
 /* An OUT transfer has arrived whole on the SIE side: hand it to the CPU. */

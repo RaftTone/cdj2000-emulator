@@ -269,6 +269,12 @@ static void test_endpoints(void)
     WR(0x64, 0x4000 | 0x0080 | 8);
     WR(0x66, 64);
     WR(0x12, 0x07);
+    /* A cleared IN buffer is ready at once, with no token (2.13; the driver
+     * enables BRDY and writes its first packet on that interrupt). */
+    WR(0x62, 20 | 0x0800);
+    WR(0x62, 20);
+    assert(RD(0x1a) & 2);
+    assert(pin[0]);
     for (k = 0; k < 20; k++) {
         report[k] = (uint8_t)(0xa0 + k);
     }
@@ -276,6 +282,8 @@ static void test_endpoints(void)
     /* Not yet armed: PID NAK, no NRDY (2.40 EPi_PID). */
     assert(cdj_usb_model_host_in(m, addr, 1, buf, 20, &n) == CDJ_USB_NAK);
     assert(!(RD(0x1c) & 2));
+    WR(0x1a, 0);                                /* RDYM 0: a write does not clear it */
+    assert(RD(0x1a) & 2);
     WR(0x62, 0x4000 | 20);                      /* BUF */
     assert(cdj_usb_model_host_in(m, addr, 1, buf, 20, &n) == CDJ_USB_NAK);
     assert(RD(0x1c) & 2);                       /* NRDY now */

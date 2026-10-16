@@ -120,6 +120,21 @@ class Bus:
         size = struct.unpack_from("<H", reply, 4)[0]
         return result, reply[6:6 + size]
 
+    def wait_ready(self, seconds: float = 60.0) -> Status:
+        """Ask for the status until the emulator answers (it may still be starting)."""
+        deadline = time.monotonic() + seconds
+        old = self.sock.gettimeout()
+        self.sock.settimeout(0.5)
+        try:
+            while True:
+                try:
+                    return self.status()
+                except Timeout:
+                    if time.monotonic() > deadline:
+                        raise
+        finally:
+            self.sock.settimeout(old)
+
     def status(self) -> Status:
         result, payload = self.request(OP_STATUS)
         if result != ACK:
@@ -276,6 +291,7 @@ def enumerate_deck(bus: Bus, say=print, attach_timeout: float = 120.0,
                    settle: float = 0.1, nak_timeout: float = 20.0) -> tuple[Host, Report]:
     host = Host(bus, nak_timeout=nak_timeout)
     rep = Report()
+    bus.wait_ready(min(attach_timeout, 60.0))
     wait_attached(bus, attach_timeout, say)
     say("deck connected; settling")
     time.sleep(settle)
