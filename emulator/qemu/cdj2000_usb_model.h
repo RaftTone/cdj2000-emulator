@@ -157,6 +157,10 @@ void cdj_usb_model_write(CdjUsbModel *model, uint32_t offset, uint16_t value);
 bool cdj_usb_model_write_byte(CdjUsbModel *model, uint32_t offset,
                               uint8_t value);
 
+/* The same for a byte read: one byte leaves the FIFO, not a word's two. */
+bool cdj_usb_model_read_byte(CdjUsbModel *model, uint32_t offset,
+                             uint8_t *value);
+
 /* True once the guest has enabled the module, i.e. once bit 0 of 0x00 is set. */
 bool cdj_usb_model_enabled(const CdjUsbModel *model);
 

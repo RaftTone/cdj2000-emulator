@@ -100,10 +100,17 @@ static void cdj_usb_pin(void *opaque, unsigned pin, bool asserted)
 static uint64_t cdj_usb_read(void *opaque, hwaddr offset, unsigned size)
 {
     CdjUsbState *usb = opaque;
-    uint16_t value = cdj_usb_model_read(usb->model, offset);
+    uint16_t value;
+    uint8_t byte;
 
-    if (size == 1) {
-        value = (offset & 1) ? value >> 8 : value & 0xff;
+    /* A byte read of a FIFO data register takes one byte, as a write does. */
+    if (size == 1 && cdj_usb_model_read_byte(usb->model, offset, &byte)) {
+        value = byte;
+    } else {
+        value = cdj_usb_model_read(usb->model, offset);
+        if (size == 1) {
+            value = (offset & 1) ? value >> 8 : value & 0xff;
+        }
     }
     if (usb->trace) {
         qemu_log("cdj2000-usb: read  %#04" HWADDR_PRIx " (%u) = %#06x\n",

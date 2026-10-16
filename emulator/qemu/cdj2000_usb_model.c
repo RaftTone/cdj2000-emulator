@@ -377,17 +377,20 @@ static void in_drained(CdjUsbModel *m, unsigned i)
     m->emp |= 1u << i;                  /* BEMP: nothing left to send */
 }
 
-static void port_push(CdjUsbModel *m, unsigned i, uint8_t byte)
+/* Returns true when this byte completed the packet (or was refused). */
+static bool port_push(CdjUsbModel *m, unsigned i, uint8_t byte)
 {
     Ep *ep = &m->ep[i];
 
     if (!ep_is_in(m, i) || ep->ival || ep->cpu_len >= EP_BUF) {
-        return;
+        return true;
     }
     ep->cpu[ep->cpu_len++] = byte;
     if (ep->cpu_len >= ep_write_complete(m, i)) {
         in_commit(m, i);
+        return true;
     }
+    return false;
 }
 
 static int port_pop(CdjUsbModel *m, unsigned i)
@@ -430,6 +433,11 @@ static void ep_bclr(CdjUsbModel *m, unsigned i)
             ep->sie_len = ep->sie_pos = 0;
             ep->cpu_len = 0;
             ival_set(m, 0, false);
+        } else if (ep_dbl(m, i)) {
+            /* Double-buffered, IVAL=1 is a packet on the CPU side behind the
+             * one the SIE holds: that is the buffer BCLR clears. */
+            ep->cpu_len = 0;
+            ival_set(m, i, false);
         }
     } else if (ep->ival) {
         ep->cpu_len = ep->cpu_pos = 0;
@@ -513,16 +521,23 @@ static bool port_rcnt(const CdjUsbModel *m, unsigned port)
 static uint16_t port_data_read(CdjUsbModel *m, unsigned port)
 {
     unsigned ep = port_ep(m, port);
+    unsigned left;
     int lo, hi = 0;
 
     if (ep == 0xff || !clocked(m)) {
         return 0;
     }
+    /*
+     * The last byte of an odd-length packet comes alone: popping it hands a
+     * double-buffered endpoint's next packet to the CPU, which must not lose
+     * its first byte to this read.
+     */
+    left = m->ep[ep].cpu_len - m->ep[ep].cpu_pos;
     lo = port_pop(m, ep);
     if (lo < 0) {
         return 0;
     }
-    if (!port_octl(m, port)) {
+    if (!port_octl(m, port) && left >= 2) {
         hi = port_pop(m, ep);
         if (hi < 0) {
             hi = 0;
@@ -538,14 +553,18 @@ static void port_data_write(CdjUsbModel *m, unsigned port, uint16_t value)
     if (ep == 0xff || !clocked(m)) {
         return;
     }
+    /* A byte that completes the packet ends the word: the other half of it
+     * must not start a double-buffered endpoint's next packet. */
     if (port_octl(m, port)) {
         port_push(m, ep, value & 0xff);
     } else if (port_bswp(m, port)) {
-        port_push(m, ep, value >> 8);
-        port_push(m, ep, value & 0xff);
+        if (!port_push(m, ep, value >> 8)) {
+            port_push(m, ep, value & 0xff);
+        }
     } else {
-        port_push(m, ep, value & 0xff);
-        port_push(m, ep, value >> 8);
+        if (!port_push(m, ep, value & 0xff)) {
+            port_push(m, ep, value >> 8);
+        }
     }
 }
 
@@ -628,6 +647,10 @@ static void soft_reset(CdjUsbModel *m)
     for (unsigned i = 0; i < CDJ_USB_EPS; i++) {
         ep_clear(m, i);
     }
+    /* ep_clear raises BRDY for a cleared IN buffer; INTSTS1 is H'0000 here,
+     * and so are the setup registers 0x20-0x26 that read m->setup. */
+    m->rdy = 0;
+    memset(m->setup, 0, sizeof(m->setup));
     irq_update(m);
 }
 
@@ -837,6 +860,32 @@ bool cdj_usb_model_write_byte(CdjUsbModel *model, uint32_t offset, uint8_t value
     return true;
 }
 
+bool cdj_usb_model_read_byte(CdjUsbModel *model, uint32_t offset, uint8_t *value)
+{
+    unsigned port;
+
+    if (model->absent) {
+        return false;
+    }
+    switch (offset & ~1u) {
+    case M66291_EP0_DATA:  port = PORT_EP0; break;
+    case M66291_CPU_DATA:  port = PORT_CPU; break;
+    case M66291_D0_DATA:   port = PORT_D0; break;
+    case M66291_D1_DATA:   port = PORT_D1; break;
+    default:               return false;
+    }
+    *value = 0;
+    if (port_ep(model, port) != 0xff && clocked(model)) {
+        int byte = port_pop(model, port_ep(model, port));
+
+        if (byte >= 0) {
+            *value = byte;
+        }
+        irq_update(model);
+    }
+    return true;
+}
+
 static void port_select_write(CdjUsbModel *m, unsigned port, uint16_t value)
 {
     unsigned offset = port_select_offset(port);
@@ -856,6 +905,9 @@ static void ep_config0_write(CdjUsbModel *m, unsigned i, uint16_t value)
     w(m, M66291_EP_CONFIG0(i), value);
     if (!(old & 0x2000) && (value & 0x2000)) {
         m->rdy |= 1u << i;                  /* DIR 0 -> 1: the buffer is writable */
+    } else if ((old & 0x2000) && !(value & 0x2000) && !rdym(m)) {
+        m->rdy &= ~(1u << i);               /* DIR 1 -> 0: no longer, and with
+                                             * RDYM=0 no write could clear it */
     }
 }
 
@@ -975,6 +1027,10 @@ void cdj_usb_model_write(CdjUsbModel *model, uint32_t offset, uint16_t value)
             m->ep[ep].sie_len = m->ep[ep].sie_pos = 0;
             if (!ep_dbl(m, ep)) {
                 ival_set(m, ep, false);
+            } else if (m->ep[ep].ival) {
+                /* The CPU side's packet moves up, as when the SIE side drains;
+                 * left where it was, the endpoint would NAK until an ACLR. */
+                in_drained(m, ep);
             }
         } else if (ep != 0xff && !ep_is_in(m, ep) && (value & 0x2000)) {
             /* TGL: force the buffer being received into the CPU's hands. */

@@ -341,6 +341,101 @@ static void test_endpoints(void)
     assert(cdj_usb_model_host_in(m, addr, 5, buf, 64, &n) == CDJ_USB_NORESP);
 }
 
+/* Double buffers, odd lengths and the CPU's clears (review of #48). */
+static void test_double_buffers(void)
+{
+    CdjUsbModel *m = bring_up();
+    unsigned addr;
+    uint8_t p1[3] = { 0x11, 0x22, 0x33 }, p2[3] = { 0xa1, 0xa2, 0xa3 };
+    uint8_t p3[4] = { 1, 2, 3, 4 }, buf[64], byte;
+    size_t n;
+
+    host_reset_and_address(m, &addr, true);
+    /* EP2 bulk OUT, double buffered: the odd byte of packet 1 comes alone and
+     * packet 2 reaches the CPU whole. */
+    WR(0x64, 0x4000 | 0x0080 | 8);
+    WR(0x66, 0x4000 | 64);
+    assert(cdj_usb_model_host_out(m, addr, 2, p1, 3) == CDJ_USB_ACK);
+    assert(cdj_usb_model_host_out(m, addr, 2, p2, 3) == CDJ_USB_ACK);
+    WR(0x40, 2);
+    assert(RD(0x44) == 0x2211);
+    assert(RD(0x44) == 0x0033);
+    assert((RD(0x42) & 0x7ff) == 3 && (RD(0x42) & 0x2000));
+    assert(RD(0x44) == 0xa2a1);
+    assert(RD(0x44) == 0x00a3);
+    /* A byte read takes one byte, whichever lane it is on. */
+    assert(cdj_usb_model_host_out(m, addr, 2, p3, 4) == CDJ_USB_ACK);
+    assert(cdj_usb_model_read_byte(m, 0x44, &byte) && byte == 1);
+    assert(cdj_usb_model_read_byte(m, 0x45, &byte) && byte == 2);
+    assert(RD(0x44) == 0x0403);
+    assert(!cdj_usb_model_read_byte(m, 0x42, &byte));
+
+    /* EP1 IN, double buffered, 3 byte packets: the word that completes a
+     * packet does not start the next one with its other byte. */
+    WR(0x60, 0x8000 | 0x2000 | 0x0080 | 1);
+    WR(0x62, 0x4000 | 3);
+    WR(0x40, 1);
+    WR(0x44, 0x2211);
+    WR(0x44, 0x4433);
+    WR(0x44, 0x6655);
+    assert(cdj_usb_model_write_byte(m, 0x44, 0x77));
+    assert(cdj_usb_model_host_in(m, addr, 1, buf, 64, &n) == CDJ_USB_ACK);
+    assert(n == 3 && buf[0] == 0x11 && buf[2] == 0x33);
+    assert(cdj_usb_model_host_in(m, addr, 1, buf, 64, &n) == CDJ_USB_ACK);
+    assert(n == 3 && buf[0] == 0x55 && buf[2] == 0x77);
+
+    /* SCLR drops the packet the SIE holds; the one waiting behind it on the
+     * CPU side moves up instead of wedging the endpoint. */
+    WR(0x62, 0x4000 | 4);
+    WR(0x44, 0x0201);
+    WR(0x44, 0x0403);
+    WR(0x44, 0x1211);
+    WR(0x44, 0x1413);
+    assert(RD(0x42) & 0x2000);
+    WR(0x46, 0x1000);
+    assert(!(RD(0x42) & 0x2000));
+    assert(cdj_usb_model_host_in(m, addr, 1, buf, 64, &n) == CDJ_USB_ACK);
+    assert(n == 4 && buf[0] == 0x11);
+
+    /* BCLR clears the CPU side's packet, not the one the SIE holds. */
+    WR(0x44, 0x0201);
+    WR(0x44, 0x0403);
+    WR(0x44, 0x1211);
+    WR(0x44, 0x1413);
+    WR(0x42, 0x1000);
+    assert(!(RD(0x42) & 0x2000));
+    assert(cdj_usb_model_host_in(m, addr, 1, buf, 64, &n) == CDJ_USB_ACK);
+    assert(n == 4 && buf[0] == 0x01);
+    assert(cdj_usb_model_host_in(m, addr, 1, buf, 64, &n) == CDJ_USB_NAK);
+}
+
+static void test_soft_reset_and_direction(void)
+{
+    CdjUsbModel *m = bring_up();
+    uint8_t get_dev[8] = { 0x80, 0x06, 0x00, 0x01, 0, 0, 18, 0 };
+
+    /* USBE 1 -> 0 leaves INTSTS1 and the setup registers at H'0000. */
+    cdj_usb_model_set_vbus(m, true);
+    WR(0x18, CLR(0x8000));
+    assert(cdj_usb_model_host_reset(m));
+    assert(cdj_usb_model_host_setup(m, 0, get_dev) == CDJ_USB_ACK);
+    assert(RD(0x20) == 0x0680);
+    WR(0x60, 0x8000 | 0x2000 | 1);              /* DIR 0 -> 1: BRDY */
+    assert(RD(0x1a) & 2);
+    WR(0x00, 0);
+    assert(RD(0x1a) == 0);
+    assert(RD(0x20) == 0 && RD(0x22) == 0 && RD(0x26) == 0);
+
+    /* DIR 1 -> 0 with RDYM 0: the BRDY of the IN buffer goes with it, since
+     * no write could clear it (FIFO_STATUS follows the same condition). */
+    m = bring_up();
+    WR(0x12, 0x03);                             /* BRDY: EP0, EP1 */
+    WR(0x60, 0x8000 | 0x2000 | 1);
+    assert((RD(0x1a) & 2) && pin[0]);
+    WR(0x60, 0x8000 | 1);
+    assert(!(RD(0x1a) & 2) && !(RD(0x58) & 2) && !pin[0]);
+}
+
 static void test_unplug(void)
 {
     CdjUsbModel *m = bring_up();
@@ -366,6 +461,8 @@ int main(void)
     test_enumeration(false);
     test_control_write();
     test_endpoints();
+    test_double_buffers();
+    test_soft_reset_and_direction();
     test_unplug();
     puts("usb-m66291: ok");
     return 0;
