@@ -114,6 +114,11 @@ class Bus:
             except socket.timeout as error:
                 raise Timeout("the emulator did not answer on UDP "
                               f"{self.peer[1]}") from error
+            except ConnectionResetError:
+                # Windows reports the ICMP port-unreachable of an earlier
+                # datagram on the next receive: nobody was listening then.
+                # Keep waiting, so this ends in the Timeout above.
+                continue
             if len(reply) >= 6 and reply[0] == (op | 0x80) and reply[1] == self.seq:
                 break               # a stale reply to an earlier request is skipped
         result = reply[2]

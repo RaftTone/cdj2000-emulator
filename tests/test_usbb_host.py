@@ -55,8 +55,8 @@ class FakeDeck(threading.Thread):
         while not self.stop:
             try:
                 data, to = self.sock.recvfrom(2048)
-            except socket.timeout:
-                continue
+            except (socket.timeout, ConnectionResetError):
+                continue            # Windows: a reply to a closed host socket
             op, seq, addr, ep, length = struct.unpack_from("<BBBBH", data)
             body = data[6:]
             if op == u.OP_STATUS:
