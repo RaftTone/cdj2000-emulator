@@ -17,6 +17,7 @@ import sys
 import time
 from pathlib import Path
 
+from tools.cdj_gui.sim_fill import memory_fill_args
 from tools.cdj_main.parent_watch import inherited_fds
 
 from tools.paths import (BFIN_SIM, BOARDS, FIRMWARE, PACKETS, REPO_ROOT,
@@ -78,6 +79,7 @@ def run(args: argparse.Namespace) -> int:
         "bf531",
         "--environment",
         "operating",
+        *memory_fill_args(env),
         "--memory-region",
         "0,64M",
         "--hw-board-file",

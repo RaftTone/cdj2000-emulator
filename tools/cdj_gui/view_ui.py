@@ -68,6 +68,7 @@ from tools.paths import (BFIN_SIM, BOARDS, FIRMWARE,  # noqa: E402
 from tools.cdj_main import panel_control  # noqa: E402
 from tools.cdj_main import nxs_panel  # noqa: E402
 from tools.cdj_gui import faceplate  # noqa: E402
+from tools.cdj_gui.sim_fill import memory_fill_args  # noqa: E402
 
 # ---------------------------------------------------------------- geometry --
 #
@@ -1778,6 +1779,7 @@ class UiViewer:
             "bf531",
             "--environment",
             "operating",
+            *memory_fill_args(env),
             "--memory-region",
             "0,64M",
             "--hw-board-file",

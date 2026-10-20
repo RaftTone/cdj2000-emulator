@@ -1128,6 +1128,7 @@ twice during this work before the rule was learnt.
 | `CDJ_QEMU_DLL_DIR` | directory of the DLLs a MSYS2-built QEMU needs |
 | `CDJ_FIRMWARE_DIR`, `CDJ_PACKETS_DIR`, `CDJ_RUNS_DIR`, `CDJ_BIN_DIR` | move the working directories |
 | `CDJ_SDRAM_FILL` | what MAIN's SDRAM holds at power-on: a hex byte (`00`, `ff`, `a5`) or `random[:seed]` (a repeatable xorshift stream). QEMU's zeroed RAM hides a read of memory nobody initialised, which a real SDRAM does not; run a scenario with two or three fills and compare. Default: zeros |
+| `CDJ_GUI_SDRAM_FILL` | the same for the GUI board's SDRAM: one hex byte (`00`..`ff`), passed by `run_headless` and `view_ui` to the simulator as `--memory-fill`, ahead of `--memory-region` (the option only reaches regions added after it). GNU simulator (`cdj-run`) only, and one byte, no random mode. Default: zeros |
 
 The board itself takes a long list of its own, all read with `getenv` in
 `emulator/qemu/`: `CDJ_INPUT_PORT`, `CDJ_PANEL_KEYS`, `CDJ_SD_INSERT`,
