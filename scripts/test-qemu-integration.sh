@@ -18,5 +18,6 @@ cd "$REPO"
 CDJ_QEMU="$QEMU_BINARY" CDJ_TEST_QEMU="$QEMU_BINARY" "$PYTHON" -m pytest -q \
     tests/test_nxs_hpi.py \
     tests/test_qemu_sh4_irq_timer.py \
+    tests/test_sdram_fill.py \
     tests/test_main_dmac.py \
     tests/test_sh7764_ata.py

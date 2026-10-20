@@ -5204,6 +5204,56 @@ static void cdj_host_timer_resolution(void)
 }
 #endif
 
+/*
+ * CDJ_SDRAM_FILL=<hex byte> | random[:<seed>] -- what the SDRAM holds at power-on.
+ *
+ * QEMU hands out zeroed RAM, a real SDRAM does not come up zeroed.  A buffer the
+ * firmware (or a mod) reads before it writes it then works here and not on the
+ * deck.  Run once with 00, once with ff and a few times with random seeds: a
+ * result that changes with the fill is a read of memory nobody initialised.
+ * `random` is a xorshift64 stream, so a seed repeats exactly.  Off by default.
+ */
+static void cdj_sdram_fill(MemoryRegion *sdram, uint64_t size)
+{
+    const char *spec = getenv("CDJ_SDRAM_FILL");
+    uint8_t *ram;
+
+    if (!spec || !*spec) {
+        return;
+    }
+    ram = memory_region_get_ram_ptr(sdram);
+    if (!strncmp(spec, "random", 6) && (spec[6] == '\0' || spec[6] == ':')) {
+        uint64_t x = spec[6] == ':' ? strtoull(spec + 7, NULL, 0) : 1;
+        uint64_t i;
+
+        if (!x) {
+            x = 1;                      /* xorshift never leaves 0 */
+        }
+        for (i = 0; i < size; i += 8) {
+            uint64_t v;
+
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            v = x;
+            memcpy(ram + i, &v, MIN(8, size - i));
+        }
+        qemu_log("cdj2000-main: SDRAM filled with random bytes, seed %" PRIu64
+                 " (CDJ_SDRAM_FILL)\n", spec[6] == ':' ? strtoull(spec + 7, NULL, 0) : 1);
+    } else {
+        char *end;
+        unsigned long v = strtoul(spec, &end, 16);
+
+        if (*end || v > 0xff) {
+            warn_report("cdj2000-main: CDJ_SDRAM_FILL=%s is neither a hex byte "
+                        "nor random[:seed]; SDRAM stays zero", spec);
+            return;
+        }
+        memset(ram, (int)v, size);
+        qemu_log("cdj2000-main: SDRAM filled with 0x%02lx (CDJ_SDRAM_FILL)\n", v);
+    }
+}
+
 static void cdj2000_main_init(MachineState *machine)
 {
     MemoryRegion *system = get_system_memory();
@@ -5222,6 +5272,7 @@ static void cdj2000_main_init(MachineState *machine)
 
     memory_region_init_ram(sdram, NULL, "cdj2000.sdram", machine->ram_size,
                            &error_fatal);
+    cdj_sdram_fill(sdram, machine->ram_size);
     memory_region_add_subregion(system, SDRAM_BASE, sdram);
 
     /*
