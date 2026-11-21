@@ -271,8 +271,8 @@ static bool audio_half_done(CdjDmax *d)
     uint32_t words[2 * AUDIO_FRAMES];
     unsigned i, k, n;
 
-    /* The core has not served the last half yet: the sample clock waits for
-     * it, like the transmitter does when its buffer is not refilled. */
+    /* The core has not served the last half yet: this half waits for it.
+     * On the chip the transmitter would send the stale buffer on time. */
     for (i = 0; i < ARRAY_SIZE(audio_events); i++) {
         uint32_t tcc;
 
@@ -319,9 +319,12 @@ void cdj_dmax_audio_run(CdjDmax *d, int64_t dsp_ns)
     }
     if (dsp_ns >= d->audio_deadline_ns && audio_half_done(d)) {
         /* The core is stepped in 100 us chunks and a half buffer lasts 362.8 us:
-         * counting from dsp_ns would round every period up to 400 us, 40 kHz. */
-        d->audio_deadline_ns = MAX(d->audio_deadline_ns + AUDIO_NS_PER_HALF,
-                                   dsp_ns);
+         * counting from dsp_ns would round every period up to 400 us, 40 kHz.
+         * A half held back for the core goes out late but its successor
+         * keeps its time: the McASP's frame clock is the board's crystal, so
+         * a late core never moves the audio, or the position it plays, off
+         * the DSP's clock for good (it used to, by the whole wait). */
+        d->audio_deadline_ns += AUDIO_NS_PER_HALF;
     }
 }
 
