@@ -13,6 +13,7 @@ licence of each.
 | `qemu-sh4-tcg-fast-paths.patch` | QEMU 11.x, after the three above | `scripts/build-qemu-sh4.sh` |
 | `qemu-sh-tmu-catch-up.patch` | QEMU 11.x, after the TMU reset patch | `scripts/build-qemu-sh4.sh` |
 | `qemu-main-loop-macos-hires.patch` | QEMU 11.x | `scripts/build-qemu-sh4.sh` |
+| `qemu-usb-hub-high-speed.patch` | QEMU 11.x | `scripts/build-qemu-sh4.sh` |
 | `01-gdb-17.2-bfin-parallel-dsp32alu.patch` | GDB 17.2 | `scripts/build-bfin-sim.sh` |
 | `02-gdb-17.2-bfin-cdj2000-board.patch` | GDB 17.2 | `scripts/build-bfin-sim.sh` |
 
@@ -138,6 +139,20 @@ with no firmware, its TMU0 handler clearing `UNF` and counting at 1 ms, saw
 1.44, idle: 26.8% of TMU0's underflows merged, and the RTOS sent its 2 s Pro
 DJ Link keep-alive every 2.73 s of `QEMU_CLOCK_VIRTUAL`; with the patch 0.02%,
 every 2.00 s.
+
+`qemu-usb-hub-high-speed.patch` adds `high-speed=on` to QEMU's `usb-hub`,
+which otherwise is a USB 1.1 hub: full speed, no transaction translator. With
+it the hub has a high-speed device descriptor (`bcdUSB` 2.00,
+`bDeviceProtocol` 1, a single TT; USB 2.0 section 11.23.1), its status
+endpoint polls every 256 ms (`bInterval` 12), its ports take high-speed
+devices and report `PORT_HIGH_SPEED`. Almost every hub sold is like that,
+and the SH7764's host module is built for it: it reaches a full-speed device
+behind a high-speed hub with split transactions, addressed through `DEVADDn`'s
+`UPPHUB`/`HUBPORT` (hardware manual section 21.3.39). The TT itself is not
+modelled; packets reach the device by address as before, and
+`cdj2000_usbh.c` checks that the split transactions would have named this hub
+and port. The property defaults to off, so every existing command line gets
+the same hub as before.
 
 ### What each one costs
 

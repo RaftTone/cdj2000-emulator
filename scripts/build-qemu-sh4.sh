@@ -61,7 +61,8 @@ set -- \
     "$REPO/patches/qemu-sh-tmu-stop-reset.patch" \
     "$REPO/patches/qemu-sh4-tcg-fast-paths.patch" \
     "$REPO/patches/qemu-sh-tmu-catch-up.patch" \
-    "$REPO/patches/qemu-main-loop-macos-hires.patch"
+    "$REPO/patches/qemu-main-loop-macos-hires.patch" \
+    "$REPO/patches/qemu-usb-hub-high-speed.patch"
 applied=0
 index=0
 for patch in "$@"; do
