@@ -145,6 +145,15 @@
 #define TRE_TRENB       0x0200
 #define TRE_TRCLR       0x0100
 
+/* DEVADDn, manual 21.3.39; one per address 0 to 10 (DEVSEL). */
+#define NR_DEVADD       11
+#define DEVADD_UPPHUB   0x7800
+#define DEVADD_HUBPORT  0x0700
+#define DEVADD_USBSPD   0x00c0
+#define DEVADD_WRITABLE (DEVADD_UPPHUB | DEVADD_HUBPORT | DEVADD_USBSPD)
+#define USBSPD_FULL     2
+#define USBSPD_HIGH     3
+
 #define NR_PIPES        10
 #define NR_FIFOS        3           /* CFIFO, D0FIFO, D1FIFO */
 #define PKT_BUF_SIZE    1024        /* a high-speed bulk packet is 512 */
@@ -560,12 +569,84 @@ static void cdj_usbh_dma_service_all(CdjUsbhState *s)
 
 /* ---- transactions ------------------------------------------------------ */
 
+static unsigned cdj_usbh_rhst(CdjUsbhState *s);
+
+/* The hub whose downstream port `dev` is plugged into; NULL on the root port. */
+static USBDevice *cdj_usbh_upstream_hub(USBDevice *dev)
+{
+    Object *owner = dev->port ? dev->port->opaque : NULL;
+
+    return owner && object_dynamic_cast(owner, "usb-hub") ? USB_DEVICE(owner)
+                                                          : NULL;
+}
+
+/*
+ * Whether the packets the module puts on the wire for DEVADDn reach `dev`.
+ * QEMU finds a device by address through any hubs (only through enabled
+ * ports, as a real hub forwards); what the module adds is in DEVADDn
+ * (manual 21.3.39): USBSPD, the target's speed, with which it "generates
+ * packets", and UPPHUB/HUBPORT, the hub and port the target is behind, with
+ * which it "generates packets for split transactions".
+ *  - USBSPD 00 ("DEVADDn is not used") or 01 (prohibited): nothing reaches.
+ *  - The target's speed on the bus must be USBSPD's.  The module has no low
+ *    speed at all (no USBSPD or RHST code for it), and on a full-speed root
+ *    link everything runs at full speed.
+ *  - A full-speed target on a high-speed root link is reached only by split
+ *    transactions to the transaction translator of the nearest high-speed
+ *    hub above it (USB 2.0 section 11.14), so UPPHUB and HUBPORT must be that
+ *    hub's address and the port the target's branch hangs off.  A high-speed
+ *    target, or anything on a full-speed root link, needs no split and the
+ *    two fields are not looked at.
+ * A transaction that does not reach its target gets no answer (a timeout).
+ */
+static bool cdj_usbh_reachable(CdjUsbhState *s, USBDevice *dev,
+                               uint16_t devadd)
+{
+    unsigned usbspd = (devadd & DEVADD_USBSPD) >> 6;
+    bool hs_link = cdj_usbh_rhst(s) == RHST_HIGH;
+    int speed = dev->speed == USB_SPEED_HIGH && !hs_link ? USB_SPEED_FULL
+                                                         : dev->speed;
+    USBDevice *below = dev, *hub;
+
+    if (usbspd != USBSPD_FULL && usbspd != USBSPD_HIGH) {
+        return false;
+    }
+    if (speed != (usbspd == USBSPD_HIGH ? USB_SPEED_HIGH : USB_SPEED_FULL)) {
+        return false;
+    }
+    if (speed == USB_SPEED_HIGH || !hs_link) {
+        return true;
+    }
+    for (hub = cdj_usbh_upstream_hub(dev); hub;
+         below = hub, hub = cdj_usbh_upstream_hub(hub)) {
+        if (hub->speed == USB_SPEED_HIGH) {
+            return (devadd & DEVADD_UPPHUB) >> 11 == hub->addr
+                && (devadd & DEVADD_HUBPORT) >> 8 == below->port->index + 1;
+        }
+    }
+    return false;       /* full speed on a high-speed link with no TT above */
+}
+
 static USBDevice *cdj_usbh_device(CdjUsbhState *s, const CdjUsbhPipe *p)
 {
-    if (!s->attached || !s->active || !s->active->dev) {
+    unsigned devsel = pipe_devsel(s, p);
+    uint16_t devadd;
+    USBDevice *dev;
+
+    if (!s->attached || !s->active || !s->active->dev
+        || devsel >= NR_DEVADD) {
         return NULL;
     }
-    return usb_find_device(s->active, pipe_devsel(s, p));
+    dev = usb_find_device(s->active, devsel);
+    devadd = rd(s, R_DEVADD0 + 2 * devsel);
+    if (dev && !cdj_usbh_reachable(s, dev, devadd)) {
+        cdj_usbh_trace(s, "pipe%u: address %u (speed %d, behind hub %d) not "
+                       "reached with DEVADD%X %#06x", p->nr, devsel,
+                       dev->speed, cdj_usbh_upstream_hub(dev)
+                       ? cdj_usbh_upstream_hub(dev)->addr : 0, devsel, devadd);
+        return NULL;
+    }
+    return dev;
 }
 
 static void cdj_usbh_packet_done(CdjUsbhState *s, CdjUsbhPipe *p);
@@ -580,6 +661,7 @@ static void cdj_usbh_issue(CdjUsbhState *s, CdjUsbhPipe *p, int pid,
         cdj_usbh_trace(s, "pipe%u: no device at address %u", p->nr,
                        pipe_devsel(s, p));
         p->inflight = false;
+        p->packet.pid = pid;        /* a SETUP that went nowhere is a SIGN */
         p->packet.status = USB_RET_NODEV;
         cdj_usbh_packet_done(s, p);
         return;
@@ -1415,6 +1497,8 @@ static void cdj_usbh_write(void *opaque, hwaddr offset, uint64_t value,
                 }
                 p->tre = v & TRE_TRENB;
             }
+        } else if (offset >= R_DEVADD0 && offset < R_DEVADD0 + 2 * NR_DEVADD) {
+            wr(s, offset, v & DEVADD_WRITABLE);
         } else {
             wr(s, offset, v);
         }
