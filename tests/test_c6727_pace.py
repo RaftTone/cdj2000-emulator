@@ -15,6 +15,15 @@ def _cc():
     return cc
 
 
+def test_dsp_pace_policy(tmp_path):
+    binary = tmp_path / 'dsp-pace'
+    subprocess.run([_cc(), '-std=c11', '-Wall', '-Wextra', '-Werror',
+                    '-I', str(ROOT / 'emulator/qemu'),
+                    str(ROOT / 'tests/cstub/dsp-pace.c'), '-o', str(binary)],
+                   check=True)
+    subprocess.run([str(binary)], check=True, timeout=30)
+
+
 def test_c6727_mcasp_clock_keeps_time(tmp_path):
     cc = _cc()
     pkg_config = shutil.which('pkg-config')

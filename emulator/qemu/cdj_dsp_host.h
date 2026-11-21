@@ -76,6 +76,7 @@ typedef struct CdjDspHost {
     int64_t dsp_ns;             /* the virtual time the core has run up to */
     int64_t lag_max_ns;
     int64_t slack_ns;           /* 0: the core may lag without bound */
+    int64_t slack_poll_ns;
     QEMUTimer *slack_timer;
     QemuMutex progress_lock;    /* @dsp_ns, for the slack timer's wait */
     QemuCond progress;

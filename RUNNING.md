@@ -1284,10 +1284,16 @@ apply. With it:
   the exit reports;
 - `CDJ_DSP_AUDIO=1` -- the output on a host voice: `-audiodev ...,id=cdj-dsp`
   if one is given, QEMU's default backend otherwise;
-- `CDJ_C6727_SLACK_US=N` -- hold MAIN until the core is within N us of the
-  virtual clock. Only under `-icount` (`boot_vm --cosim`, which Windows does
-  not have): without it the virtual clock is the host's, holding MAIN only
-  stalls its main loop, and the board ignores the setting with a warning.
+- `CDJ_C6727_SLACK_US=N` -- hold MAIN while the core is more than N us
+  behind the virtual clock (at least 50; 0 never holds it). Unset, the slack
+  is one 100 us chunk: on the board MAIN reads the DSP's present, and the core
+  is also never more than 50 us ahead, so what MAIN reads (the position, the
+  answers to its commands) is from 0.05 ms ahead to 0.2 ms behind the DSP.
+  2000, which earlier recipes set, lets that wander from 1 ms of the DSP's
+  future to 3 ms of its past with the DSP's load. Only under `-icount`
+  (`boot_vm --cosim`, which Windows does not have): without it the virtual
+  clock is the host's, holding MAIN only stalls its main loop, and the board
+  ignores a set value with a warning.
 
 A track load and PLAY on Windows, with the twoboard recipe above (the core
 kept up there with 0 ms of lag, the tap filled at 1.000x of guest time):

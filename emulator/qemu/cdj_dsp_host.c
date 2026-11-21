@@ -5,6 +5,7 @@
  */
 #include "qemu/osdep.h"
 #include "cdj_dsp_host.h"
+#include "cdj_dsp_pace.h"
 #include "exec/icount.h"
 #include "qemu/main-loop.h"
 #include "qemu/error-report.h"
@@ -41,17 +42,25 @@
  * raises the next one before the loader, still waiting for the drop
  * (0x1180292C), has looked.
  *
- * CDJ_<chip>_SLACK_US=n keeps the core from falling more than n microseconds
- * behind: a virtual-clock timer holds MAIN back until it has caught up. Off,
- * the core only ever lags, by minutes once a track plays.
+ * On the board both chips run in real time and MAIN reads the DSP's present:
+ * its position, its answers. Here the core may start a chunk only when the
+ * chunk ends at most AHEAD_NS past the virtual clock, and under -icount a
+ * virtual-clock timer holds MAIN back while the core is more than the slack
+ * behind (CDJ_<chip>_SLACK_US, one chunk unless set; 0 lets the core lag
+ * without bound, by minutes once a track plays). So MAIN sees the core from
+ * 0.05 ms ahead to 0.2 ms behind (the slack and one look). With 1 ms ahead
+ * and 2 ms of slack it saw anything from 1 ms of the DSP's future to 3 ms of
+ * its past: ahead while the DSP idled, behind while it decoded, so what
+ * MAIN read wandered with the DSP's load.
+ * Without -icount the virtual clock is the host's and the core lags
+ * whenever the host cannot keep up.
  */
 
-#define QUANTUM_NS      (1000 * 1000)
-#define CHUNK_NS        (100 * 1000)
+#define CHUNK_NS        CDJ_DSP_CHUNK_NS
+#define AHEAD_NS        CDJ_DSP_AHEAD_NS
 #define SLICE_CYCLES    2000
 #define REACT_STEP      2000
 #define REACT_MAX       (4 * 1000 * 1000)
-#define SLACK_POLL_NS   (1000 * 1000)
 /* Stepping to a quiet point gives up after this much DSP time: 10 ms. */
 #define QUIET_STEP      16
 #define QUIET_MAX_NS    (10 * 1000 * 1000)
@@ -104,13 +113,17 @@ static void *host_thread(void *opaque)
     cdj_thread_prefer_fast_core();
     while (qatomic_read(&h->running)) {
         int64_t virt = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        int64_t early = h->dsp_ns + CHUNK_NS - virt - AHEAD_NS;
 
         if (qatomic_read(&h->host_waiting)) {
             g_usleep(0);
             continue;
         }
-        if (h->dsp_ns >= virt + QUANTUM_NS) {
-            g_usleep(1000);
+        if (early > 0) {
+            /* Wall time for virtual time, at most 150 us. Where -icount
+             * warps the virtual clock over MAIN's idle time and the core
+             * oversleeps, the slack hold catches it up. */
+            g_usleep(MAX(1, MIN(1000, early / 1000)));
             continue;
         }
         qemu_mutex_lock(&h->lock);
@@ -182,7 +195,7 @@ static void slack_tick(void *opaque)
     }
     qemu_mutex_unlock(&h->progress_lock);
     timer_mod(h->slack_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL)
-                              + SLACK_POLL_NS);
+                              + h->slack_poll_ns);
 }
 
 /*
@@ -471,7 +484,8 @@ void cdj_dsp_host_init(CdjDspHost *h, const char *name, const char *env_prefix,
     qemu_mutex_init(&h->posted_lock);
     qemu_cond_init(&h->progress);
     slack = getenv(slack_var);
-    h->slack_ns = slack ? strtoull(slack, NULL, 0) * 1000 : 0;
+    h->slack_ns = cdj_dsp_slack_ns(slack, icount_enabled());
+    h->slack_poll_ns = cdj_dsp_slack_poll_ns(h->slack_ns);
     /*
      * Holding MAIN back stops the virtual clock only under -icount (boot_vm
      * --cosim). Without it the virtual clock is the host's: a core slower
@@ -480,7 +494,7 @@ void cdj_dsp_host_init(CdjDspHost *h, const char *name, const char *env_prefix,
      * good (Windows, 14.10.2026: tens of seconds a tick within two minutes,
      * the DSP still in its boot loader).
      */
-    if (h->slack_ns && !icount_enabled()) {
+    if (slack && h->slack_ns && !icount_enabled()) {
         warn_report("%s: %s needs -icount (boot_vm --cosim); without it the "
                     "core is not held to the virtual clock", name, slack_var);
         h->slack_ns = 0;
@@ -513,7 +527,7 @@ static void host_start_thread(CdjDspHost *h)
     if (h->slack_ns) {
         h->slack_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, slack_tick, h);
         timer_mod(h->slack_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL)
-                                  + SLACK_POLL_NS);
+                                  + h->slack_poll_ns);
         if (cdj_report_enabled()) {
             info_report("%s: core kept within %" PRId64 " us of the virtual "
                         "clock", h->name, h->slack_ns / 1000);
