@@ -1280,8 +1280,9 @@ apply. With it:
   16-bit stereo on the DSP's own clock; the header is rewritten every second,
   so a run stopped with `taskkill /F` still leaves a valid file;
 - `CDJ_C6727_REPORT_S=N` -- a status line every N s of guest time (`ms
-  behind` is the core's lag behind the virtual clock); `CDJ_REPORT=1` adds
-  the exit reports;
+  behind` is the core's lag behind the virtual clock now, then its range
+  since the last line in us, + behind, and the McASP halves the core has held
+  back so far); `CDJ_REPORT=1` adds the exit reports;
 - `CDJ_DSP_AUDIO=1` -- the output on a host voice: `-audiodev ...,id=cdj-dsp`
   if one is given, QEMU's default backend otherwise;
 - `CDJ_C6727_SLACK_US=N` -- hold MAIN while the core is more than N us

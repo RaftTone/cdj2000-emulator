@@ -414,15 +414,24 @@ static void c6727_watch(void *opaque)
         s->watch_frames = frames;
     }
     if (s->report_every_ns && now - s->report_ns >= s->report_every_ns) {
+        /* The core's place against the virtual clock since the last line,
+         * + behind; the thread samples it at every turn of its loop. */
+        int64_t lag = qatomic_xchg(&s->host.win_lag_ns, INT64_MIN);
+        int64_t lead = qatomic_xchg(&s->host.win_lead_ns, INT64_MAX);
+
         s->report_ns = now;
         fprintf(stderr, "c6727: t=%.3f pc 0x%08x %s, %" PRIu64 " commands, %"
                 PRIu64 " HINT edges, %" PRIu64 " DSPINT, window %" PRIu64
-                " writes / %" PRIu64 " reads, page 0x%08x, %" PRId64 " ms behind\n",
+                " writes / %" PRIu64 " reads, page 0x%08x, %" PRId64 " ms behind"
+                ", %+" PRId64 "..%+" PRId64 " us since the last line, %" PRIu64
+                " McASP ticks late\n",
                 now / 1e9, s->host.core ? c66x_get_pc(s->host.core) : 0,
                 s->host.running ? "running" : "stopped", s->host.commands,
                 s->host.hint_edges, s->dspint_writes, s->win_writes,
                 s->win_reads, page,
-                (now - qatomic_read(&s->host.dsp_ns)) / SCALE_MS);
+                (now - qatomic_read(&s->host.dsp_ns)) / SCALE_MS,
+                lead == INT64_MAX ? 0 : lead / SCALE_US,
+                lag == INT64_MIN ? 0 : lag / SCALE_US, s->dmax.audio_overruns);
     }
     timer_mod(s->watch, now + WATCH_NS);
 }

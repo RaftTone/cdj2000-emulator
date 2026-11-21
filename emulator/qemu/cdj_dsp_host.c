@@ -105,6 +105,20 @@ static void host_apply_posted(CdjDspHost *h)
     }
 }
 
+/* Virtual time minus the core's, + behind: the worst of the run and of the
+ * report's interval (cdj_c6727.c reads and resets the latter). */
+static void host_note_offset(CdjDspHost *h, int64_t lag)
+{
+    h->lag_max_ns = MAX(h->lag_max_ns, lag);
+    h->lead_max_ns = MIN(h->lead_max_ns, lag);
+    if (lag > qatomic_read(&h->win_lag_ns)) {
+        qatomic_set(&h->win_lag_ns, lag);
+    }
+    if (lag < qatomic_read(&h->win_lead_ns)) {
+        qatomic_set(&h->win_lead_ns, lag);
+    }
+}
+
 static void *host_thread(void *opaque)
 {
     CdjDspHost *h = opaque;
@@ -119,6 +133,7 @@ static void *host_thread(void *opaque)
             g_usleep(0);
             continue;
         }
+        host_note_offset(h, virt - h->dsp_ns);
         if (early > 0) {
             /* Wall time for virtual time, at most 150 us. Where -icount
              * warps the virtual clock over MAIN's idle time and the core
@@ -136,7 +151,6 @@ static void *host_thread(void *opaque)
             g_usleep(1000);
             continue;
         }
-        h->lag_max_ns = MAX(h->lag_max_ns, virt - h->dsp_ns);
         for (run = 0; run < h->cycles_per_chunk
                       && !qatomic_read(&h->host_waiting);
              run += h->slice_cycles) {
@@ -479,6 +493,8 @@ void cdj_dsp_host_init(CdjDspHost *h, const char *name, const char *env_prefix,
     h->cycles_per_chunk = MAX((mhz ? strtoull(mhz, NULL, 0) : default_mhz)
                               * CHUNK_NS / 1000, 1);
     h->slice_cycles = SLICE_CYCLES;
+    h->win_lag_ns = INT64_MIN;
+    h->win_lead_ns = INT64_MAX;
     qemu_mutex_init(&h->lock);
     qemu_mutex_init(&h->progress_lock);
     qemu_mutex_init(&h->posted_lock);
@@ -661,8 +677,9 @@ void cdj_dsp_host_report(CdjDspHost *h)
     info_report("%s: %" PRIu64 " commands from MAIN, %" PRIu64
                 " HINT edges, HPIC 0x%08x, %" PRIu64 " cycles run to answer",
                 h->name, h->commands, h->hint_edges, h->hpic, h->react_cycles);
-    info_report("%s: at most %" PRId64 " ms behind the virtual clock",
-                h->name, h->lag_max_ns / SCALE_MS);
+    info_report("%s: at most %" PRId64 " us behind and %" PRId64 " us ahead "
+                "of the virtual clock", h->name, h->lag_max_ns / SCALE_US,
+                -h->lead_max_ns / SCALE_US);
     info_report("%s: MAIN waited %" PRId64 " ms for the core over %" PRIu64
                 " host-port accesses", h->name, h->host_wait_ns / SCALE_MS,
                 h->host_locks);

@@ -74,7 +74,8 @@ typedef struct CdjDspHost {
     bool paused;                /* the machine is stopped: run nothing */
     GByteArray *snap;           /* the core's image in a snapshot */
     int64_t dsp_ns;             /* the virtual time the core has run up to */
-    int64_t lag_max_ns;
+    int64_t lag_max_ns, lead_max_ns;    /* virtual minus core time, worst */
+    int64_t win_lag_ns, win_lead_ns;    /* the same since the last report */
     int64_t slack_ns;           /* 0: the core may lag without bound */
     int64_t slack_poll_ns;
     QEMUTimer *slack_timer;
