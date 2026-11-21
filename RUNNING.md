@@ -1005,6 +1005,17 @@ packet and DMA; the board registers two ports because QEMU slips a full-speed
 hub in front of a device plugged into a bus with a single free port, and the
 driver then enumerated the hub (update-3).
 
+**A hub on purpose.** `--qemu-arg=-device --qemu-arg=usb-hub,id=hub0,bus=usb-bus.0,port=1,high-speed=on`
+puts a USB 2.0 hub (one transaction translator; `qemu-usb-hub-high-speed.patch`)
+on the root port, and a stick goes behind it with
+`usb-storage,drive=...,bus=usb-bus.0,port=1.1` instead of `--usb-stick`;
+without `high-speed=on` it is QEMU's USB 1.1 hub.  The module reaches a
+device behind a hub the way the SH7764 does (manual 21.3.39): DEVADDn's
+USBSPD must be the device's speed, and a full-speed device behind a
+high-speed hub answers only when UPPHUB/HUBPORT name that hub and port
+(split transactions).  `tests/test_usbh_hub.py` enumerates through both hubs
+without firmware.
+
 The updater is the application's (`UpDtae_TASK`, state machine 0x2d68b2),
 not the loader's: the boot ROM's second stage only unpacks the loader at flash
 0x10000 when the packed application's checksum fails, so the loader is the
