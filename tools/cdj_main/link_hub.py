@@ -50,6 +50,7 @@ import time
 from pathlib import Path
 
 MAX_FRAME = 1514
+MAX_QUEUE = 64 << 20        # bytes a deck may leave unread before it is dropped (shortcut: a fixed cap, make it an option if a stand needs more)
 PRODJ_MAGIC = b"Qspt1WmJOL"
 PRODJ_PORTS = (50000, 50001, 50002)
 
@@ -254,7 +255,8 @@ class Hub:
     def accept(self) -> None:
         conn, _ = self.server.accept()
         conn.setblocking(False)
-        client = {"id": self.next_id, "buffer": bytearray(), "rx": 0, "tx": 0}
+        client = {"id": self.next_id, "buffer": bytearray(), "out": bytearray(), "events": selectors.EVENT_READ,
+                  "rx": 0, "tx": 0}
         self.next_id += 1
         self.clients[conn] = client
         self.sel.register(conn, selectors.EVENT_READ, "deck")
@@ -266,6 +268,53 @@ class Hub:
         conn.close()
         self.event("disconnect", deck=client["id"], frames_in=client["rx"],
                    frames_out=client["tx"])
+
+    def poll(self, timeout: float) -> None:
+        for key, mask in self.sel.select(timeout):
+            if key.data == "accept":
+                self.accept()
+            elif key.data == "bridge":
+                self.from_wire()
+            else:
+                if mask & selectors.EVENT_WRITE:
+                    self.flush(key.fileobj)
+                if mask & selectors.EVENT_READ and key.fileobj in self.clients:
+                    self.read(key.fileobj)
+
+    def send_bytes(self, conn: socket.socket, blob: bytes) -> None:
+        """Queue BLOB for a deck and send what its socket takes now.
+
+        Never blocks: a deck reads only when its own network timer fires (and not at all while gdb holds
+        it), and a hub that waited in sendall() for one deck could not read the next, which blocked in its
+        own send: both machines at 0 % CPU, the guest clocks frozen."""
+        client = self.clients.get(conn)
+        if client is None:
+            return
+        client["out"] += blob
+        if len(client["out"]) > MAX_QUEUE:
+            self.event("deck-not-reading", deck=client["id"], queued=len(client["out"]))
+            self.drop(conn)
+            return
+        self.flush(conn)
+
+    def flush(self, conn: socket.socket) -> None:
+        client = self.clients.get(conn)
+        if client is None:
+            return
+        out = client["out"]
+        while out:
+            try:
+                sent = conn.send(out)
+            except (BlockingIOError, InterruptedError):
+                break
+            except OSError:
+                self.drop(conn)
+                return
+            del out[:sent]
+        events = selectors.EVENT_READ | (selectors.EVENT_WRITE if out else 0)
+        if events != client["events"]:
+            client["events"] = events
+            self.sel.modify(conn, events, "deck")
 
     def players(self) -> int:
         """Devices that have sent a keep-alive, replayed or emulated."""
@@ -310,13 +359,8 @@ class Hub:
         for conn, client in list(self.clients.items()):
             if conn is exclude:
                 continue
-            try:
-                conn.setblocking(True)
-                conn.sendall(blob)
-                conn.setblocking(False)
-                client["tx"] += 1
-            except OSError:
-                self.drop(conn)
+            client["tx"] += 1
+            self.send_bytes(conn, blob)
 
     def read(self, conn: socket.socket) -> None:
         client = self.clients[conn]
@@ -537,16 +581,10 @@ class SyncHub(Hub):
         client = self.clients.get(conn)
         if client is None:
             return
-        try:
-            conn.setblocking(True)
-            conn.sendall(b"CDJC" + bytes([kind, 0, 0, 0]) + struct.pack("<QI", t, len(payload))
-                         + payload)
-            conn.setblocking(False)
-        except OSError:
-            self.drop(conn)
-            return
         if kind == SYNC_FRAME:
             client["tx"] += 1
+        self.send_bytes(conn, b"CDJC" + bytes([kind, 0, 0, 0]) + struct.pack("<QI", t, len(payload))
+                        + payload)
 
     def send_frame(self, conn: socket.socket, t: int, frame: bytes) -> None:
         self.send_msg(conn, SYNC_FRAME, t, frame.ljust(60, b"\0"))
@@ -734,11 +772,7 @@ def main(argv: list[str] | None = None) -> int:
         signal.signal(signal.SIGHUP, signal.SIG_IGN)
     try:
         while args.sync and time.time() < deadline:
-            for key, _ in hub.sel.select(0.2):
-                if key.data == "accept":
-                    hub.accept()
-                else:
-                    hub.read(key.fileobj)
+            hub.poll(0.2)
             hub.push_replay()
             hub.update_grants()
         while not args.sync and time.time() < deadline:
@@ -750,13 +784,7 @@ def main(argv: list[str] | None = None) -> int:
                 due_at = replay.next_time()
                 if due_at is not None:
                     timeout = max(0.0, min(timeout, due_at - time.time()))
-            for key, _ in hub.sel.select(timeout):
-                if key.data == "accept":
-                    hub.accept()
-                elif key.data == "bridge":
-                    hub.from_wire()
-                else:
-                    hub.read(key.fileobj)
+            hub.poll(timeout)
             if replay is not None:
                 target = hub.first_deck_address()
                 for frame in replay.due(time.time()):
