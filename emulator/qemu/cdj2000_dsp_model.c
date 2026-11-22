@@ -38,6 +38,7 @@
 #include "chardev/char-fe.h"
 
 #include "cdj2000_dsp.h"
+#include "cdj2000_dsp_levels.h"
 #include "cdj2000_input.h"
 
 /* Where MAIN's second firmware record lands, i.e. the shared control block. */
@@ -84,6 +85,9 @@ struct CdjDspModel {
     bool ack_control;                   /* CDJ_DSP_ACK: clear control-block commands */
     bool control_cleared;               /* CDJ_DSP_ACK: block zeroed once MAIN saw "up" */
     unsigned stream_buffer;             /* CDJ_DSP_ACK: buffer the last data header named, 1 or 2 */
+    bool pcm_levels;                    /* CDJ_DSP_PCM_LEVELS: PCM in CD frames, played out of buffer 1 (default on) */
+    bool pcm_stream;                    /* the last data transfer was a PCM block */
+    int64_t pcm_carry_ns;               /* the part of a CD frame played, below the step taken */
 
     /* CDJ_DSP_SLOT_REPORT: the slot table entry MAIN reads after an event. */
     bool slot_report;
@@ -434,6 +438,14 @@ CdjDspModel *cdj_dsp_model_new(Chardev *external)
      */
     model->consume_rate = getenv("CDJ_DSP_CONSUME")
         ? strtol(getenv("CDJ_DSP_CONSUME"), NULL, 0) : 0;
+    /*
+     * CDJ_DSP_PCM_LEVELS=0 switches the PCM level accounting off, for an A/B:
+     * a PCM block books 40 units a block and nothing is played out of the
+     * ring, so MAIN stops reading after about 60 blocks when the track has
+     * analysis files.  On (the default), see cdj2000_dsp_levels.h.
+     */
+    model->pcm_levels = !getenv("CDJ_DSP_PCM_LEVELS")
+        || strtol(getenv("CDJ_DSP_PCM_LEVELS"), NULL, 0) != 0;
     /*
      * trackload-69/70: every class-0 event code (1, 2, 3, 5, 6, 7, 10) while
      * playing got the same answer from MAIN -- +0x7cb0 = 2 with the record of
@@ -844,9 +856,12 @@ void cdj_dsp_model_firmware(CdjDspModel *model, uint8_t *window,
         if (model->ack_control && bytes >= 4096 && length > 0x7cd4) {
             unsigned level = model->stream_buffer == 1 ? DSP_LEVEL_BUFFER1
                                                        : DSP_LEVEL_BUFFER2;
-            int32_t units = (int32_t)((uint64_t)bytes * 40 / 9408);
+            bool pcm = false;
+            int32_t units = model->pcm_levels
+                ? cdj_dsp_transfer_units(bytes, &pcm) : (int32_t)((uint64_t)bytes * 40 / 9408);
             int32_t was = (int32_t)ldl_le_p(window + level);
 
+            model->pcm_stream = model->pcm_levels && pcm;
             stl_le_p(window + level, was + units);
             if (model->trace) {
                 fprintf(stderr, "cdj2000-dsp: buffer %u took %d -> level %d "
@@ -1678,6 +1693,33 @@ static void cdj_dsp_model_track_end(CdjDspModel *model, uint8_t *window, int64_t
             end_ms, frames, model->last_request, now / 1e9);
 }
 
+/*
+ * A PCM stream plays out of the ring: the audio played moves from the level
+ * ahead (+0x7cd0) to the one behind (+0x7ccc), 75 CD frames a second at the
+ * nominal rate -- the real DSP program does exactly this (+0x7cd0 2246 ->
+ * 1871 and +0x7ccc 39 -> 489 over six seconds).  MAIN pushes the next burst
+ * when the one ahead has fallen to about 1870; with nothing taken out it
+ * stopped reading for good once the ring was full.
+ */
+static void cdj_dsp_model_play_levels(CdjDspModel *model, uint8_t *window,
+                                      size_t length, int64_t played_ns)
+{
+    int64_t frames;
+    int32_t ahead, taken;
+
+    if (!model->pcm_stream || length <= DSP_LEVEL_BUFFER1 + 4) {
+        return;
+    }
+    frames = cdj_dsp_played_frames(&model->pcm_carry_ns, played_ns);
+    ahead = (int32_t)ldl_le_p(window + DSP_LEVEL_BUFFER1);
+    taken = frames < ahead ? (int32_t)frames : ahead;
+    if (taken <= 0) {
+        return;
+    }
+    stl_le_p(window + DSP_LEVEL_BUFFER1, ahead - taken);
+    stl_le_p(window + DSP_LEVEL_BUFFER2, (int32_t)ldl_le_p(window + DSP_LEVEL_BUFFER2) + taken);
+}
+
 static void cdj_dsp_model_position_report(CdjDspModel *model, uint8_t *window,
                                           size_t length, int64_t now)
 {
@@ -1767,6 +1809,7 @@ static void cdj_dsp_model_position_report(CdjDspModel *model, uint8_t *window,
             model->pos_ms = total / SCALE_MS;
             model->pos_rem_ns = total % SCALE_MS;
         } else {
+            cdj_dsp_model_play_levels(model, window, length, played_ns);
             played_ns += model->pos_rem_ns;
             model->pos_ms += played_ns / SCALE_MS;
             model->pos_rem_ns = played_ns % SCALE_MS;

@@ -850,8 +850,16 @@ the same two halves, each followed by a 64-byte tail (+0xbde0 / +0xfaa0) whose f
 is where the block starts in the file, in units of 588 frames (1/75 s, a quarter of a block).
 Measured 2026-10-30, stock MAIN 4.33 on the DSP model, 16 bit 44.1 kHz: 30 blocks at the
 load with words 0, 4, 8.., 30 at PLAY with words 1, 5, 9.., and then no more, with or without
-`CDJ_DSP_CONSUME`. So the render holds the track's first 1.6 s, byte for byte the file's, and
-nothing after them. 24 bit has not been measured.
+`CDJ_DSP_CONSUME`. So the render held the track's first 1.6 s, byte for byte the file's, and
+nothing after them. That was the model's level accounting, not MAIN (2026-11-22): a card
+with the track's ANLZ files made MAIN keep a ring of 25 to 30 s in the DSP and read on as
+the ring empties, and the model booked 40 level units a block instead of 4 and played nothing
+out. A PCM block is now 4 CD frames (16, 24 and 32 bit alike, as the C6727 core books them),
+the deck plays 75 a second out of `+0x7cd0` into `+0x7ccc`, and the stream goes on as with
+the real core: a start fill of about 5.5 MB, then 100 blocks every 5.3 s of play
+(`CDJ_READ_LOG=1`). `CDJ_DSP_PCM_LEVELS=0` brings the old accounting back for an A/B. A card
+without ANLZ files was never limited (MAIN pushes the whole file in 3.5 s); an MP3 still
+books 40 units per 9408 bytes and plays nothing out, so it stops after about 90 blocks.
 
 `gui_update_check` is the gate for a GUI update file, the GUI board's counterpart of
 `safety_check`: in one guest time, stock MAIN 4.33 in the update key mode installs
