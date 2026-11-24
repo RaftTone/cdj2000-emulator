@@ -7,7 +7,8 @@ at commit `c24a89d523240641274dc2a06598fbb7f9ae71df` (10.10.2026, the last chang
 
 What it is: an interpreter for the TI C66x instruction set (a superset of the C674x and the C67x+ of
 the CDJ-2000's C6727) with a profile-guided JIT that loads native modules (`C66X_JIT=<m.so>`). The
-CDJ-2000 4.33 DSP program is pure C67x+ (no compact packets, no SPLOOP), so the core runs it as is.
+CDJ-2000 4.33 DSP program is pure C67x+ (no compact packets, no SPLOOP), so the core runs it as is;
+the C6727 sets the core to C67x+ only (local change below).
 
 Taken: `c66x.h`, `c66x_core_int.h`, `c66x_priv.h`, `c66x_decode.[ch]`, `c66x_ext_table.h`,
 `c66x_core.c`, `c66x_mem.c`, `c66x_exec.c`, `c66x_step.c`, `c66x_jit.c`, `c66x_core.md` (its notes)
@@ -32,6 +33,17 @@ until upstream has its own fix.
   0x7FFFFFFF_FFFFFFFF), with the sign of the product for the multiplies. The host's default NaN
   was stored before, and x86 (0xFFC00000) and arm64 (0x7FC00000) disagree on it, so the same run
   gave different register contents on a Mac and on a PC.
+
+24.11.2026, `c66x.h`, `c66x_core.c`, `c66x_core_int.h`, `c66x_decode.[ch]`, `c66x_mem.c` (the C6727 is
+strict C67x+):
+
+- `c66x_set_isa(core, C66X_ISA_C67XP)` limits the core to an instruction set (binutils `TIC6X_INSN_*` bits,
+  as `gas -march` sets them). `fetch_insn` marks any other word undefined, so `c66x_step` stops with
+  `C66X_STOP_UNDEF` at its packet. `c66x_insn_in_isa` is the rule: the first binutils table match must
+  name an ISA in the set, the word must not come from a header-based (compact) fetch packet or the C66x
+  extension table, and an MVC must name a control register the set has. The default (0) is the old
+  behaviour. Cause: NEW FIRMWARE 1.2-test15 carried two C64x `mvk .L1` words (gas without `-march`
+  for `zero .L1`) that the C66x core ran and that hung a real deck's DSP.
 
 JIT modules built by the upstream generator compile the upstream semantics; with these changes a
 module and the interpreter can differ on NaN and out-of-range conversions.

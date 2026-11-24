@@ -555,6 +555,9 @@ c66x_insn *fetch_insn(c66x_core *c, uint32_t a)
     if (!(b->valid & (1u << slot))) {
         c66x_insn *in = &b->insn[slot];
         c66x_decode(fp_reader, c, a, in, NULL, 0);
+        /* Local change (cdj2000-emulator, 24.11.2026): c66x_set_isa. */
+        if (c->isa && in->opc >= 0 && !c66x_insn_in_isa(in, c->isa))
+            in->opc = -1;
         in->handler = (in->opc >= 0 && in->opc < 2256) ? c->htab[in->opc] : H_UNIMP;
         classify(in);
         b->valid |= 1u << slot;

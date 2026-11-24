@@ -206,6 +206,7 @@ struct c66x_core {
     hook     hooks[NHOOK];
     uint32_t trap_pc;
     void    *trace_opaque;
+    unsigned isa;                   /* c66x_set_isa, 0 = all (local change) */
 
     uint16_t htab[2256];            /* binutils opcodes 0..1023, extension table from 2000 */
     /* busy-wait detection (c66x_set_idle_loop) */

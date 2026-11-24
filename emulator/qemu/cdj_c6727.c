@@ -45,6 +45,11 @@
  * which the core does not decode; a hook stands in for that function and
  * counts the values.
  *
+ * The core decodes the C67x+ instruction set only (C62x, C67x, C67x+): a
+ * C64x/C64x+/C674x/C66x word, a compact (header-based) fetch packet or an
+ * MVC to a control register the chip lacks is an undefined instruction, and
+ * the core stops at its packet with the PC and the word in the log.
+ *
  * Unmodelled DSP bus addresses read 0; the busiest are listed at exit.
  *
  *   CDJ_C6727_MHZ=<n>       DSP clock (default 300)
@@ -260,6 +265,10 @@ static void dsp_attach(CdjC6727 *s)
                     getenv("CDJ_C6X_RECORD"));
     }
 
+    /* The chip has no C64x/C64x+/C674x/C66x instruction: such a word stops
+     * the core where it would run (1.2-test15 hung a real deck on a C64x
+     * "mvk .L" that the C66x core executed). */
+    c66x_set_isa(core, C66X_ISA_C67XP);
     c66x_map_ram(core, IRAM_BASE, IRAM_SIZE, s->iram);
     c66x_map_ram(core, SDRAM_BASE, SDRAM_SIZE, s->sdram);
     c66x_hook_pc(core, CREG9_FUNC, creg9_hook, s);

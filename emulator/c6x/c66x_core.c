@@ -391,6 +391,7 @@ void c66x_set_pc(c66x_core *c, uint32_t pc) { c->pc = pc; c->nbr = 0; c->mcnop =
 uint32_t c66x_get_reg(const c66x_core *c, unsigned r) { return r < C66X_NREGS ? c->reg[r] : 0; }
 void c66x_set_reg(c66x_core *c, unsigned r, uint32_t v) { if (r < C66X_NREGS) c->reg[r] = v; }
 uint32_t c66x_trap_pc(const c66x_core *c) { return c->trap_pc; }
+void c66x_set_isa(c66x_core *c, unsigned isa) { c->isa = isa; }   /* local change */
 void c66x_get_stats(const c66x_core *c, c66x_stats *out) { *out = c->st; }
 void c66x_set_trace(c66x_core *c, c66x_trace_fn fn, void *opaque) { c->trace = fn; c->trace_opaque = opaque; }
 uint32_t c66x_get_exec_pc(const c66x_core *c) { return c->exec_pc; }

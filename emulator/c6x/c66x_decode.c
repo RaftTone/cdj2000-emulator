@@ -72,6 +72,22 @@ const char *c66x_ctrl_name(int ctrl)
 
 unsigned c66x_ctrl_crlo(int ctrl) { return tic6x_ctrl_table[ctrl].crlo; }
 
+/* Local change (cdj2000-emulator, 24.11.2026): see c66x_decode.h. The first
+ * table match decides, as in the disassembler: a C64x refinement of a C62x
+ * encoding is a word the older chips do not define. */
+bool c66x_insn_in_isa(const c66x_insn *in, unsigned isa)
+{
+    if (in->opc < 0 || in->opc >= tic6x_opcode_max || in->compact)
+        return false;
+    if (!(tic6x_opcode_table[in->opc].isa_variants & isa))
+        return false;
+    for (unsigned i = 0; i < in->nops; i++)
+        if (in->op[i].kind == C66X_OPK_CTRL
+            && !(tic6x_ctrl_table[in->op[i].val].isa_variants & isa))
+            return false;
+    return true;
+}
+
 static const tic6x_insn_field *field_from_fmt(const tic6x_insn_format *fmt,
                                               tic6x_insn_field_id field)
 {

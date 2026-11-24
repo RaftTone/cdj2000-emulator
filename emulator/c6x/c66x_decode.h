@@ -105,4 +105,12 @@ unsigned c66x_opcode_unit(int opc);      /* tic6x_func_unit_base      */
 const char *c66x_ctrl_name(int ctrl);
 unsigned c66x_ctrl_crlo(int ctrl);
 
+/* Local change (cdj2000-emulator, 24.11.2026, see VENDORED.md): whether a
+ * decoded instruction exists on a CPU whose ISA is isa (binutils
+ * TIC6X_INSN_* bits, as gas -march sets them; C66X_ISA_C67XP for the
+ * C6727). False for an undefined word, anything from a header-based (compact)
+ * fetch packet, the C66x extension table, an opcode no ISA in isa has, and an
+ * MVC naming a control register it lacks. */
+bool c66x_insn_in_isa(const c66x_insn *in, unsigned isa);
+
 #endif

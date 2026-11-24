@@ -66,6 +66,14 @@ uint32_t c66x_get_creg(const c66x_core *c, unsigned creg);
 void     c66x_set_creg(c66x_core *c, unsigned creg, uint32_t val);
 uint32_t c66x_trap_pc(const c66x_core *c);
 
+/* Local change (cdj2000-emulator, 24.11.2026, see VENDORED.md): decode only
+ * the instruction set isa (binutils TIC6X_INSN_* bits; 0 = everything the
+ * decoder knows, the default). Any other word is an undefined instruction:
+ * c66x_step returns C66X_STOP_UNDEF with c66x_trap_pc() at it when its packet
+ * is about to execute. Call before the first step. */
+#define C66X_ISA_C67XP 0x19u    /* C62X | C67X | C67XP: gas -march=c67x+ */
+void c66x_set_isa(c66x_core *c, unsigned isa);
+
 /* Counters since reset. A cycle is one E1 pipeline advance: an execute packet,
  * a NOP cycle, a stall or an interrupt-entry cycle. */
 typedef struct c66x_stats {

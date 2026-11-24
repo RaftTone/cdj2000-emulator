@@ -70,9 +70,10 @@ static bool host_stopped(CdjDspHost *h, c66x_stop stop)
     }
     h->trap_pc = c66x_trap_pc(h->core);
     h->running = false;
-    warn_report("%s: core stopped (%s) at 0x%08x", h->name,
+    uint8_t *word = h->ram(h->chip, h->trap_pc & ~3u);
+    warn_report("%s: core stopped (%s) at 0x%08x, word 0x%08x", h->name,
                 stop == C66X_STOP_UNDEF ? "undefined instruction" : "fault",
-                h->trap_pc);
+                h->trap_pc, word ? ldl_le_p(word) : 0);
     return true;
 }
 

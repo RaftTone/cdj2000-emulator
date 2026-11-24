@@ -1289,6 +1289,21 @@ apply. With it:
   not have): without it the virtual clock is the host's, holding MAIN only
   stalls its main loop, and the board ignores the setting with a warning.
 
+The core decodes the C67x+ instruction set only, as the chip does: a C64x,
+C64x+, C674x or C66x word (a unary `.L` such as `mvk .L`, a packed op, SPLOOP,
+a compact fetch packet, an MVC to a control register the C6727 lacks) stops it
+where it would run, with `c6727: core stopped (undefined instruction) at PC,
+word W` in the log. Compiled code (`C66X_JIT`) only runs where its bytes match
+the module, so this covers everything a module was not built from. The same
+rule, offline, for a build gate (exit 1 on a hit; `--stock` checks only the
+words that differ from stock 4.33, `--skip LO:HI` leaves out a data table):
+
+```
+cc -std=gnu11 -O2 -Iemulator/c6x tools/cdj_dsp/c67x_lint.c emulator/c6x/c66x_decode.c -o build/c67x-lint
+build/c67x-lint --stock firmware/main-unpacked.bin --app NEW/app.bin
+build/c67x-lint DSP.bin 0x80000000
+```
+
 A track load and PLAY on Windows, with the twoboard recipe above (the core
 kept up there with 0 ms of lag, the tap filled at 1.000x of guest time):
 
